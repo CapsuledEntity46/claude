@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>Forge.Cli</RootNamespace>
+    <AssemblyName>forge</AssemblyName>
+  </PropertyGroup>
+
+  <!--
+    Headless companion to the editor. Because Forge.Core carries no graphics dependency,
+    this tool builds and runs anywhere a .NET SDK exists - useful for CI map validation
+    and for inspecting geometry without a GPU.
+  -->
+  <ItemGroup>
+    <ProjectReference Include="../../src/Forge.Core/Forge.Core.csproj" />
+  </ItemGroup>
+
+</Project>

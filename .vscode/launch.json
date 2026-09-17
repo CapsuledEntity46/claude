@@ -1,0 +1,46 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Debug tests",
+      "type": "coreclr",
+      "request": "launch",
+      "preLaunchTask": "build",
+      "program": "${workspaceFolder}/tests/Forge.Core.Tests/bin/Debug/net9.0/Forge.Core.Tests.dll",
+      "args": [],
+      "cwd": "${workspaceFolder}",
+      "console": "internalConsole",
+      "stopAtEntry": false
+    },
+    {
+      "name": "Debug tests (filtered)",
+      "type": "coreclr",
+      "request": "launch",
+      "preLaunchTask": "build",
+      "program": "${workspaceFolder}/tests/Forge.Core.Tests/bin/Debug/net9.0/Forge.Core.Tests.dll",
+      "args": ["${input:testFilter}"],
+      "cwd": "${workspaceFolder}",
+      "console": "internalConsole",
+      "stopAtEntry": false
+    },
+    {
+      "name": "Debug forge CLI (demo)",
+      "type": "coreclr",
+      "request": "launch",
+      "preLaunchTask": "build",
+      "program": "${workspaceFolder}/tools/Forge.Cli/bin/Debug/net9.0/forge.dll",
+      "args": ["demo", "${workspaceFolder}/build/demo"],
+      "cwd": "${workspaceFolder}",
+      "console": "internalConsole",
+      "stopAtEntry": false
+    }
+  ],
+  "inputs": [
+    {
+      "id": "testFilter",
+      "type": "promptString",
+      "description": "Test name filter",
+      "default": "Csg"
+    }
+  ]
+}

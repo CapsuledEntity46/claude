@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>Forge.Tests</RootNamespace>
+    <AssemblyName>Forge.Core.Tests</AssemblyName>
+  </PropertyGroup>
+
+  <!--
+    Deliberately not xunit/nunit. Forge.Core has no third-party dependencies and the
+    test suite keeps that property, so the geometry kernel can be verified anywhere a
+    .NET SDK exists - including CI images with no NuGet access.
+  -->
+  <ItemGroup>
+    <ProjectReference Include="../../src/Forge.Core/Forge.Core.csproj" />
+  </ItemGroup>
+
+</Project>

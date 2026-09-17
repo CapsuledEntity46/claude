@@ -1,0 +1,25 @@
+<Project>
+
+  <!--
+    Shared build settings for every project in the Forge engine.
+    net9.0 is what current MonoGame (3.8.5, July 2026) targets:
+    https://docs.monogame.net/articles/migration/migrate_38.html
+  -->
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <LangVersion>12.0</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <InvariantGlobalization>true</InvariantGlobalization>
+
+    <!-- Geometry code is numeric and hot; keep the JIT unshackled. -->
+    <AllowUnsafeBlocks>false</AllowUnsafeBlocks>
+    <Deterministic>true</Deterministic>
+
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+    <WarningLevel>5</WarningLevel>
+  </PropertyGroup>
+
+</Project>

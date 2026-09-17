@@ -1,0 +1,89 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "build",
+      "command": "dotnet",
+      "type": "process",
+      "args": ["build", "${workspaceFolder}/Forge.sln", "-consoleloggerparameters:NoSummary"],
+      "problemMatcher": "$msCompile",
+      "group": { "kind": "build", "isDefault": true }
+    },
+    {
+      "label": "test",
+      "detail": "Run the zero-dependency geometry/CSG/format test suite",
+      "command": "dotnet",
+      "type": "process",
+      "args": ["run", "--project", "${workspaceFolder}/tests/Forge.Core.Tests/Forge.Core.Tests.csproj"],
+      "problemMatcher": "$msCompile",
+      "group": { "kind": "test", "isDefault": true }
+    },
+    {
+      "label": "test (filtered)",
+      "detail": "Run only tests whose name matches a substring",
+      "command": "dotnet",
+      "type": "process",
+      "args": [
+        "run",
+        "--project",
+        "${workspaceFolder}/tests/Forge.Core.Tests/Forge.Core.Tests.csproj",
+        "--",
+        "${input:testFilter}"
+      ],
+      "problemMatcher": "$msCompile"
+    },
+    {
+      "label": "demo",
+      "detail": "Run the full authoring pipeline and report measured results",
+      "command": "dotnet",
+      "type": "process",
+      "args": [
+        "run",
+        "--project",
+        "${workspaceFolder}/tools/Forge.Cli/Forge.Cli.csproj",
+        "--",
+        "demo",
+        "${workspaceFolder}/build/demo"
+      ],
+      "problemMatcher": "$msCompile"
+    },
+    {
+      "label": "validate sample map",
+      "command": "dotnet",
+      "type": "process",
+      "args": [
+        "run",
+        "--project",
+        "${workspaceFolder}/tools/Forge.Cli/Forge.Cli.csproj",
+        "--",
+        "validate",
+        "${workspaceFolder}/content/maps/testroom.tmap"
+      ],
+      "problemMatcher": "$msCompile"
+    },
+    {
+      "label": "export sample map to OBJ",
+      "detail": "Writes build/testroom.obj, openable in any 3D viewer",
+      "command": "dotnet",
+      "type": "process",
+      "args": [
+        "run",
+        "--project",
+        "${workspaceFolder}/tools/Forge.Cli/Forge.Cli.csproj",
+        "--",
+        "obj",
+        "${workspaceFolder}/content/maps/testroom.tmap",
+        "${workspaceFolder}/build/testroom.obj"
+      ],
+      "problemMatcher": "$msCompile"
+    }
+  ],
+  "inputs": [
+    {
+      "id": "testFilter",
+      "type": "promptString",
+      "description": "Test name filter (e.g. Csg, Winding, RoundTrip)",
+      "default": "Csg"
+    }
+  ]
+}

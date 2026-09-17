@@ -1,0 +1,21 @@
+{
+  "dotnet.defaultSolution": "Forge.sln",
+  "editor.formatOnSave": true,
+  "files.trimTrailingWhitespace": true,
+  "files.insertFinalNewline": true,
+  "files.associations": {
+    "*.tmap": "properties",
+    "*.fgd": "properties",
+    "*.fx": "hlsl",
+    "*.fxh": "hlsl"
+  },
+  "files.exclude": {
+    "**/bin": true,
+    "**/obj": true
+  },
+  "search.exclude": {
+    "**/bin": true,
+    "**/obj": true,
+    "**/build": true
+  }
+}

@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>Forge</RootNamespace>
+    <AssemblyName>Forge.Core</AssemblyName>
+  </PropertyGroup>
+
+  <!--
+    IMPORTANT: Forge.Core must stay free of third-party dependencies.
+    It is the solid-geometry / CSG / map-format heart of the engine and is
+    consumed by the editor, the runtime, and the headless map compiler alike.
+    Keeping it dependency-free means it can be unit tested without a GPU,
+    a window, or a content pipeline. Do not add MonoGame here.
+  -->
+  <ItemGroup />
+
+</Project>

@@ -1,0 +1,34 @@
+## .NET / MSBuild
+bin/
+obj/
+[Dd]ebug/
+[Rr]elease/
+x64/
+x86/
+*.user
+*.suo
+*.userprefs
+*.dll
+*.exe
+*.pdb
+*.cache
+artifacts/
+
+## Rider / VS
+.idea/
+.vs/
+
+## MonoGame content pipeline intermediates
+Content/bin/
+Content/obj/
+*.mgstats
+
+## Forge build output
+build/
+out/
+compiled/
+*.fmap
+
+## OS
+.DS_Store
+Thumbs.db

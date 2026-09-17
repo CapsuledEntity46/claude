@@ -1,0 +1,507 @@
+import { Block, PLACEABLE, blockDef } from '../world/blocks';
+import type {
+  AmmoType,
+  ArmorDef,
+  AttackMode,
+  ConsumableDef,
+  DamageType,
+  MeleeAttack,
+  RangedProfile,
+  ShieldDef,
+  SpellDef,
+  WeaponDef,
+} from './types';
+
+export type ItemKind = 'weapon' | 'armor' | 'shield' | 'spell' | 'block' | 'consumable' | 'ammo';
+
+export interface ItemDef {
+  id: string;
+  name: string;
+  kind: ItemKind;
+  glyph: string;
+  /** Rough power level, used to gate loot behind enemy level. */
+  tier: number;
+  stackable: boolean;
+  maxStack: number;
+  /** One-line flavour + mechanical hint shown in the sheet. */
+  blurb: string;
+  weapon?: WeaponDef;
+  armor?: ArmorDef;
+  shield?: ShieldDef;
+  spell?: SpellDef;
+  consumable?: ConsumableDef;
+  ammo?: AmmoType;
+  block?: Block;
+}
+
+// ------------------------------------------------------------------ melee builders
+
+interface MeleeOpts {
+  type?: DamageType;
+  arcDeg?: number;
+  windup?: number;
+  recovery?: number;
+  stamina?: number;
+  armorPierce?: number;
+  maxTargets?: number;
+  knockback?: number;
+}
+
+/**
+ * A swing sweeps a wide arc and lands slashing or bludgeoning force. It barely
+ * bypasses armour, so it is at its best against soft targets — or against plate,
+ * if the weapon is blunt.
+ */
+function swing(damage: number, reach: number, o: MeleeOpts = {}): MeleeAttack {
+  return {
+    mode: 'swing',
+    damage,
+    type: o.type ?? 'slash',
+    reach,
+    arcDeg: o.arcDeg ?? 55,
+    windup: o.windup ?? 0.22,
+    recovery: o.recovery ?? 0.3,
+    stamina: o.stamina ?? 8,
+    armorPierce: o.armorPierce ?? 0.1,
+    maxTargets: o.maxTargets ?? 3,
+    knockback: o.knockback ?? 4.5,
+  };
+}
+
+/**
+ * A thrust commits along a narrow line: less damage spread, more reach, and it
+ * bypasses roughly half the target's flat armour. The answer to iron plate when
+ * you have no blunt weapon in the bag.
+ */
+function thrust(damage: number, reach: number, o: MeleeOpts = {}): MeleeAttack {
+  return {
+    mode: 'thrust',
+    damage,
+    type: o.type ?? 'pierce',
+    reach,
+    arcDeg: o.arcDeg ?? 13,
+    windup: o.windup ?? 0.16,
+    recovery: o.recovery ?? 0.24,
+    stamina: o.stamina ?? 6,
+    armorPierce: o.armorPierce ?? 0.5,
+    maxTargets: o.maxTargets ?? 1,
+    knockback: o.knockback ?? 2.5,
+  };
+}
+
+function melee(name: string, glyph: string, tier: number, attacks: MeleeAttack[], blurb: string, twoHanded = false): ItemDef {
+  return {
+    id: name.toLowerCase().replace(/[^a-z]+/g, '_'),
+    name,
+    kind: 'weapon',
+    glyph,
+    tier,
+    stackable: false,
+    maxStack: 1,
+    blurb,
+    weapon: { class: 'melee', melee: attacks, twoHanded },
+  };
+}
+
+// ------------------------------------------------------------------ ranged builders
+
+function ranged(p: Partial<RangedProfile> & { damage: number; ammo: AmmoType }): RangedProfile {
+  return {
+    damage: p.damage,
+    type: p.type ?? 'pierce',
+    ammo: p.ammo,
+    speed: p.speed ?? 48,
+    gravity: p.gravity ?? 1,
+    spreadDeg: p.spreadDeg ?? 0.6,
+    drawTime: p.drawTime ?? 0,
+    reloadTime: p.reloadTime ?? 0,
+    magazine: p.magazine ?? 1,
+    pellets: p.pellets ?? 1,
+    armorPierce: p.armorPierce ?? 0.25,
+    knockback: p.knockback ?? 3,
+    muzzleFlash: p.muzzleFlash ?? false,
+    aoeRadius: p.aoeRadius ?? 0,
+    blockDamage: p.blockDamage ?? 0,
+    fuse: p.fuse ?? 0,
+    cooldown: p.cooldown ?? 0.35,
+  };
+}
+
+function rangedItem(
+  name: string,
+  glyph: string,
+  tier: number,
+  cls: 'bow' | 'crossbow' | 'firearm' | 'thrown',
+  profile: RangedProfile,
+  blurb: string,
+  twoHanded = true,
+  meleeFallback: MeleeAttack[] = [swing(2, 2.2, { type: 'blunt', stamina: 6, maxTargets: 1 })],
+): ItemDef {
+  return {
+    id: name.toLowerCase().replace(/[^a-z]+/g, '_'),
+    name,
+    kind: 'weapon',
+    glyph,
+    tier,
+    stackable: false,
+    maxStack: 1,
+    blurb,
+    weapon: { class: cls, melee: meleeFallback, ranged: profile, twoHanded },
+  };
+}
+
+// ------------------------------------------------------------------ registry
+
+const defs: ItemDef[] = [];
+
+// --- Melee: attack modes follow the weapon's shape -------------------------
+
+defs.push(
+  melee('Fists', '👊', 0, [swing(2, 2.0, { type: 'blunt', stamina: 4, maxTargets: 1, windup: 0.12, recovery: 0.18, knockback: 2 })],
+    'No edge, no point. Only knuckles.'),
+
+  melee('Dagger', '🗡️', 1, [
+    thrust(5, 2.4, { windup: 0.1, recovery: 0.16, stamina: 4, armorPierce: 0.6 }),
+    swing(4, 2.2, { windup: 0.12, recovery: 0.18, stamina: 4, maxTargets: 1 }),
+  ], 'Point and edge both, but neither has any mass behind it.'),
+
+  melee('Shortsword', '⚔️', 2, [
+    swing(8, 2.9, { }),
+    thrust(7, 3.6, { }),
+  ], 'A blade is sharp along the sides and pointed at the tip, so it can do both.'),
+
+  melee('Longsword', '⚔️', 4, [
+    swing(13, 3.3, { windup: 0.28, recovery: 0.34, stamina: 11 }),
+    thrust(11, 4.1, { windup: 0.2, recovery: 0.3, stamina: 9, armorPierce: 0.55 }),
+  ], 'Heavy enough to cleave, long enough to reach. The generalist.', true),
+
+  melee('Rapier', '🤺', 3, [
+    thrust(11, 4.3, { windup: 0.14, recovery: 0.2, stamina: 6, armorPierce: 0.68 }),
+  ], 'All point, no cutting edge worth the name. Thrust only — but it finds gaps in plate.'),
+
+  melee('Spear', '🔻', 3, [
+    thrust(12, 5.0, { windup: 0.2, recovery: 0.3, stamina: 8, armorPierce: 0.55, knockback: 5 }),
+  ], 'A point on a pole. Nothing to swing with, but nothing else reaches this far.', true),
+
+  melee('Mace', '🔨', 3, [
+    swing(12, 2.8, { type: 'blunt', windup: 0.26, recovery: 0.34, stamina: 10, armorPierce: 0.05, knockback: 6 }),
+  ], 'Blunt all over, so it can only swing — and plate armour does nothing against it.'),
+
+  melee('Warhammer', '⚒️', 5, [
+    swing(19, 3.0, { type: 'blunt', windup: 0.4, recovery: 0.46, stamina: 15, armorPierce: 0.05, knockback: 9, maxTargets: 2 }),
+  ], 'Slow, exhausting, and it turns an armoured knight into a sack of broken parts.', true),
+
+  melee('Battleaxe', '🪓', 4, [
+    swing(16, 3.1, { windup: 0.34, recovery: 0.4, stamina: 13, maxTargets: 4, knockback: 6 }),
+  ], 'A wedge on a handle. No tip to thrust with, but it sweeps through a crowd.', true),
+
+  melee('Halberd', '🔱', 5, [
+    swing(15, 3.6, { windup: 0.36, recovery: 0.42, stamina: 13, maxTargets: 3, knockback: 6 }),
+    thrust(14, 5.2, { windup: 0.24, recovery: 0.32, stamina: 10, armorPierce: 0.6, knockback: 5 }),
+  ], 'An axe head and a spike on the same shaft, so it genuinely does both jobs.', true),
+);
+
+// --- Ranged -----------------------------------------------------------------
+
+defs.push(
+  rangedItem('Shortbow', '🏹', 1, 'bow',
+    ranged({ damage: 8, ammo: 'arrow', speed: 44, drawTime: 0.55, spreadDeg: 1.4, armorPierce: 0.3, cooldown: 0.15 }),
+    'Draw to charge. Loose early and the arrow barely bites.'),
+
+  rangedItem('Longbow', '🏹', 4, 'bow',
+    ranged({ damage: 15, ammo: 'arrow', speed: 62, drawTime: 0.95, spreadDeg: 0.8, armorPierce: 0.38, knockback: 4, cooldown: 0.2 }),
+    'A full draw takes a second and rewards you for it.'),
+
+  rangedItem('Crossbow', '🎯', 3, 'crossbow',
+    ranged({ damage: 20, ammo: 'bolt', speed: 78, gravity: 0.55, reloadTime: 1.9, spreadDeg: 0.3, armorPierce: 0.62, knockback: 5, cooldown: 0.1 }),
+    'Held at full tension, so it fires the instant you pull. Then the long crank back.'),
+
+  rangedItem('Flintlock Pistol', '🔫', 3, 'firearm',
+    ranged({ damage: 22, ammo: 'shot', type: 'pierce', speed: 150, gravity: 0.12, reloadTime: 2.1, spreadDeg: 2.2, armorPierce: 0.5, knockback: 6, muzzleFlash: true, cooldown: 0.1 }),
+    'One ball, one shot, then twenty seconds of regret. Loud enough to draw a crowd.', false),
+
+  rangedItem('Musket', '🔫', 5, 'firearm',
+    ranged({ damage: 38, ammo: 'shot', type: 'pierce', speed: 200, gravity: 0.08, reloadTime: 3.1, spreadDeg: 0.9, armorPierce: 0.66, knockback: 9, muzzleFlash: true, cooldown: 0.1 }),
+    'Punches straight through plate. If you miss, you had better have a sword.'),
+
+  rangedItem('Blunderbuss', '💥', 4, 'firearm',
+    ranged({ damage: 11, ammo: 'shot', type: 'pierce', speed: 120, gravity: 0.2, reloadTime: 2.8, spreadDeg: 9, pellets: 6, armorPierce: 0.2, knockback: 7, muzzleFlash: true, cooldown: 0.1 }),
+    'Six pellets in a cone. Devastating at spitting distance, useless past ten paces.'),
+
+  {
+    id: 'grenade',
+    name: 'Grenade',
+    kind: 'weapon',
+    glyph: '💣',
+    tier: 3,
+    stackable: true,
+    maxStack: 12,
+    blurb: 'Lit fuse, three seconds, then it rearranges the terrain.',
+    weapon: {
+      class: 'thrown',
+      twoHanded: false,
+      melee: [],
+      ranged: ranged({
+        damage: 34, ammo: 'none', type: 'explosive', speed: 22, gravity: 1.4,
+        fuse: 2.6, aoeRadius: 4.5, blockDamage: 2.6, armorPierce: 0.35,
+        knockback: 12, spreadDeg: 0, cooldown: 0.7,
+      }),
+    },
+  },
+);
+
+// --- Ammo -------------------------------------------------------------------
+
+function ammoItem(id: string, name: string, glyph: string, type: AmmoType, tier: number, blurb: string): ItemDef {
+  return { id, name, kind: 'ammo', glyph, tier, stackable: true, maxStack: 99, blurb, ammo: type };
+}
+
+defs.push(
+  ammoItem('arrow', 'Arrow', '➶', 'arrow', 1, 'Fletched shaft. Works in any bow.'),
+  ammoItem('bolt', 'Bolt', '➵', 'bolt', 2, 'Short, heavy, and made to punch holes.'),
+  ammoItem('shot', 'Lead Shot', '⚫', 'shot', 3, 'Ball and powder, packaged together.'),
+);
+
+// --- Armour: exactly the three tiers, with an honest weakness each ----------
+
+defs.push(
+  {
+    id: 'quilted_armor',
+    name: 'Quilted Armor',
+    kind: 'armor',
+    glyph: '🧥',
+    tier: 1,
+    stackable: false,
+    maxStack: 1,
+    blurb: 'Layered cloth. Softens a club, does nothing against a point.',
+    // Padding is soft, so it genuinely absorbs impact — but a spear goes
+    // straight through it, and it burns.
+    armor: {
+      armor: 2,
+      resist: { slash: 0.1, pierce: 0, blunt: 0.25, fire: -0.2 },
+      weight: 0.5,
+    },
+  },
+  {
+    id: 'leather_armor',
+    name: 'Leather Armor',
+    kind: 'armor',
+    glyph: '🥼',
+    tier: 3,
+    stackable: false,
+    maxStack: 1,
+    blurb: 'Boiled hide. Turns edges aside and stays light enough to run in.',
+    armor: {
+      armor: 4,
+      resist: { slash: 0.3, pierce: 0.1, blunt: 0.15 },
+      armorFactor: { blunt: 0.85 },
+      weight: 1.1,
+    },
+  },
+  {
+    id: 'iron_plate',
+    name: 'Iron Plate',
+    kind: 'armor',
+    glyph: '🛡️',
+    tier: 6,
+    stackable: false,
+    maxStack: 1,
+    blurb: 'Nothing better against blades. But it transmits a hammer blow straight to the wearer.',
+    // Deliberately the worst armour in the game against blunt force. The low
+    // blunt armorFactor is what does the real work: rigid plate does not absorb
+    // impact, so its large flat armour value barely applies to a mace.
+    armor: {
+      armor: 7,
+      resist: { slash: 0.45, pierce: 0.35, blunt: -0.25, magic: 0.05 },
+      armorFactor: { blunt: 0.25 },
+      weight: 3.2,
+    },
+  },
+);
+
+// --- Shields ----------------------------------------------------------------
+
+defs.push(
+  {
+    id: 'wooden_buckler',
+    name: 'Wooden Buckler',
+    kind: 'shield',
+    glyph: '🛡',
+    tier: 1,
+    stackable: false,
+    maxStack: 1,
+    blurb: 'Small and quick. Narrow cover, cheap to hold up.',
+    shield: { absorb: 0.5, coneDeg: 60, guard: 30, guardPerHit: 9, weight: 0.4 },
+  },
+  {
+    id: 'iron_kite_shield',
+    name: 'Iron Kite Shield',
+    kind: 'shield',
+    glyph: '🛡',
+    tier: 4,
+    stackable: false,
+    maxStack: 1,
+    blurb: 'Broad cover and a deep guard meter.',
+    shield: { absorb: 0.7, coneDeg: 85, guard: 60, guardPerHit: 11, weight: 1.4 },
+  },
+  {
+    id: 'tower_shield',
+    name: 'Tower Shield',
+    kind: 'shield',
+    glyph: '🛡',
+    tier: 6,
+    stackable: false,
+    maxStack: 1,
+    blurb: 'A wall you carry. Almost nothing gets through the front.',
+    shield: { absorb: 0.85, coneDeg: 100, guard: 95, guardPerHit: 12, weight: 2.6 },
+  },
+);
+
+// --- Spells -----------------------------------------------------------------
+
+function spellItem(
+  id: string,
+  name: string,
+  glyph: string,
+  blurb: string,
+  spell: Partial<SpellDef> & { tier: 1 | 2 | 3; kind: SpellDef['kind'] },
+): ItemDef {
+  return {
+    id,
+    name,
+    kind: 'spell',
+    glyph,
+    tier: spell.tier * 2,
+    stackable: false,
+    maxStack: 1,
+    blurb,
+    spell: {
+      tier: spell.tier,
+      kind: spell.kind,
+      damage: spell.damage ?? 0,
+      type: spell.type ?? 'magic',
+      castTime: spell.castTime ?? 0.35,
+      cooldown: spell.cooldown ?? 0.7,
+      speed: spell.speed ?? 0,
+      radius: spell.radius ?? 0,
+      range: spell.range ?? 30,
+      targets: spell.targets ?? 1,
+      amount: spell.amount ?? 0,
+      duration: spell.duration ?? 0,
+      blockDamage: spell.blockDamage ?? 0,
+      armorPierce: spell.armorPierce ?? 0.3,
+    },
+  };
+}
+
+defs.push(
+  spellItem('firebolt', 'Firebolt', '🔥', 'A dart of flame. Cheap, fast, reliable.', {
+    tier: 1, kind: 'projectile', damage: 14, type: 'fire', speed: 34, castTime: 0.25, cooldown: 0.5, armorPierce: 0.4,
+  }),
+  spellItem('frost_shard', 'Frost Shard', '❄️', 'Piercing ice that leaves the target sluggish.', {
+    tier: 1, kind: 'projectile', damage: 11, type: 'pierce', speed: 40, castTime: 0.28, cooldown: 0.55, duration: 2.5, armorPierce: 0.5,
+  }),
+  spellItem('mend', 'Mend', '✨', 'Closes your own wounds. Costs a slot, not blood.', {
+    tier: 1, kind: 'heal', amount: 18, castTime: 0.7, cooldown: 1.2,
+  }),
+  spellItem('arcane_nova', 'Arcane Nova', '🌀', 'A shockwave centred on you. Clears a swarm off your back.', {
+    tier: 2, kind: 'nova', damage: 22, radius: 6.5, castTime: 0.45, cooldown: 1.0, armorPierce: 0.45,
+  }),
+  spellItem('chain_lightning', 'Chain Lightning', '⚡', 'Leaps between up to four foes.', {
+    tier: 2, kind: 'chain', damage: 19, radius: 8, targets: 4, range: 24, castTime: 0.4, cooldown: 1.1, armorPierce: 0.6,
+  }),
+  spellItem('stoneskin', 'Stoneskin', '🪨', 'Hardens your hide for a while. Stacks with worn armour.', {
+    tier: 2, kind: 'ward', amount: 6, duration: 18, castTime: 0.6, cooldown: 1.5,
+  }),
+  spellItem('meteor', 'Meteor', '☄️', 'Calls down a rock. Kills crowds and remodels the landscape.', {
+    tier: 3, kind: 'meteor', damage: 70, type: 'explosive', radius: 7, range: 42, castTime: 1.1, cooldown: 3, blockDamage: 4, armorPierce: 0.4,
+  }),
+);
+
+// --- Consumables ------------------------------------------------------------
+
+defs.push(
+  {
+    id: 'healing_draught',
+    name: 'Healing Draught',
+    kind: 'consumable',
+    glyph: '🧪',
+    tier: 1,
+    stackable: true,
+    maxStack: 8,
+    blurb: 'Restores 25 health.',
+    consumable: { heal: 25, restoreTier: 0, stamina: 0 },
+  },
+  {
+    id: 'mana_tonic',
+    name: 'Mana Tonic',
+    kind: 'consumable',
+    glyph: '⚗️',
+    tier: 3,
+    stackable: true,
+    maxStack: 8,
+    blurb: 'Refills one tier-1 or tier-2 spell slot.',
+    consumable: { heal: 0, restoreTier: 2, stamina: 0 },
+  },
+  {
+    id: 'ration',
+    name: 'Ration',
+    kind: 'consumable',
+    glyph: '🍖',
+    tier: 1,
+    stackable: true,
+    maxStack: 16,
+    blurb: 'Restores stamina and a little health.',
+    consumable: { heal: 6, restoreTier: 0, stamina: 60 },
+  },
+);
+
+// --- Placeable blocks (generated from the block registry) -------------------
+
+for (const b of PLACEABLE) {
+  const bd = blockDef(b);
+  defs.push({
+    id: `block_${bd.name.toLowerCase().replace(/[^a-z]+/g, '_')}`,
+    name: bd.name,
+    kind: 'block',
+    glyph: bd.glyph,
+    tier: 1,
+    stackable: true,
+    maxStack: 99,
+    blurb: 'Building material.',
+    block: b,
+  });
+}
+
+export const ITEMS: ReadonlyMap<string, ItemDef> = new Map(defs.map((d) => [d.id, d]));
+
+export function item(id: string): ItemDef {
+  const found = ITEMS.get(id);
+  if (!found) throw new Error(`Unknown item id: ${id}`);
+  return found;
+}
+
+export function tryItem(id: string): ItemDef | undefined {
+  return ITEMS.get(id);
+}
+
+/** Maps a block id back to its inventory item, for mining drops. */
+export function itemForBlock(block: Block): ItemDef | undefined {
+  for (const d of ITEMS.values()) if (d.kind === 'block' && d.block === block) return d;
+  return undefined;
+}
+
+export function ammoItemFor(type: AmmoType): ItemDef | undefined {
+  if (type === 'none') return undefined;
+  for (const d of ITEMS.values()) if (d.kind === 'ammo' && d.ammo === type) return d;
+  return undefined;
+}
+
+/** Human-readable summary of an attack mode, for the HUD. */
+export function describeMode(a: MeleeAttack): string {
+  const label: Record<AttackMode, string> = { swing: 'Swing', thrust: 'Thrust' };
+  const pierce = a.armorPierce >= 0.4 ? ` · ${Math.round(a.armorPierce * 100)}% armor pierce` : '';
+  return `${label[a.mode]} · ${a.damage} ${a.type}${pierce}`;
+}
+
+export const ALL_ITEM_IDS: readonly string[] = defs.map((d) => d.id);

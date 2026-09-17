@@ -1,0 +1,275 @@
+:root {
+  --ink: #e8e2d4;
+  --panel: rgba(14, 12, 18, 0.86);
+  --edge: #4a4436;
+  --gold: #d8b25a;
+  --hp: #c0392b;
+  --sta: #2e9e5b;
+  --grd: #4a7fc1;
+  --xp: #b06fd0;
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  overflow: hidden;
+  background: #10131a;
+  color: var(--ink);
+  user-select: none;
+}
+
+canvas#game { display: block; width: 100vw; height: 100vh; }
+
+.hidden { display: none !important; }
+
+/* ---------- crosshair ---------- */
+#crosshair {
+  position: fixed;
+  left: 50%; top: 50%;
+  width: 18px; height: 18px;
+  margin: -9px 0 0 -9px;
+  pointer-events: none;
+  opacity: 0.8;
+  z-index: 5;
+}
+#crosshair::before, #crosshair::after {
+  content: ""; position: absolute; background: #fff;
+  box-shadow: 0 0 2px #000;
+}
+#crosshair::before { left: 8px; top: 0; width: 2px; height: 18px; }
+#crosshair::after { top: 8px; left: 0; height: 2px; width: 18px; }
+#crosshair.charging::before, #crosshair.charging::after { background: var(--gold); }
+
+/* ---------- vitals ---------- */
+#vitals {
+  position: fixed; left: 16px; bottom: 16px; z-index: 10;
+  display: flex; flex-direction: column; gap: 5px;
+  pointer-events: none;
+}
+.bar-row { display: flex; align-items: center; gap: 6px; }
+.bar-label { font-size: 10px; width: 26px; opacity: 0.65; letter-spacing: 0.5px; }
+.bar {
+  position: relative; width: 210px; height: 15px;
+  background: rgba(0,0,0,0.6);
+  border: 1px solid var(--edge);
+  overflow: hidden;
+}
+.bar .fill { height: 100%; width: 100%; transition: width 90ms linear; }
+.bar.hp .fill { background: linear-gradient(#e05a4a, var(--hp)); }
+.bar.sta { width: 150px; height: 9px; }
+.bar.sta .fill { background: linear-gradient(#49c97c, var(--sta)); }
+.bar.grd { width: 150px; height: 9px; }
+.bar.grd .fill { background: linear-gradient(#6ba3e8, var(--grd)); }
+.bar-text {
+  position: absolute; inset: 0;
+  font-size: 10px; line-height: 15px; text-align: center;
+  text-shadow: 0 1px 2px #000;
+}
+
+#spell-slots { display: flex; gap: 5px; margin-top: 4px; }
+.slot-tier { display: flex; align-items: center; gap: 3px; margin-right: 8px; }
+.slot-tier .tier-label { font-size: 9px; opacity: 0.5; }
+.pip {
+  width: 11px; height: 11px;
+  border: 1px solid #6d5aa0;
+  background: rgba(0,0,0,0.5);
+  transform: rotate(45deg);
+}
+.pip.full { background: #a56fe0; box-shadow: 0 0 6px #a56fe0; }
+
+/* ---------- hotbar ---------- */
+#hotbar-wrap {
+  position: fixed; left: 50%; bottom: 16px; transform: translateX(-50%);
+  z-index: 10; display: flex; flex-direction: column; align-items: center; gap: 5px;
+  pointer-events: none;
+}
+#xp-bar {
+  position: relative; width: 396px; height: 11px;
+  background: rgba(0,0,0,0.6); border: 1px solid var(--edge);
+}
+#xp-bar .fill { height: 100%; background: linear-gradient(#c98ce8, var(--xp)); transition: width 140ms; }
+#xp-bar span {
+  position: absolute; inset: 0; font-size: 9px; line-height: 11px;
+  text-align: center; text-shadow: 0 1px 2px #000;
+}
+#hotbar { display: flex; gap: 4px; }
+.hs {
+  position: relative; width: 46px; height: 46px;
+  background: var(--panel); border: 2px solid var(--edge);
+  display: flex; align-items: center; justify-content: center;
+  font-size: 20px;
+}
+.hs.active { border-color: var(--gold); box-shadow: 0 0 10px rgba(216,178,90,0.5); }
+.hs .key { position: absolute; top: 1px; left: 3px; font-size: 9px; opacity: 0.5; }
+/* Fallback letter codes, used when no colour emoji font is available. */
+.hs .glyph-text, .bag-item.glyph-text {
+  font-size: 13px; letter-spacing: 0.5px; color: var(--gold); font-weight: bold;
+}
+.hs .qty { position: absolute; bottom: 1px; right: 3px; font-size: 10px; color: var(--gold); }
+.hs .cd {
+  position: absolute; inset: 0; background: rgba(0,0,0,0.62);
+  transform-origin: bottom; pointer-events: none;
+}
+#active-info { display: flex; gap: 10px; font-size: 11px; align-items: baseline; }
+#active-name { color: var(--gold); }
+#active-mode { opacity: 0.7; font-size: 10px; }
+
+/* ---------- status ---------- */
+/* The HUD sits over both bright sky and dark caves, so plain text with a shadow
+   is not reliably legible. A translucent panel plus a hard shadow works against
+   any background. */
+#status {
+  position: fixed; right: 10px; top: 10px; z-index: 10;
+  text-align: right; font-size: 11px; line-height: 1.65;
+  pointer-events: none;
+  color: #f2ede0;
+  text-shadow: 0 1px 3px #000, 0 0 6px rgba(0, 0, 0, 0.9);
+  background: rgba(10, 9, 14, 0.42);
+  padding: 6px 9px;
+  border: 1px solid rgba(74, 68, 54, 0.5);
+}
+
+/* ---------- combat log ---------- */
+#log {
+  position: fixed; left: 16px; top: 12px; z-index: 10;
+  width: 340px; font-size: 11px; line-height: 1.55;
+  pointer-events: none;
+  text-shadow: 0 1px 3px #000, 0 0 5px rgba(0, 0, 0, 0.95);
+}
+#log div {
+  background: rgba(10, 9, 14, 0.4);
+  padding: 1px 6px;
+  margin-bottom: 2px;
+  width: fit-content;
+  max-width: 100%;
+}
+#log div { opacity: 0; animation: logIn 200ms forwards; }
+#log div.fade { animation: logOut 700ms forwards; }
+@keyframes logIn { to { opacity: 0.9; } }
+@keyframes logOut { from { opacity: 0.9; } to { opacity: 0; } }
+.log-hit { color: #ffd9a0; }
+.log-crit { color: #ff9d5c; font-weight: bold; }
+.log-hurt { color: #ff8a7a; }
+.log-good { color: #9ce8a8; }
+.log-info { color: #b9c6d8; }
+.log-magic { color: #c9a0ff; }
+
+/* ---------- floating numbers ---------- */
+#floaters { position: fixed; inset: 0; pointer-events: none; z-index: 8; overflow: hidden; }
+.floater {
+  position: absolute; font-size: 15px; font-weight: bold;
+  text-shadow: 0 2px 4px #000; animation: floatUp 900ms ease-out forwards;
+  transform: translate(-50%, -50%);
+}
+.floater.crit { font-size: 21px; color: #ff9d5c; }
+.floater.hurt { color: #ff6a5a; }
+.floater.dmg { color: #ffe2b0; }
+.floater.block { color: #8fc0f0; font-size: 13px; }
+.floater.xp { color: #d5a0ff; font-size: 12px; }
+.floater.heal { color: #8ce89c; }
+@keyframes floatUp {
+  0% { opacity: 1; }
+  100% { opacity: 0; transform: translate(-50%, -230%); }
+}
+
+/* ---------- character sheet ---------- */
+#sheet {
+  position: fixed; inset: 0; z-index: 30;
+  background: rgba(4, 5, 8, 0.9);
+  display: flex; align-items: center; justify-content: center;
+}
+
+/* Active attack mode marker, drawn with borders rather than a glyph so it does
+   not depend on font coverage. */
+.mode-marker {
+  width: 0; height: 0; margin-left: 2px;
+  border-left: 7px solid var(--gold);
+  border-top: 5px solid transparent;
+  border-bottom: 5px solid transparent;
+}
+.sheet-inner {
+  width: min(940px, 94vw); max-height: 88vh; overflow: auto;
+  /* Opaque on purpose: a translucent panel lets the hotbar and the 3D scene
+     show through behind the text, which reads as visual noise. */
+  background: #14121a;
+  border: 2px solid var(--edge);
+  padding: 18px 20px;
+}
+.sheet-inner header { display: flex; justify-content: space-between; align-items: center; }
+.sheet-inner h1 { font-size: 18px; margin: 0 0 4px; color: var(--gold); letter-spacing: 1px; }
+#sheet-close {
+  background: none; border: 1px solid var(--edge); color: var(--ink);
+  font-size: 18px; width: 30px; height: 30px; cursor: pointer;
+}
+.sheet-cols { display: grid; grid-template-columns: 1fr 1fr 1.15fr; gap: 18px; margin-top: 14px; }
+.sheet-cols h2 {
+  font-size: 12px; text-transform: uppercase; letter-spacing: 1.4px;
+  opacity: 0.6; margin: 0 0 8px; border-bottom: 1px solid var(--edge); padding-bottom: 5px;
+}
+.stat { display: flex; justify-content: space-between; font-size: 12px; padding: 3px 0; }
+.stat span:last-child { color: var(--gold); }
+.attr { display: flex; align-items: center; gap: 6px; font-size: 12px; padding: 3px 0; }
+.attr .an { flex: 1; }
+.attr .av { color: var(--gold); min-width: 22px; text-align: right; }
+.attr button {
+  background: #2a2a1e; border: 1px solid var(--edge); color: var(--gold);
+  width: 20px; height: 20px; cursor: pointer; font-size: 13px; line-height: 1;
+}
+.attr button:disabled { opacity: 0.25; cursor: default; }
+.points { font-size: 11px; color: #9ce8a8; margin: 6px 0; }
+
+.eq-slot {
+  display: flex; justify-content: space-between; gap: 8px;
+  font-size: 12px; padding: 7px 8px; margin-bottom: 5px;
+  border: 1px solid var(--edge); background: rgba(0,0,0,0.35);
+}
+.eq-slot .eq-label { opacity: 0.55; font-size: 10px; text-transform: uppercase; }
+.eq-slot .eq-val { color: var(--gold); text-align: right; }
+.eq-slot .eq-sub { display: block; font-size: 10px; opacity: 0.6; color: var(--ink); }
+
+#sheet-bag .bag-grid { display: grid; grid-template-columns: repeat(6, 1fr); gap: 5px; }
+.bag-item {
+  position: relative; aspect-ratio: 1; cursor: pointer;
+  border: 1px solid var(--edge); background: rgba(0,0,0,0.35);
+  display: flex; align-items: center; justify-content: center; font-size: 19px;
+}
+.bag-item:hover { border-color: var(--gold); background: rgba(216,178,90,0.12); }
+.bag-item .qty { position: absolute; bottom: 1px; right: 3px; font-size: 10px; color: var(--gold); }
+.bag-item.empty { cursor: default; opacity: 0.3; }
+.bag-item.empty:hover { border-color: var(--edge); background: rgba(0,0,0,0.35); }
+.sheet-inner footer { margin-top: 14px; }
+.hint { font-size: 10px; opacity: 0.5; }
+
+/* ---------- death ---------- */
+#death {
+  position: fixed; inset: 0; z-index: 40;
+  background: rgba(40, 6, 6, 0.82);
+  display: flex; align-items: center; justify-content: center; text-align: center;
+}
+#death h1 { font-size: 44px; margin: 0; color: #e05a4a; letter-spacing: 3px; }
+#death p { opacity: 0.8; font-size: 13px; }
+
+/* ---------- menu ---------- */
+#menu {
+  position: fixed; inset: 0; z-index: 50;
+  background: radial-gradient(circle at 50% 40%, #1d2436, #0a0c12 75%);
+  display: flex; align-items: center; justify-content: center; text-align: center;
+}
+.menu-inner h1 {
+  font-size: 46px; margin: 0; letter-spacing: 5px; color: var(--gold);
+  text-shadow: 0 4px 18px rgba(216,178,90,0.28);
+}
+.menu-inner .tag { opacity: 0.65; font-size: 13px; margin: 6px 0 26px; }
+.controls { margin-top: 26px; font-size: 11px; line-height: 2; opacity: 0.6; }
+.controls b { color: var(--gold); font-weight: normal; }
+
+button#play, button#respawn {
+  background: #1d1a12; border: 2px solid var(--gold); color: var(--gold);
+  padding: 12px 30px; font-size: 14px; letter-spacing: 2px; cursor: pointer;
+  font-family: inherit;
+}
+button#play:hover, button#respawn:hover { background: var(--gold); color: #14110a; }

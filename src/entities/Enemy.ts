@@ -3,6 +3,7 @@ import type { GameContext } from '../core/Context';
 import type { DamageResult, DefenseProfile } from '../combat/types';
 import { isSolid } from '../world/blocks';
 import type { EnemyArchetype } from './archetypes';
+import { buildCreature, type CreatureLeg } from '../fx/creatures';
 
 const GRAVITY = 26;
 const ENEMY_HALF_WIDTH = 0.35;
@@ -12,18 +13,9 @@ const DEATH_DURATION = 0.1;
 
 type AIState = 'idle' | 'chase' | 'windup' | 'recover' | 'reposition' | 'backoff' | 'dying';
 
-// Shared geometry — every enemy is built from the same few boxes.
+// Creature bodies come from fx/creatures. Only the health bar quad is shared.
 const GEO = {
-  torso: new THREE.BoxGeometry(0.62, 0.72, 0.36),
-  head: new THREE.BoxGeometry(0.44, 0.44, 0.44),
-  limb: new THREE.BoxGeometry(0.18, 0.62, 0.18),
-  leg: new THREE.BoxGeometry(0.22, 0.72, 0.22),
-  weapon: new THREE.BoxGeometry(0.09, 0.95, 0.09),
   bar: new THREE.PlaneGeometry(1, 1),
-  fishBody: new THREE.BoxGeometry(0.42, 0.34, 0.9),
-  fishHead: new THREE.BoxGeometry(0.3, 0.26, 0.24),
-  fishTail: new THREE.BoxGeometry(0.06, 0.34, 0.26),
-  fishFin: new THREE.BoxGeometry(0.05, 0.2, 0.24),
 };
 
 export class Enemy {
@@ -37,7 +29,14 @@ export class Enemy {
   hp: number;
   readonly maxHp: number;
   readonly defense: DefenseProfile;
-  readonly height: number;
+  /**
+   * Standing height, in world units.
+   *
+   * Set provisionally in the constructor and corrected in `build()` once the model
+   * knows its own proportions. Used for the aim point, the health bar, and the
+   * collision capsule, so it has to reflect the creature actually drawn.
+   */
+  height: number;
 
   readonly group = new THREE.Group();
   /**
@@ -48,8 +47,8 @@ export class Enemy {
   private body!: THREE.Group;
   private rightArm!: THREE.Group;
   private leftArm!: THREE.Group;
-  private leftLeg!: THREE.Group;
-  private rightLeg!: THREE.Group;
+  /** Every leg, for gaits with more than two. Spiders have eight. */
+  private legs: CreatureLeg[] = [];
   private materials: THREE.MeshLambertMaterial[] = [];
   private healthBar!: THREE.Group;
   private healthFill!: THREE.Mesh;
@@ -146,112 +145,30 @@ export class Enemy {
 
   // ---------------------------------------------------------------- appearance
 
+  /**
+   * Builds the model for this archetype.
+   *
+   * The geometry lives in fx/creatures, one silhouette per archetype. It used to be
+   * assembled here from five shared boxes for every enemy in the game, so a goblin
+   * and an ogre differed only in colour and scale.
+   */
   private build(): void {
-    if (this.archetype.look.bodyStyle === 'fish') {
-      this.buildFish();
-      return;
-    }
-    this.buildHumanoid();
-  }
-
-  /** A fish: body, snout, tail, and fins. No arms to swing. */
-  private buildFish(): void {
     const look = this.archetype.look;
-    const mat = (color: number) => {
-      const m = new THREE.MeshLambertMaterial({ color });
-      this.materials.push(m);
-      return m;
-    };
-    const bodyMat = mat(look.body);
-    const headMat = mat(look.head);
-    const finMat = mat(look.accent);
+    const parts = buildCreature(this.archetype.id, look, this.materials);
 
-    const g = new THREE.Group();
-    g.add(new THREE.Mesh(GEO.fishBody, bodyMat));
-    const head = new THREE.Mesh(GEO.fishHead, headMat);
-    head.position.z = -0.54;
-    g.add(head);
+    this.rightArm = parts.rightArm;
+    this.leftArm = parts.leftArm;
+    this.legs = parts.legs;
 
-    // The tail is its own pivot so it can beat while swimming.
-    this.rightArm = new THREE.Group();
-    this.rightArm.position.z = 0.44;
-    const tail = new THREE.Mesh(GEO.fishTail, finMat);
-    tail.position.z = 0.12;
-    this.rightArm.add(tail);
-    g.add(this.rightArm);
-
-    const topFin = new THREE.Mesh(GEO.fishFin, finMat);
-    topFin.position.set(0, 0.24, 0.05);
-    g.add(topFin);
-
-    // Unused for fish, but the animation code expects these to exist.
-    this.leftArm = new THREE.Group();
-    this.leftLeg = new THREE.Group();
-    this.rightLeg = new THREE.Group();
-    g.add(this.leftArm, this.leftLeg, this.rightLeg);
-
-    g.scale.setScalar(look.scale * 2.2);
-    this.body = g;
-    this.group.add(g);
-
-    this.buildHealthBar();
-    this.group.position.copy(this.position);
-  }
-
-  private buildHumanoid(): void {
-    const look = this.archetype.look;
-    const mat = (color: number) => {
-      // Cloned per enemy so a hit can flash just this one.
-      const m = new THREE.MeshLambertMaterial({ color });
-      this.materials.push(m);
-      return m;
-    };
-    const bodyMat = mat(look.body);
-    const headMat = mat(look.head);
-    const accentMat = mat(look.accent);
-
-    const s = look.scale;
-    const g = new THREE.Group();
-
-    const torso = new THREE.Mesh(GEO.torso, bodyMat);
-    torso.position.y = 1.05;
-    g.add(torso);
-
-    const head = new THREE.Mesh(GEO.head, headMat);
-    head.position.y = 1.62;
-    g.add(head);
-
-    // Arms and legs live in pivot groups so they can rotate at the joint.
-    // The mesh hangs below the pivot so rotation happens at the joint, not the
-    // centre of the limb.
-    const makeLimb = (
-      geo: THREE.BufferGeometry,
-      material: THREE.Material,
-      x: number,
-      y: number,
-      halfLength: number,
-    ) => {
-      const pivot = new THREE.Group();
-      pivot.position.set(x, y, 0);
-      const mesh = new THREE.Mesh(geo, material);
-      mesh.position.y = -halfLength;
-      pivot.add(mesh);
-      g.add(pivot);
-      return pivot;
-    };
-
-    this.rightArm = makeLimb(GEO.limb, bodyMat, -0.42, 1.32, 0.31);
-    this.leftArm = makeLimb(GEO.limb, bodyMat, 0.42, 1.32, 0.31);
-    this.leftLeg = makeLimb(GEO.leg, accentMat, 0.16, 0.72, 0.36);
-    this.rightLeg = makeLimb(GEO.leg, accentMat, -0.16, 0.72, 0.36);
-
-    // Weapon in the right hand, angled so the telegraph is readable.
-    const weapon = new THREE.Mesh(GEO.weapon, accentMat);
-    weapon.position.set(0, -0.62, 0.05);
-    weapon.rotation.x = -0.25;
-    this.rightArm.add(weapon);
-
-    g.scale.setScalar(s);
+    // The model's own height is authoritative; the archetype only multiplies it.
+    //
+    // An earlier version normalised every creature to 1.8 units before scaling,
+    // which stretched a spider — modelled deliberately low and wide — up to the
+    // height of a man on legs three times too long. A creature's proportions are a
+    // modelling decision, and squaring them away here silently discards them.
+    const g = parts.group;
+    g.scale.setScalar(look.scale);
+    this.height = parts.height * look.scale;
     this.body = g;
     this.group.add(g);
 
@@ -911,8 +828,11 @@ export class Enemy {
     this.walkPhase += dt * (2 + horizontalSpeed * 2.2);
 
     const stride = Math.min(1, horizontalSpeed / 4) * 0.65;
-    this.leftLeg.rotation.x = Math.sin(this.walkPhase) * stride;
-    this.rightLeg.rotation.x = -Math.sin(this.walkPhase) * stride;
+    // Every leg, each on its own phase. Driving only the two named pivots left a
+    // spider hauling itself along on two legs with six held rigid.
+    for (const leg of this.legs) {
+      leg.pivot.rotation.x = Math.sin(this.walkPhase + leg.phase) * stride;
+    }
     this.leftArm.rotation.x = -Math.sin(this.walkPhase) * stride * 0.6;
 
     // The attacking arm rises through the wind-up and snaps forward on release.

@@ -698,6 +698,54 @@ try {
     `posX ${idlePose.posX} -> ${thrustPose.posX}`,
   );
 
+  // The point has to arrive *on* the crosshair, measured in pixels.
+  //
+  // "The hand moves towards centre" above is a proxy, and it passed while the tip
+  // still sat visibly low and to the right — which is exactly what the player
+  // reported, twice. This measures the thing itself: the tip's projected position
+  // relative to the crosshair, at its closest approach during the thrust.
+  await waitForIdle();
+  await page.evaluate(() => window.__voxelquest.debugSetAttackMode('thrust'));
+  await page.evaluate(() => window.__voxelquest.debugRefill());
+  await page.mouse.click(CENTER_X, CENTER_Y);
+  let closestTip = null;
+  for (let i = 0; i < 70; i++) {
+    const sample = await page.evaluate(() => ({
+      action: window.__voxelquest.debugViewState().action,
+      tip: window.__voxelquest.debugTipOffset(),
+    }));
+    if (sample.action === 'thrust' && sample.tip) {
+      const distance = Math.hypot(sample.tip.x, sample.tip.y);
+      if (closestTip === null || distance < closestTip.distance) {
+        closestTip = { distance, ...sample.tip };
+      }
+    } else if (closestTip !== null) {
+      break;
+    }
+    await page.waitForTimeout(25);
+  }
+  check(
+    'the thrust puts the weapon tip on the crosshair',
+    closestTip !== null && closestTip.distance < 0.05,
+    closestTip
+      ? `closest approach ${(closestTip.x * 640).toFixed(0)}px x, ${(closestTip.y * 360).toFixed(0)}px y at 1280x720`
+      : 'tip never observed',
+  );
+
+  console.log('\n[sun and moon]');
+  await page.evaluate(() => window.__voxelquest.debugSetTime('day'));
+  await page.waitForTimeout(500);
+  const daySky = await page.evaluate(() => window.__voxelquest.debugCelestial());
+  check('the sun is up during the day', daySky.sunVisible === true, JSON.stringify(daySky));
+  check('the moon is not up during the day', daySky.moonVisible === false, `moonVisible ${daySky.moonVisible}`);
+
+  await page.evaluate(() => window.__voxelquest.debugSetTime('night'));
+  await page.waitForTimeout(500);
+  const nightSky = await page.evaluate(() => window.__voxelquest.debugCelestial());
+  check('the moon is up at night', nightSky.moonVisible === true, JSON.stringify(nightSky));
+  check('the sun is not up at night', nightSky.sunVisible === false, `sunVisible ${nightSky.sunVisible}`);
+  await page.evaluate(() => window.__voxelquest.debugSetTime('day'));
+
   console.log('\n[invulnerability covers every damage source]');
   // Fall damage used to bypass the guard by calling the combat system directly.
   await page.evaluate(() => {

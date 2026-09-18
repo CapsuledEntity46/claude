@@ -239,6 +239,37 @@ await g(() => {
 await page.waitForTimeout(1200);
 await shot('build-tool');
 
+// ---------------------------------------------------------------- sky
+
+// The sun low and reddened at dusk. At noon it sits almost straight overhead, so a
+// level shot would miss it entirely; dusk puts it on the horizon where the warm
+// corona is doing its work.
+await g(() => {
+  const game = window.__voxelquest;
+  game.debugSetTime('dusk');
+  game.debugEquip('fists');
+  game.debugSelectHotbarByItem('fists');
+  // Azimuth of the setting sun, worked out from TimeOfDay's tilted arc.
+  game.debugLook(0.6, 0.12);
+});
+await page.waitForTimeout(1600);
+await shot('sky-sunset');
+
+// The moon, near the zenith at midnight.
+await g(() => {
+  const game = window.__voxelquest;
+  game.debugSetTime('night');
+  game.debugLook(0.6, 1.15);
+});
+await page.waitForTimeout(1600);
+await shot('sky-moon');
+
+await g(() => {
+  const game = window.__voxelquest;
+  game.debugSetTime('day');
+  game.debugLook(0, 0);
+});
+
 // ---------------------------------------------------------------- dungeon
 
 const wentUnderground = await g(() => window.__voxelquest.debugGoToDungeon());

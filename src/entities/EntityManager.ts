@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import type { EnemyWorld, GameContext } from '../core/Context';
 import { computeDamage, type DamageInput } from '../combat/types';
 import { mulberry32 } from '../world/noise';
-import { FISH, pickArchetype } from './archetypes';
+import { archetypeById, FISH, pickArchetype } from './archetypes';
 import { Enemy } from './Enemy';
 import { rollLoot, xpForKill } from './loot';
 import type { PickupManager } from './Pickups';
@@ -383,6 +383,20 @@ export class EntityManager implements EnemyWorld {
     this.group.add(enemy.group);
 
     if (!this.seen.has(archetype.id)) this.seen.add(archetype.id);
+    return enemy;
+  }
+
+  /**
+   * Spawns one named archetype. Used by the screenshot scripts, which need to look
+   * at a particular creature rather than whatever the spawn roll produced.
+   */
+  spawnArchetypeAt(position: THREE.Vector3, archetypeId: string, level: number): Enemy | null {
+    const archetype = archetypeById(archetypeId);
+    if (!archetype) return null;
+    const enemy = new Enemy(archetype, Math.max(1, level), position, this.rng);
+    this.list.push(enemy);
+    this.group.add(enemy.group);
+    this.seen.add(archetype.id);
     return enemy;
   }
 

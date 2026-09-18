@@ -175,12 +175,52 @@ version put rooms at a fixed y and ran the entrance a fixed height upward, so
 wherever the ground happened to sit lower it stood proud of the landscape as a
 hollow tower with no way in.
 
-## Day, night, and weather
+## Enemies
+
+Each archetype has its own silhouette. Goblins are hunched and spindly, with swept
+ears, a long snout and arms that hang past the knees; orcs are barrel-chested and
+tusked with the head sunk between the shoulders; skeletons show ribs through the
+chest under a helmet; cultists are a robe with no legs and two lights in an empty
+hood; the ogre is a potbellied slab with arms that reach the ground; the giant
+spider is a banded bulb on eight jointed legs.
+
+Before this they were all the same five boxes — torso, head, two arms, two legs —
+recoloured and rescaled per archetype, which meant the single thing a player most
+needs to read at a glance, *what is running at me and how worried should I be*,
+carried no information beyond size and hue.
+
+Two things worth knowing about `fx/creatures.ts`:
+
+- **A creature's own height is authoritative.** The archetype only multiplies it. An
+  earlier version normalised everything to 1.8 units before scaling, which stretched
+  the spider — modelled deliberately low and wide — up onto man-length legs.
+- **Orientation goes through named helpers** (`standUp`, `hangDown`, `faceForward`,
+  `alongBody`) rather than raw Euler angles. Which way a part ends up pointing
+  depends on the sign of a rotation you can talk yourself into either way, and
+  getting it wrong grew a goblin's torso downwards out of its own hips.
+
+`Enemy` drives four pivot groups to animate, so every creature supplies them
+whatever its anatomy. Creatures with more than two legs report them all through
+`legs` with per-leg gait phases — driving only the named pair left the spider
+hauling itself along on two legs with six held rigid.
+
+## Sun, moon, and weather
 
 A full day runs about eighteen minutes. Daylight is when you build: enemies see
 barely half as far and the population cap is a fraction of its night-time value.
 After dark the world presses in — more spawns, longer sight lines, and you will
 want a light.
+
+The sun and moon are real objects in the sky, riding the same camera-centred shell
+as the stars so they read as infinitely distant. The shell sits outside the render
+distance but inside the far plane, which means terrain occludes them — the sun
+genuinely sets behind a hill. The sun reddens and its corona swells as it nears the
+horizon; the moon is a cratered disc opposite it that fades out after dawn rather
+than blinking off at a threshold.
+
+Both opt out of fog. Everything else is fogged by distance, and at that radius fog
+washes a disc into the haze and leaves the sky empty, which defeats the point of
+drawing it.
 
 Weather rolls between clear skies, ground fog, rain, and storms. Fog and rain
 both pull your view distance in; a storm darkens the sky enough to matter.
@@ -376,19 +416,25 @@ Some notes on the parts that are less obvious than they look:
 - **Melee does not move the camera.** Kicking the view during a swing reads as the
   camera glitching or clipping rather than as a weapon being swung, so all of the
   motion belongs to the weapon. Firearms still recoil, where a shove is expected.
-- **A swing is a diagonal slash, and consecutive swings alternate** — one from the
-  upper right down to the lower left, the next mirrored — so a run of attacks traces
-  an X. It pivots near the wrist at the bottom right, in three phases: a short
-  wind-up up into the high corner, a fast cut carrying yaw, pitch and roll together,
-  and a slower return. The alternation is strict rather than randomised; the two
-  diagonals only read as an X if they reliably follow one another. Two earlier
-  versions failed differently: a circular screen-space path sent the blade off the
-  edge of the view, and a flat horizontal yaw sweep read as the weapon being waved
-  rather than swung, because nothing about it travelled the way a cut does.
-- **A thrust is offset in view space, not along the weapon's own axis.** Translating
-  along the blade's local forward axis is the physically honest reading, but the
-  weapon is held at an angle, so it drove the point *away* from the crosshair — the
-  tip has to converge on where you are actually aiming.
+- **A swing follows Skyrim's one-handed rhythm.** The weapon hauls back behind the
+  shoulder and partly out of frame, drives across the view at chest height *and
+  forward*, over-travels past the far side, then drifts back to a low central guard.
+  Consecutive attacks alternate sides. What distinguishes it from the sweeps that
+  came before is that the arm commits: the hand travels forward into the strike
+  rather than the wrist merely rotating in place. Three earlier versions each failed
+  a different way — a circular screen-space path sent the blade off the edge of the
+  view, a flat horizontal yaw sweep read as the weapon being waved, and a symmetric
+  diagonal X never looked like it was hitting anything.
+- **A thrust is aimed, not tuned.** The blade's rotation is *solved* so its tip lands
+  on the view axis from wherever the hand happens to be, blended in as the thrust
+  extends. Translating along the blade's own local axis is the physically honest
+  reading, but with the weapon carried at an angle it drives the point away from the
+  crosshair. Two rounds were then spent nudging constants — cancel 92% of the
+  resting yaw, pull the hand 72% of the way to centre — which got the tip close and
+  left it stubbornly low and to one side, because the residual depends on the hand's
+  position, the blade's length and the camera's field of view all at once. Aiming is
+  correct for every weapon and stays correct when any of those change. The smoke test
+  measures it in pixels: currently 3px from the crosshair at closest approach.
 - **Animation timings ride the combat phases rather than a fixed clock.** The
   visible sweep lands in the 200–300ms a swing should feel like, but tying it to
   wind-up and commitment keeps the telegraph window that makes the fighting
@@ -399,7 +445,7 @@ Some notes on the parts that are less obvious than they look:
 ## Tests
 
 ```bash
-npm test            # typecheck + 197 unit checks
+npm test            # typecheck + 208 unit checks
 npm run test:unit   # damage model, mesher, terrain determinism, inventory
 npm run test:smoke  # boots the real build in headless Chromium and plays it
 ```

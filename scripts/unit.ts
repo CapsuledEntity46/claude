@@ -18,6 +18,7 @@ import {
   swordModel,
   torchModel,
 } from '../src/fx/models';
+import { buildCreature } from '../src/fx/creatures';
 import { computeDamage, type DamageInput, type DefenseProfile } from '../src/combat/types';
 import { ARCHETYPES, FISH, pickArchetype } from '../src/entities/archetypes';
 import { Inventory } from '../src/player/Inventory';
@@ -1262,10 +1263,94 @@ check(
 
 // ---------------------------------------------------------------- result
 
+
+
+section('enemy creature models');
+
+// Every enemy used to be the same five boxes recoloured, so the one thing a player
+// most needs to read at a glance — what is running at me — carried no information
+// beyond size and hue. These assert the silhouettes are genuinely different.
+{
+  const ids = [
+    'goblin_grunt',
+    'goblin_skirmisher',
+    'bandit_archer',
+    'giant_spider',
+    'orc_brute',
+    'skeleton_knight',
+    'cultist',
+    'ogre',
+    'river_fish',
+  ];
+  const built = ids.map((id) => {
+    const materials: never[] = [];
+    const parts = buildCreature(id, { body: 0x445566, head: 0x667788, accent: 0x223344 }, materials as never);
+    return { id, parts, triangles: modelTriangleCount(parts.group) };
+  });
+
+  check(
+    'every archetype builds a model',
+    built.every((b) => b.triangles > 0),
+    built.map((b) => `${b.id}:${b.triangles}`).join(' '),
+  );
+
+  // Distinct triangle counts are a cheap proxy for distinct geometry: identical
+  // models built from one shared template cannot differ here.
+  const counts = new Set(built.map((b) => b.triangles));
+  check(
+    'archetypes do not share one body',
+    counts.size >= built.length - 1,
+    `${counts.size} distinct triangle counts across ${built.length} archetypes`,
+  );
+
+  const creatureNormals = distinctNormals(built.find((b) => b.id === 'orc_brute')!.parts.group);
+  check(
+    'a creature is not built out of boxes',
+    creatureNormals > 30,
+    `${creatureNormals} distinct face normals (a cube has 6)`,
+  );
+
+  // The animation contract: Enemy rotates these four pivots, so they must exist
+  // whatever the creature's anatomy.
+  check(
+    'every creature supplies the four animated pivots',
+    built.every((b) => b.parts.rightArm && b.parts.leftArm && b.parts.leftLeg && b.parts.rightLeg),
+    'arms and legs present',
+  );
+
+  const spider = built.find((b) => b.id === 'giant_spider')!.parts;
+  check('a spider walks on eight legs', spider.legs.length === 8, `${spider.legs.length} legs`);
+  // Alternating phases, or the gait is eight legs moving as one.
+  const phases = new Set(spider.legs.map((l) => Math.round(l.phase * 100)));
+  check('spider legs are not all in step', phases.size > 1, `${phases.size} distinct gait phases`);
+
+  // Proportions are a modelling decision. Normalising every creature to one height
+  // stretched the spider — deliberately low and wide — onto man-length legs.
+  const spiderHeight = built.find((b) => b.id === 'giant_spider')!.parts.height;
+  const ogreHeight = built.find((b) => b.id === 'ogre')!.parts.height;
+  check(
+    'creatures keep their own proportions',
+    spiderHeight < 1.2 && ogreHeight > 2,
+    `spider ${spiderHeight} units, ogre ${ogreHeight} units`,
+  );
+
+  // Creatures face -Z, and their heads belong above the middle of the body.
+  for (const id of ['goblin_grunt', 'orc_brute', 'skeleton_knight', 'ogre']) {
+    const parts = built.find((b) => b.id === id)!.parts;
+    parts.group.updateMatrixWorld(true);
+    const box = new Box3().setFromObject(parts.group);
+    check(
+      `${id} stands above its own origin`,
+      box.max.y > 1 && box.min.y > -0.35,
+      `y from ${box.min.y.toFixed(2)} to ${box.max.y.toFixed(2)}`,
+    );
+  }
+}
+
+
 console.log(`\n${passed} passed, ${failures.length} failed`);
 if (failures.length > 0) {
   console.log(`FAILED: ${failures.join(', ')}`);
   process.exit(1);
 }
 console.log('ALL UNIT CHECKS PASSED');
-

@@ -61,10 +61,10 @@ export const MODEL_MAT = {
 
 // ------------------------------------------------------------------ primitives
 
-type Vec2 = [number, number];
+export type Vec2 = [number, number];
 
 /** A cross-section station: where along Z, and how much to scale the profile. */
-interface Station {
+export interface Station {
   z: number;
   sx: number;
   sy: number;
@@ -78,7 +78,7 @@ interface Station {
  * heads. A pointed tip is a real apex the side faces converge on, not a smaller
  * box stuck on the end.
  */
-function sweep(profile: readonly Vec2[], stations: readonly Station[], tipZ?: number): THREE.BufferGeometry {
+export function sweep(profile: readonly Vec2[], stations: readonly Station[], tipZ?: number): THREE.BufferGeometry {
   const n = profile.length;
   const out: number[] = [];
 
@@ -121,7 +121,7 @@ function sweep(profile: readonly Vec2[], stations: readonly Station[], tipZ?: nu
 }
 
 /** A regular n-gon profile, for shafts and grips. */
-function ngon(sides: number, radius = 1): Vec2[] {
+export function ngon(sides: number, radius = 1): Vec2[] {
   const points: Vec2[] = [];
   for (let i = 0; i < sides; i++) {
     const a = (i / sides) * Math.PI * 2;
@@ -181,7 +181,7 @@ function outlineToShape(outline: readonly Vec2[]): THREE.Shape {
  * shield rim built as a slightly-enlarged solid plate sits in front of the face and
  * hides all of it — the shield came out a featureless grey slab that way.
  */
-function plate(
+export function plate(
   outline: readonly Vec2[],
   thickness: number,
   bevel = 0.008,
@@ -203,7 +203,7 @@ function plate(
 }
 
 /** A turned part — pommel, boss, counterweight — from a half-profile. */
-function turned(points: readonly Vec2[], segments = 8): THREE.BufferGeometry {
+export function turned(points: readonly Vec2[], segments = 8): THREE.BufferGeometry {
   return facet(
     new THREE.LatheGeometry(
       points.map(([x, y]) => new THREE.Vector2(Math.max(0.0001, x), y)),
@@ -212,13 +212,13 @@ function turned(points: readonly Vec2[], segments = 8): THREE.BufferGeometry {
   );
 }
 
-/** A swept tube along a curve, for bow limbs and horns. */
-function tube(points: readonly THREE.Vector3[], radius: number, segments = 14): THREE.BufferGeometry {
+/** A swept tube along a curve, for bow limbs, horns, and creature legs. */
+export function tube(points: readonly THREE.Vector3[], radius: number, segments = 14): THREE.BufferGeometry {
   const curve = new THREE.CatmullRomCurve3([...points]);
   return facet(new THREE.TubeGeometry(curve, segments, radius, 5, false));
 }
 
-function mesh(geometry: THREE.BufferGeometry, material: THREE.Material, x = 0, y = 0, z = 0): THREE.Mesh {
+export function mesh(geometry: THREE.BufferGeometry, material: THREE.Material, x = 0, y = 0, z = 0): THREE.Mesh {
   const m = new THREE.Mesh(geometry, material);
   m.position.set(x, y, z);
   return m;

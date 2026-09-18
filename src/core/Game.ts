@@ -10,6 +10,7 @@ import { BlockHighlight } from '../fx/BlockHighlight';
 import { LightManager } from '../fx/LightManager';
 import { Particles } from '../fx/Particles';
 import { Rain } from '../fx/Rain';
+import { Celestial } from '../fx/Celestial';
 import { Starfield } from '../fx/Starfield';
 import { Trail } from '../fx/Trail';
 import { TrajectoryArc } from '../fx/TrajectoryArc';
@@ -57,6 +58,7 @@ export class Game {
   private weather = new Weather();
   private rain = new Rain();
   private stars = new Starfield();
+  private celestial = new Celestial();
   private lights = new LightManager();
   private highlight = new BlockHighlight();
   private trails = new Trail();
@@ -109,7 +111,15 @@ export class Game {
 
     this.viewModel = new ViewModel(78, window.innerWidth / window.innerHeight);
     this.setupLights();
-    this.scene.add(this.stars.points, this.rain.lines, this.lights.group, this.highlight.group, this.trails.mesh, this.arc.group);
+    this.scene.add(
+      this.stars.points,
+      this.celestial.group,
+      this.rain.lines,
+      this.lights.group,
+      this.highlight.group,
+      this.trails.mesh,
+      this.arc.group,
+    );
 
     // Rain kicks up a little spray where it lands.
     this.rain.onSplash = (x, y, z) => {
@@ -226,6 +236,12 @@ export class Game {
     this.renderer.setClearColor(this.skyColor);
 
     this.stars.update(eye, this.underwater ? 0 : this.time.starOpacity * (1 - dim));
+    // Sun and moon ride the same shell as the stars. Hidden underwater, where the
+    // surface should be all you can see looking up.
+    this.celestial.group.visible = !this.underwater;
+    if (!this.underwater) {
+      this.celestial.update(eye, this.time.sunDirection(), this.time.daylight * (1 - dim));
+    }
 
     // Rain, and the lights that matter once it gets dark.
     this.rain.setBrightness(0.35 + daylight * 0.65);
@@ -692,6 +708,13 @@ export class Game {
    * Test/debug helper: places an enemy at the player's own elevation so melee
    * reach is predictable regardless of terrain slope.
    */
+  /** Spawns one named archetype ahead of the player, for model screenshots. */
+  debugSpawnArchetype(archetypeId: string, distance = 5): boolean {
+    const point = this.player.position.clone().addScaledVector(this.player.facing, distance);
+    point.y = this.player.position.y;
+    return !!this.entities.spawnArchetypeAt(point, archetypeId, this.player.stats.level);
+  }
+
   debugSpawnEnemyInReach(distance = 2.2): number {
     const point = this.player.position.clone().addScaledVector(this.player.facing, distance);
     point.y = this.player.position.y;
@@ -848,6 +871,23 @@ export class Game {
       swingDirections: [...this.viewModel.recentSwingDirections],
       torchEmbers: this.viewModel.emberCount,
     };
+  }
+
+  /**
+   * How far the held weapon's tip is from the crosshair, in normalised device
+   * coordinates — (0,0) is dead centre, 1 is half the viewport.
+   *
+   * Lets "the thrust points where you are aiming" be measured rather than
+   * approximated. The old proxy (the hand moves towards centre) passed while the
+   * point still sat visibly low and to the right of the crosshair.
+   */
+  debugTipOffset(): { x: number; y: number } | null {
+    return this.viewModel.tipScreenOffset();
+  }
+
+  /** Sun and moon state, for verifying the sky. */
+  debugCelestial(): Record<string, unknown> {
+    return this.celestial.debugState();
   }
 
   /** Block highlight state, for verifying the mining animation advances. */

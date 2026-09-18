@@ -115,35 +115,53 @@ const OFFHAND_SCALE = 1.0;
 const TORCH_SCALE = 0.6;
 /** Roughly where a blade's point sits, in the hand's local space. */
 const TIP_LOCAL = new THREE.Vector3(0, 0, -0.78);
+/** The direction a weapon points in its own space. Blades run along -Z. */
+const BLADE_AXIS = new THREE.Vector3(0, 0, -1);
 /** Half-angle of the swing arc, in radians. Wide enough to cross the whole view. */
 /**
- * Swing geometry: a diagonal slash, alternating sides to trace an X.
+ * Swing geometry, cut to Skyrim's one-handed rhythm.
  *
- * Consecutive attacks cut the opposite way — one from the upper right down to the
- * lower left, the next from the upper left down to the lower right — so a run of
- * attacks draws an X across the view rather than repeating one clip.
+ * What distinguishes a Skyrim slash from the generic screen-space sweep this
+ * replaced is that the *arm* commits, not just the wrist. The sequence is:
  *
- * This replaced a flat horizontal yaw sweep. A purely horizontal slash reads as
- * the weapon being waved rather than swung, because nothing about it travels the
- * way a cut does: a real slash starts high on one side and finishes low on the
- * other, so the motion has to carry pitch and roll alongside the yaw. Before that
- * there was a circular screen-space path, which sent the blade off the edge of the
- * view entirely.
+ *  1. The weapon hauls back behind the shoulder — out and away from the screen,
+ *     partly leaving frame — which is the telegraph.
+ *  2. It drives across the view at roughly chest height *and forward*, so the blade
+ *     travels towards what it is hitting rather than merely rotating in place. The
+ *     cut is flatter than a diagonal slash, with a modest downward cant.
+ *  3. It over-travels past the far side, then drifts back to a low, central guard
+ *     rather than snapping straight back to the carry pose.
+ *
+ * Consecutive attacks still alternate sides, as Skyrim's do.
+ *
+ * Two earlier attempts are worth remembering. A circular screen-space path sent the
+ * blade off the edge of the view. A pure horizontal yaw sweep read as the weapon
+ * being waved, because rotation alone never moves the blade towards the target.
  */
-const SWING_WINDBACK = 0.34;
-/** Total yaw travel, about 62 degrees — enough to cross the view. */
-const SWING_ARC = 1.08;
-/** How high the tip is cocked before the cut, and how far it falls through it. */
-const SWING_PITCH_RISE = 0.34;
-const SWING_PITCH_DROP = 0.72;
-/** Roll travel, which is what angles the edge along the diagonal. */
-const SWING_ROLL = 0.52;
-/** Screen-space travel of the hand, from the high corner to the low one. */
-const SWING_RISE_Y = 0.15;
-const SWING_DROP_Y = 0.17;
-const SWING_CROSS_X = 0.34;
-/** Share of the recovery window spent sweeping, with the rest easing back. */
-const SWING_SWEEP_FRACTION = 0.55;
+/** How far the weapon hauls back before the cut. */
+const SWING_WINDBACK = 0.42;
+/** Total yaw travel, about 75 degrees: across the view and past the far side. */
+const SWING_ARC = 1.3;
+/** Pitch cocked up before the cut, and the downward cant carried through it. */
+const SWING_PITCH_RISE = 0.26;
+const SWING_PITCH_DROP = 0.54;
+/** Roll travel, which keeps the edge leading through the arc. */
+const SWING_ROLL = 0.44;
+/** Screen-space travel of the hand across and down the view. */
+const SWING_RISE_Y = 0.1;
+const SWING_DROP_Y = 0.13;
+const SWING_CROSS_X = 0.46;
+/**
+ * How far the hand drives forward through the cut.
+ *
+ * This is the part that makes it read as a swing rather than a wave: the arm
+ * extends into the strike and pulls back out of it.
+ */
+const SWING_REACH = 0.2;
+/** Where the hand settles after the cut, before easing back to carry. */
+const SWING_GUARD_Y = -0.05;
+/** Share of the recovery window spent cutting, with the rest settling to guard. */
+const SWING_SWEEP_FRACTION = 0.42;
 /** How far a thrust pulls the hand in towards screen centre. */
 const THRUST_CENTRING = 0.72;
 
@@ -192,6 +210,11 @@ export class ViewModel {
   private readonly embers = new Particles();
   private emberTimer = 0;
   private readonly tmpVec = new THREE.Vector3();
+  private readonly tmpTip = new THREE.Vector3();
+  private readonly tmpTarget = new THREE.Vector3();
+  private readonly tmpForward = new THREE.Vector3();
+  private readonly tmpAim = new THREE.Quaternion();
+  private readonly tmpPose = new THREE.Quaternion();
 
   private walkClock = 0;
   private mineClock = 0;
@@ -464,6 +487,8 @@ export class ViewModel {
     let rx = 0;
     let ry = 0;
     let rz = 0;
+    /** 0 = pose as composed, 1 = blade aimed at the crosshair. Set by the thrust. */
+    let thrustAim = 0;
 
     // Walk bob and idle breathing.
     const moveFactor = Math.min(1, input.speed / 5);
@@ -474,67 +499,73 @@ export class ViewModel {
 
     switch (input.action) {
       case 'swing': {
-        // A diagonal slash. `side` is +1 for a cut starting at the upper right and
-        // finishing at the lower left, -1 for the mirror image; consecutive
-        // attacks alternate, so the pair traces an X.
+        // `side` is +1 for a cut travelling right-to-left, -1 for the backhand;
+        // consecutive attacks alternate, as Skyrim's do.
         //
-        // The pivot is the hand group's own origin, which sits at the grip — i.e.
-        // the wrist, at the lower right of the view — so the weapon rotates about
-        // the hand rather than about its own centre.
+        // The pivot is the hand group's own origin, which sits at the grip, so the
+        // weapon rotates about the wrist rather than about its own centre.
         //
-        // Three phases: a quick cock-back up into the starting corner, a fast cut
-        // down across the view, then an eased return. The cut and return occupy the
-        // recovery window, where the visible motion belongs; the cock-back rides
-        // the tail of the wind-up so the blade is already travelling when the
-        // damage lands.
+        // The cut and the settle occupy the recovery window, where the visible
+        // motion belongs; the haul-back rides the tail of the wind-up so the blade
+        // is already travelling when the damage lands.
         const side = this.swingDirection;
 
         if (input.phase === 'windup') {
-          // Raise into the high corner, late. Anticipation is only readable if it
-          // happens immediately before the strike.
-          const w = easeIn(Math.max(0, (input.progress - 0.5) / 0.5));
+          // Haul back behind the shoulder: out to the side, up a little, and back
+          // towards the camera so the weapon partly leaves frame. Late, because
+          // anticipation only reads if it happens just before the strike.
+          const w = easeIn(Math.max(0, (input.progress - 0.45) / 0.55));
           ry += w * SWING_WINDBACK * side;
           rx += w * SWING_PITCH_RISE;
           rz += w * SWING_ROLL * side;
-          ox += w * SWING_CROSS_X * 0.3 * side;
+          ox += w * SWING_CROSS_X * 0.42 * side;
           oy += w * SWING_RISE_Y;
-          oz += w * 0.06;
+          // Positive Z is towards the camera: the weapon is being cocked back.
+          oz += w * SWING_REACH * 0.55;
           break;
         }
 
         if (input.progress < SWING_SWEEP_FRACTION) {
-          // The cut: the fastest, most emphasised part of the motion. Yaw carries
-          // it across, pitch carries it down, roll keeps the edge leading.
+          // The cut. Fast, flat-ish, and driving forward — the arm extends into the
+          // strike instead of the wrist merely rotating.
           const t = easeOut(input.progress / SWING_SWEEP_FRACTION);
           ry += (SWING_WINDBACK - (SWING_WINDBACK + SWING_ARC) * t) * side;
           rx += SWING_PITCH_RISE - SWING_PITCH_DROP * t;
           rz += (SWING_ROLL - SWING_ROLL * 2 * t) * side;
-          ox += (SWING_CROSS_X * 0.3 - SWING_CROSS_X * 1.3 * t) * side;
+          ox += (SWING_CROSS_X * 0.42 - SWING_CROSS_X * 1.42 * t) * side;
           oy += SWING_RISE_Y - (SWING_RISE_Y + SWING_DROP_Y) * t;
-          // A slight forward push through the middle of the cut, easing back out.
-          oz += 0.06 - Math.sin(t * Math.PI) * 0.12;
+          // Cocked back, thrown forward past the carry position, then easing off as
+          // the arm reaches the end of its travel.
+          oz += SWING_REACH * 0.55 - SWING_REACH * 1.55 * Math.sin(t * 1.9);
         } else {
-          // The return: ease everything back to rest from the low corner.
+          // The settle: having over-travelled, the weapon comes back to a low
+          // central guard rather than snapping straight to the carry pose.
           const t = easeInOut((input.progress - SWING_SWEEP_FRACTION) / (1 - SWING_SWEEP_FRACTION));
           const settle = 1 - t;
           ry += -SWING_ARC * side * settle;
           rx += (SWING_PITCH_RISE - SWING_PITCH_DROP) * settle;
           rz += -SWING_ROLL * side * settle;
           ox += -SWING_CROSS_X * side * settle;
-          oy += -SWING_DROP_Y * settle;
+          // A hold at the end of the follow-through, which is what stops the
+          // recovery looking like the cut played backwards.
+          oy += (SWING_GUARD_Y - SWING_DROP_Y) * settle;
+          oz += -SWING_REACH * 0.25 * settle;
         }
         break;
       }
-
       case 'thrust': {
         // Straight at the crosshair.
         //
-        // The weapon rests angled up and to the left, so simply extending along
-        // its own axis sent the point off towards the upper-left corner instead of
-        // at whatever the player was aiming at. The fix is to straighten the
-        // weapon as it extends: cancel the resting yaw and pitch in proportion to
-        // how far it is thrust, and draw the hand in towards screen centre, so the
-        // tip converges on the crosshair at full extension.
+        // The angles are not hand-tuned. Earlier versions cancelled fractions of
+        // the resting rotation and pulled the hand part-way towards screen centre,
+        // which got the tip *close* to the crosshair and left it visibly low and to
+        // one side — a residual you cannot fix by nudging constants, because the
+        // error depends on the hand's position, the blade's length and the camera's
+        // field of view all at once.
+        //
+        // Instead the blade is aimed: `thrustAim` below solves for the rotation
+        // that puts the tip on the view axis from wherever the hand actually is, so
+        // it converges on the crosshair by construction. See `aimAt`.
         const extension =
           input.phase === 'windup'
             ? -0.2 * easeOut(input.progress)
@@ -544,16 +575,12 @@ export class ViewModel {
               : // ...then draw back more slowly.
                 0.72 * (1 - easeInOut((input.progress - 0.3) / 0.7));
 
-        // Only straighten while actually extending forward.
-        const align = Math.max(0, extension) / 0.72;
-
-        // Cancel the resting angles so the blade lines up with the view axis.
-        rx -= rest.rotation.x * align * 0.92;
-        ry -= rest.rotation.y * align * 0.92;
-        rz -= rest.rotation.z * align * 0.6;
-        // And bring the hand in from its resting offset towards the centre.
-        ox -= px * THRUST_CENTRING * align;
-        oy += (-0.05 - py) * 0.3 * align;
+        // Only aim while actually extending forward.
+        thrustAim = Math.max(0, extension) / 0.72;
+        // Draw the hand in towards centre as it extends, so the whole weapon — not
+        // just its point — reads as committed down the line of attack.
+        ox -= px * THRUST_CENTRING * thrustAim;
+        oy += (-0.05 - py) * 0.3 * thrustAim;
         oz -= extension;
         break;
       }
@@ -647,6 +674,9 @@ export class ViewModel {
     // drives the point away from the crosshair — which is where the player is
     // actually aiming, and what they judge the attack against.
 
+    // Aim the blade at the crosshair, blending in over the thrust's extension.
+    if (thrustAim > 0) this.aimAt(this.mainHand, thrustAim);
+
     // In thrust mode the weapon is levelled along the line of attack; in swing
     // mode it is carried angled, so the stance reads before you even attack.
     if (input.action === 'idle' && this.currentMain?.group && !held.bow) {
@@ -657,6 +687,52 @@ export class ViewModel {
       this.mainHand.rotation.y += levelled ? -0.34 : 0.05;
       this.mainHand.rotation.z += levelled ? -0.06 : -0.2;
     }
+  }
+
+  /**
+   * Rotates a hand so the weapon it holds points its tip at the crosshair.
+   *
+   * The crosshair is the camera's -Z axis, so the target is any point along it.
+   * Picking one a blade's length ahead of the hand keeps the weapon reaching
+   * forward rather than swinging round to point across itself.
+   *
+   * Solving this beats tuning it. The offset between tip and crosshair depends on
+   * where the hand sits, how long the blade is, and the camera's field of view; a
+   * constant that lines them up for one weapon is wrong for the next. Aiming is
+   * correct for all of them, and stays correct when any of those change.
+   *
+   * @param weight 0 leaves the composed pose alone, 1 aims fully
+   */
+  private aimAt(hand: THREE.Group, weight: number): void {
+    const reach = TIP_LOCAL.length() * hand.scale.z;
+    // A point on the view axis, `reach` further out than the hand already is.
+    this.tmpTarget.set(0, 0, hand.position.z - reach);
+    this.tmpForward.copy(this.tmpTarget).sub(hand.position);
+    if (this.tmpForward.lengthSq() < 1e-8) return;
+    this.tmpForward.normalize();
+
+    this.tmpAim.setFromUnitVectors(BLADE_AXIS, this.tmpForward);
+    this.tmpPose.setFromEuler(hand.rotation);
+    this.tmpPose.slerp(this.tmpAim, THREE.MathUtils.clamp(weight, 0, 1));
+    hand.quaternion.copy(this.tmpPose);
+  }
+
+  /**
+   * Where the held weapon's tip lands on screen, in normalised device coordinates
+   * relative to the crosshair. (0, 0) is dead centre; 1 is half the viewport.
+   *
+   * Exposed so "the thrust points at the crosshair" can be checked as a measured
+   * offset rather than as a proxy like "the hand moved inwards", which was true
+   * while the tip still sat visibly low and to the right.
+   */
+  tipScreenOffset(): { x: number; y: number } | null {
+    if (!this.currentMain || !this.mainHand.visible) return null;
+    this.mainHand.updateMatrixWorld(true);
+    this.tmpTip.copy(TIP_LOCAL).applyMatrix4(this.mainHand.matrixWorld);
+    // Behind the camera: no meaningful screen position.
+    if (this.tmpTip.z > -0.001) return null;
+    this.tmpTip.project(this.camera);
+    return { x: this.tmpTip.x, y: this.tmpTip.y };
   }
 
   private poseBowString(held: HeldVisual, draw: number): void {

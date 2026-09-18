@@ -122,6 +122,25 @@ export const ARCHETYPES: readonly EnemyArchetype[] = [
     ],
   },
   {
+    id: 'giant_spider',
+    name: 'Giant Spider',
+    minLevel: 3,
+    weight: 13,
+    baseHp: 20,
+    hpPerLevel: 4,
+    // Fast and low: it closes the distance far quicker than anything else at its
+    // level, which is the whole threat. Armour is nil, so it dies to one good hit.
+    speed: 5.2,
+    aggroRange: 14,
+    xp: 22,
+    look: { body: 0x4a3a30, head: 0x2e2622, accent: 0xb08a68, scale: 1.0 },
+    defense: { armor: 0, resist: { slash: -0.15, pierce: 0.1, blunt: 0 } },
+    armorPerTier: 0.5,
+    melee: { damage: 9, type: 'pierce', reach: 2.2, windup: 0.3, recovery: 0.25, cooldown: 0.9, armorPierce: 0.5, knockback: 2 },
+    extraLoot: [{ itemId: 'healing_draught', chance: 0.12, min: 1, max: 1 }],
+    hint: 'Quick, fragile, and it bites through armour. Kill it before it reaches you.',
+  },
+  {
     id: 'orc_brute',
     name: 'Orc Brute',
     minLevel: 4,

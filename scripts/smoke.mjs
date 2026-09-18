@@ -171,7 +171,17 @@ try {
   await page.evaluate(() => window.__voxelquest.debugSetLookEnabled(false));
 
   console.log('\n[streaming + rendering]');
-  const streamed = await snapshot();
+  // Poll for the chunk count rather than reading it once.
+  //
+  // Streaming is paced by a per-frame mesh budget, so how many chunks exist at any
+  // given instant is a function of how many frames have been rendered — and under a
+  // software renderer that varies with whatever else the machine is doing. Read
+  // once, this asserted a frame rate more than it asserted streaming.
+  let streamed = await snapshot();
+  for (let i = 0; i < 40 && streamed.chunks < 60; i++) {
+    await page.waitForTimeout(250);
+    streamed = await snapshot();
+  }
   check('chunks streamed in', streamed.chunks >= 60, `${streamed.chunks} chunks`);
   check('mesher produced geometry', streamed.triangles > 5000, `${streamed.triangles} triangles`);
   check('draw calls issued', streamed.drawCalls > 0, `${streamed.drawCalls} calls`);
@@ -463,10 +473,20 @@ try {
   // Place a block back into the hole.
   const cobbleBefore = await page.evaluate(() => window.__voxelquest.debugItemCount('block_cobblestone'));
   const editsBefore = await page.evaluate(() => window.__voxelquest.debugEditedBlockCount());
-  await page.mouse.click(CENTER_X, CENTER_Y, { button: 'right' });
-  await page.waitForTimeout(400);
-  const cobbleAfter = await page.evaluate(() => window.__voxelquest.debugItemCount('block_cobblestone'));
-  const editsAfter = await page.evaluate(() => window.__voxelquest.debugEditedBlockCount());
+  // Click until it lands. Placement has a cooldown shared with the attack that
+  // just ran, so a single click behind a fixed wait can be swallowed entirely —
+  // which tests the timing of one click rather than whether placing works.
+  let cobbleAfter = cobbleBefore;
+  let editsAfter = editsBefore;
+  for (let attempt = 0; attempt < 6 && editsAfter <= editsBefore; attempt++) {
+    await page.mouse.click(CENTER_X, CENTER_Y, { button: 'right' });
+    for (let poll = 0; poll < 8; poll++) {
+      await page.waitForTimeout(80);
+      editsAfter = await page.evaluate(() => window.__voxelquest.debugEditedBlockCount());
+      if (editsAfter > editsBefore) break;
+    }
+  }
+  cobbleAfter = await page.evaluate(() => window.__voxelquest.debugItemCount('block_cobblestone'));
   check(
     'placing a block consumes it and edits the world',
     cobbleAfter < cobbleBefore && editsAfter >= editsBefore,
@@ -538,6 +558,46 @@ try {
     return { view: seen, pose: extreme };
   };
 
+  /**
+   * Records the whole trajectory of an attack and returns each axis's range.
+   *
+   * A single sampled frame cannot measure how a motion travels. A diagonal cut
+   * crosses the middle of its own X, where the vertical offset is back at rest by
+   * construction — so whether a "is it diagonal" check passed depended entirely on
+   * which frame the sampler happened to catch, and it failed on a swing that was
+   * behaving perfectly. Range over the whole animation is the honest measure.
+   */
+  const sampleTrajectory = async (expectMode) => {
+    await waitForIdle();
+    await page.evaluate(() => window.__voxelquest.debugRefill());
+    await page.mouse.click(CENTER_X, CENTER_Y);
+
+    const keys = ['posX', 'posY', 'posZ', 'rotX', 'rotY', 'rotZ'];
+    const min = {};
+    const max = {};
+    let frames = 0;
+    for (let i = 0; i < 80; i++) {
+      const [view, pose] = await Promise.all([
+        page.evaluate(() => window.__voxelquest.debugViewState()),
+        page.evaluate(() => window.__voxelquest.debugViewPose()),
+      ]);
+      if (view.action === expectMode) {
+        frames++;
+        for (const key of keys) {
+          const v = pose[key] ?? 0;
+          min[key] = min[key] === undefined ? v : Math.min(min[key], v);
+          max[key] = max[key] === undefined ? v : Math.max(max[key], v);
+        }
+      } else if (frames > 0) {
+        break;
+      }
+      await page.waitForTimeout(25);
+    }
+    const range = {};
+    for (const key of keys) range[key] = (max[key] ?? 0) - (min[key] ?? 0);
+    return { range, frames };
+  };
+
   // Reference pose with nothing happening, so animations can be measured as
   // offsets from rest rather than as absolute numbers (the rest pose already
   // carries a large yaw, which would swamp any absolute comparison).
@@ -546,6 +606,10 @@ try {
 
   const swingSample = await sampleAttack('swing');
   check('swinging drives a swing animation', swingSample.view?.action === 'swing', `action ${swingSample.view?.action}, phase ${swingSample.view?.phase}`);
+
+  // A second swing, to check the pair alternates. Consecutive slashes are supposed
+  // to cut along opposite diagonals so that together they trace an X.
+  const swingSampleB = await sampleAttack('swing');
 
   await waitForIdle();
   const modeSet = await page.evaluate(() => window.__voxelquest.debugSetAttackMode('thrust'));
@@ -594,12 +658,39 @@ try {
     `axial ${thrustAxial.toFixed(2)} vs lateral ${thrustLateral.toFixed(2)}`,
   );
 
-  // The swing must be dominated by yaw, since it is a horizontal slash.
+  // A slash is diagonal: it must travel across the view *and* down it. A purely
+  // horizontal sweep — which is what this used to assert — reads as the weapon
+  // being waved rather than swung, because nothing about it moves the way a cut
+  // does.
+  //
+  // Measured as the range over the whole animation, not from one frame: see
+  // sampleTrajectory.
+  await waitForIdle();
+  await page.evaluate(() => window.__voxelquest.debugSetAttackMode('swing'));
+  const swingTravel = await sampleTrajectory('swing');
+  const acrossRange = swingTravel.range.rotY + swingTravel.range.posX;
+  const downRange = swingTravel.range.rotX + swingTravel.range.posY;
   check(
-    'the swing rotates mostly about the vertical axis',
-    delta(swingPose, 'rotY') > delta(swingPose, 'rotX'),
-    `rotY ${delta(swingPose, 'rotY').toFixed(2)} vs rotX ${delta(swingPose, 'rotX').toFixed(2)}`,
+    'the swing cuts diagonally, across and down',
+    acrossRange > 0.4 && downRange > 0.4,
+    `across ${acrossRange.toFixed(2)}, down ${downRange.toFixed(2)} over ${swingTravel.frames} frames`,
   );
+
+  // And consecutive slashes mirror each other, which is what makes the X.
+  //
+  // Read from the recorded history rather than inferred from a sampled pose. The
+  // first version of this compared the most extreme pose of each swing, which
+  // depends on which frame the sampler happened to catch: it reported two swings
+  // as cutting the same way when the second had simply been caught at the start of
+  // its travel rather than the end.
+  const directions = (await page.evaluate(() => window.__voxelquest.debugViewState())).swingDirections ?? [];
+  const lastTwo = directions.slice(-2);
+  check(
+    'consecutive swings cut along opposite diagonals',
+    lastTwo.length === 2 && lastTwo[0] === -lastTwo[1],
+    `directions ${JSON.stringify(directions)}`,
+  );
+  void swingSampleB;
   // And a thrust must bring the weapon towards the centre, not away from it.
   check(
     'a thrust moves the weapon towards screen centre',

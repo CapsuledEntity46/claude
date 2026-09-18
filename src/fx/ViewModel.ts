@@ -2,6 +2,25 @@ import * as THREE from 'three';
 import { blockDef } from '../world/blocks';
 import { tryItem, type ItemDef } from '../combat/items';
 import type { AttackMode } from '../combat/types';
+import { Particles, POINT_SIZE_SCALE } from './Particles';
+import {
+  MODEL_MAT,
+  blockModel,
+  bowModel,
+  buildToolModel,
+  crossbowModel,
+  firearmModel,
+  fistModel,
+  haftedModel,
+  shieldModel,
+  spellModel,
+  swordModel,
+  thrownModel,
+  torchModel,
+  type BowParts,
+  type SpellParts,
+  type TorchParts,
+} from './models';
 
 /**
  * First-person view model: the weapon, torch, and shield you can actually see.
@@ -44,218 +63,11 @@ export interface ViewModelInput {
   lookDy: number;
 }
 
-// ------------------------------------------------------------------ materials
-
-const MAT = {
-  steel: new THREE.MeshLambertMaterial({ color: 0xdde4ee }),
-  darkIron: new THREE.MeshLambertMaterial({ color: 0x6b7280 }),
-  wood: new THREE.MeshLambertMaterial({ color: 0x7a5a34 }),
-  darkWood: new THREE.MeshLambertMaterial({ color: 0x46321e }),
-  leather: new THREE.MeshLambertMaterial({ color: 0x6f4a30 }),
-  gold: new THREE.MeshLambertMaterial({ color: 0xc9a227 }),
-  skin: new THREE.MeshLambertMaterial({ color: 0xc99a72 }),
-  cloth: new THREE.MeshLambertMaterial({ color: 0x8a6a4a }),
-  flame: new THREE.MeshBasicMaterial({ color: 0xffb347 }),
-  string: new THREE.LineBasicMaterial({ color: 0xded4c0 }),
-};
-
-function box(w: number, h: number, d: number, material: THREE.Material, x = 0, y = 0, z = 0): THREE.Mesh {
-  const mesh = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), material);
-  mesh.position.set(x, y, z);
-  return mesh;
-}
-
-/** A fist wrapped around the grip, so items look held rather than floating. */
-function hand(x = 0, y = 0, z = 0): THREE.Mesh {
-  return box(0.062, 0.068, 0.085, MAT.skin, x, y, z);
-}
-
-// ------------------------------------------------------------------ item meshes
-
-/**
- * Weapons are built pointing along -Z (away from the camera). That is the
- * natural orientation for a thrust, and swings simply rotate this rest pose.
- */
-function bladeWeapon(bladeLength: number, bladeWidth: number, guard: number, tint: THREE.Material): THREE.Group {
-  const g = new THREE.Group();
-  g.add(hand(0, 0, 0.02));
-  g.add(box(0.035, 0.045, 0.13, MAT.darkWood, 0, 0, 0.04)); // grip
-  g.add(box(0.028, 0.028, 0.03, MAT.gold, 0, 0, 0.11)); // pommel
-  if (guard > 0) g.add(box(guard, 0.03, 0.035, MAT.gold, 0, 0, -0.04)); // crossguard
-  g.add(box(bladeWidth, 0.022, bladeLength, tint, 0, 0, -0.06 - bladeLength / 2));
-  // Tapered tip.
-  g.add(box(bladeWidth * 0.45, 0.02, 0.07, tint, 0, 0, -0.06 - bladeLength - 0.03));
-  return g;
-}
-
-function haftedWeapon(shaft: number, head: 'mace' | 'hammer' | 'axe' | 'spear' | 'halberd'): THREE.Group {
-  const g = new THREE.Group();
-  g.add(hand(0, 0, 0.02));
-  g.add(box(0.038, 0.038, shaft, MAT.wood, 0, 0, 0.06 - shaft / 2));
-  const tipZ = 0.06 - shaft;
-
-  switch (head) {
-    case 'mace':
-      g.add(box(0.11, 0.11, 0.13, MAT.darkIron, 0, 0, tipZ - 0.04));
-      // Flanges, so it reads as blunt rather than bladed.
-      for (const [dx, dy] of [[0.07, 0], [-0.07, 0], [0, 0.07], [0, -0.07]] as const) {
-        g.add(box(0.05, 0.05, 0.09, MAT.darkIron, dx, dy, tipZ - 0.04));
-      }
-      break;
-    case 'hammer':
-      g.add(box(0.19, 0.13, 0.15, MAT.darkIron, 0, 0, tipZ - 0.05));
-      g.add(box(0.05, 0.05, 0.1, MAT.steel, 0, 0, tipZ - 0.16));
-      break;
-    case 'axe':
-      g.add(box(0.03, 0.2, 0.19, MAT.steel, 0.02, 0.06, tipZ - 0.05));
-      g.add(box(0.06, 0.09, 0.08, MAT.darkIron, 0, 0, tipZ - 0.03));
-      break;
-    case 'spear':
-      g.add(box(0.05, 0.05, 0.16, MAT.steel, 0, 0, tipZ - 0.06));
-      g.add(box(0.02, 0.02, 0.08, MAT.steel, 0, 0, tipZ - 0.17));
-      break;
-    case 'halberd':
-      // Axe head and a forward spike: the shape that justifies both attack modes.
-      g.add(box(0.03, 0.18, 0.15, MAT.steel, 0.03, 0.05, tipZ + 0.02));
-      g.add(box(0.045, 0.045, 0.2, MAT.steel, 0, 0, tipZ - 0.08));
-      g.add(box(0.02, 0.09, 0.05, MAT.darkIron, -0.03, -0.04, tipZ + 0.02));
-      break;
-  }
-  return g;
-}
-
-interface BowParts {
-  group: THREE.Group;
-  string: THREE.Line;
-  nock: THREE.Object3D;
-  arrow: THREE.Mesh;
-}
-
-function bowMesh(): BowParts {
-  const group = new THREE.Group();
-  group.add(hand(0.02, -0.02, 0.02));
-
-  // Limbs, angled to suggest a curve without a real spline.
-  const upper = box(0.03, 0.34, 0.03, MAT.darkWood, 0, 0.19, 0);
-  upper.rotation.x = 0.22;
-  const lower = box(0.03, 0.34, 0.03, MAT.darkWood, 0, -0.19, 0);
-  lower.rotation.x = -0.22;
-  group.add(box(0.045, 0.12, 0.045, MAT.wood, 0, 0, 0), upper, lower);
-
-  const nock = new THREE.Object3D();
-  nock.position.set(0, 0, 0.02);
-  group.add(nock);
-
-  const stringGeometry = new THREE.BufferGeometry().setFromPoints([
-    new THREE.Vector3(0, 0.35, 0.04),
-    new THREE.Vector3(0, 0, 0.04),
-    new THREE.Vector3(0, -0.35, 0.04),
-  ]);
-  const string = new THREE.Line(stringGeometry, MAT.string);
-  group.add(string);
-
-  const arrow = box(0.016, 0.016, 0.6, MAT.wood, 0, 0, -0.2);
-  group.add(arrow);
-
-  return { group, string, nock, arrow };
-}
-
-function crossbowMesh(): THREE.Group {
-  const g = new THREE.Group();
-  g.add(hand(0, -0.04, 0.06));
-  g.add(box(0.05, 0.055, 0.42, MAT.darkWood, 0, 0, -0.06)); // stock
-  g.add(box(0.34, 0.028, 0.035, MAT.darkIron, 0, 0.015, -0.2)); // limbs
-  g.add(box(0.02, 0.02, 0.34, MAT.steel, 0, 0.045, -0.12)); // bolt track
-  g.add(box(0.03, 0.06, 0.03, MAT.darkIron, 0, -0.05, 0.02)); // trigger guard
-  return g;
-}
-
-function firearmMesh(long: boolean): THREE.Group {
-  const g = new THREE.Group();
-  const barrelLength = long ? 0.62 : 0.3;
-  g.add(hand(0, -0.03, 0.05));
-  g.add(box(0.05, 0.07, 0.2, MAT.darkWood, 0, -0.01, 0.06)); // stock
-  g.add(box(0.036, 0.036, barrelLength, MAT.darkIron, 0, 0.03, -barrelLength / 2 - 0.02)); // barrel
-  g.add(box(0.045, 0.05, 0.07, MAT.steel, 0.02, 0.04, 0.0)); // lock plate
-  g.add(box(0.02, 0.05, 0.02, MAT.gold, 0.03, 0.07, 0.01)); // hammer/cock
-  if (long) g.add(box(0.03, 0.05, 0.12, MAT.darkWood, 0, -0.04, 0.16)); // butt
-  return g;
-}
-
-interface TorchParts {
-  group: THREE.Group;
-  flame: THREE.Mesh;
-  light: THREE.PointLight;
-}
-
-function torchMesh(): TorchParts {
-  const group = new THREE.Group();
-  group.add(hand(0, -0.02, 0.04));
-  group.add(box(0.026, 0.026, 0.24, MAT.darkWood, 0, 0, -0.07));
-
-  const flame = new THREE.Mesh(new THREE.OctahedronGeometry(0.037, 0), MAT.flame);
-  flame.position.set(0, 0.012, -0.21);
-  group.add(flame);
-
-  // Lights the view model itself; the world light is separate.
-  const light = new THREE.PointLight(0xffb055, 1.5, 3.2, 2);
-  light.position.copy(flame.position);
-  group.add(light);
-
-  return { group, flame, light };
-}
-
-function shieldMesh(size: number): THREE.Group {
-  const g = new THREE.Group();
-  const w = 0.24 * size;
-  const h = 0.3 * size;
-  g.add(box(w, h, 0.04, MAT.darkWood, 0, 0, 0));
-  g.add(box(w * 1.06, 0.045, 0.05, MAT.darkIron, 0, h * 0.4, 0));
-  g.add(box(w * 1.06, 0.045, 0.05, MAT.darkIron, 0, -h * 0.4, 0));
-  g.add(box(0.06, 0.06, 0.055, MAT.gold, 0, 0, -0.025)); // boss
-  g.add(hand(0.015, -0.015, 0.05));
-  return g;
-}
-
-function blockMesh(color: THREE.ColorRepresentation): THREE.Group {
-  const g = new THREE.Group();
-  g.add(new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.18, 0.18), new THREE.MeshLambertMaterial({ color })));
-  g.add(hand(-0.04, -0.11, 0.07));
-  return g;
-}
-
-interface SpellParts {
-  group: THREE.Group;
-  orb: THREE.Mesh;
-  light: THREE.PointLight;
-}
-
-function spellMesh(color: number): SpellParts {
-  const group = new THREE.Group();
-  // An open palm with the spell gathering above it.
-  group.add(box(0.11, 0.05, 0.14, MAT.skin, 0, -0.06, 0.02));
-  group.add(box(0.1, 0.06, 0.04, MAT.cloth, 0, -0.05, 0.1));
-
-  const orb = new THREE.Mesh(
-    new THREE.IcosahedronGeometry(0.075, 0),
-    new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.9 }),
-  );
-  orb.position.set(0, 0.02, -0.04);
-  group.add(orb);
-
-  const light = new THREE.PointLight(color, 1.2, 2.4, 2);
-  light.position.copy(orb.position);
-  group.add(light);
-
-  return { group, orb, light };
-}
-
-function fistMesh(): THREE.Group {
-  const g = new THREE.Group();
-  g.add(box(0.1, 0.11, 0.15, MAT.skin, 0, 0, 0));
-  g.add(box(0.085, 0.09, 0.12, MAT.cloth, 0, -0.01, 0.12));
-  return g;
-}
+// ------------------------------------------------------------------ models
+//
+// Item geometry lives in ./models. It used to be assembled here out of
+// axis-aligned boxes to match the voxel world, which made every weapon read as a
+// stack of bricks. Items are now free low-poly shapes with no grid restriction.
 
 // ------------------------------------------------------------------ view model
 
@@ -278,27 +90,75 @@ interface HeldVisual {
  * visible frame is only about 0.6 units tall, so anything hand-sized dominates
  * the view.
  */
-const REST_MAIN = new THREE.Vector3(0.29, -0.24, -0.6);
-const REST_OFFHAND = new THREE.Vector3(-0.36, -0.32, -0.56);
-/** Shrinks the whole rig without changing any individual mesh. */
-const HAND_SCALE = 0.82;
+const REST_MAIN = new THREE.Vector3(0.30, -0.30, -0.52);
+const REST_OFFHAND = new THREE.Vector3(-0.34, -0.34, -0.48);
+/**
+ * Scales the whole rig without changing any individual mesh.
+ *
+ * Raised from 0.82: held items looked correctly proportioned when inspected in
+ * isolation and too small in the actual viewport, which is the usual way round for
+ * a first-person model. A weapon has to have real presence at the bottom of the
+ * screen to feel like you are holding it.
+ */
+const HAND_SCALE = 0.95;
+/** Off-hand items sit slightly closer, so they need a little less scale. */
+const OFFHAND_SCALE = 1.0;
+/**
+ * The torch model is chunky in its own right — haft, bound head, and flame come to
+ * roughly 0.65 units — so it needs scaling *down* here, not up.
+ *
+ * At 0.52 units from a camera this wide the visible frame is only about 0.65 units
+ * tall, so an unscaled torch is taller than the screen; the first attempt at
+ * "bigger" did exactly that and blotted out the middle of the view. This lands it
+ * at roughly twice the old torch's size while still leaving somewhere to look.
+ */
+const TORCH_SCALE = 0.6;
 /** Roughly where a blade's point sits, in the hand's local space. */
 const TIP_LOCAL = new THREE.Vector3(0, 0, -0.78);
 /** Half-angle of the swing arc, in radians. Wide enough to cross the whole view. */
 /**
- * Swing geometry.
+ * Swing geometry: a diagonal slash, alternating sides to trace an X.
  *
- * The sweep is about 53 degrees of yaw, which is the range a first-person slash
- * reads well at: far enough to cross the view, not so far that the weapon leaves
- * the screen. An earlier attempt drove the hand around a full circular path
- * instead, which sent the blade over the top of the view and off the edge.
+ * Consecutive attacks cut the opposite way — one from the upper right down to the
+ * lower left, the next from the upper left down to the lower right — so a run of
+ * attacks draws an X across the view rather than repeating one clip.
+ *
+ * This replaced a flat horizontal yaw sweep. A purely horizontal slash reads as
+ * the weapon being waved rather than swung, because nothing about it travels the
+ * way a cut does: a real slash starts high on one side and finishes low on the
+ * other, so the motion has to carry pitch and roll alongside the yaw. Before that
+ * there was a circular screen-space path, which sent the blade off the edge of the
+ * view entirely.
  */
-const SWING_WINDBACK = 0.3;
-const SWING_ARC = 0.92;
+const SWING_WINDBACK = 0.34;
+/** Total yaw travel, about 62 degrees — enough to cross the view. */
+const SWING_ARC = 1.08;
+/** How high the tip is cocked before the cut, and how far it falls through it. */
+const SWING_PITCH_RISE = 0.34;
+const SWING_PITCH_DROP = 0.72;
+/** Roll travel, which is what angles the edge along the diagonal. */
+const SWING_ROLL = 0.52;
+/** Screen-space travel of the hand, from the high corner to the low one. */
+const SWING_RISE_Y = 0.15;
+const SWING_DROP_Y = 0.17;
+const SWING_CROSS_X = 0.34;
 /** Share of the recovery window spent sweeping, with the rest easing back. */
 const SWING_SWEEP_FRACTION = 0.55;
 /** How far a thrust pulls the hand in towards screen centre. */
 const THRUST_CENTRING = 0.72;
+
+/** Stepped ember palette, matching the world's torches. */
+const EMBER_COLORS = [0xfff0c0, 0xffc050, 0xff8a28, 0xd8541a] as const;
+/**
+ * On-screen size of a torch ember, in pixels.
+ *
+ * Specified in pixels rather than world units on purpose. The flame is about half
+ * a unit from the camera, where an eyeballed world size is wildly wrong: the first
+ * attempt filled the screen with 14px slabs, and correcting it by distance alone
+ * overshot into 4px specks. `POINT_SIZE_SCALE` inverts the shader's perspective
+ * divide so the intended size is what actually lands.
+ */
+const EMBER_PIXELS = 7;
 
 export class ViewModel {
   /** Rendered separately, after the world, with depth cleared. */
@@ -320,15 +180,40 @@ export class ViewModel {
   private ambient: THREE.AmbientLight;
   private keyLight: THREE.DirectionalLight;
 
+  /**
+   * Embers for the held torch, in the view model's *own* scene.
+   *
+   * Deliberately not the world particle system. The view model renders through its
+   * own narrower camera, so a point shared between the two spaces projects to two
+   * different places on screen — which is exactly why the torch's sparks used to
+   * drift away from the flame that was supposedly throwing them. Keeping the
+   * effect in the same scene as the flame makes the two agree by construction.
+   */
+  private readonly embers = new Particles();
+  private emberTimer = 0;
+  private readonly tmpVec = new THREE.Vector3();
+
   private walkClock = 0;
   private mineClock = 0;
   private idleClock = 0;
   /**
-   * Which way the next horizontal swing travels: +1 for right-to-left, -1 for
-   * left-to-right. Alternating (with a random start) stops repeated attacks from
-   * looking like the same looping clip.
+   * Which diagonal the next slash cuts along: +1 from the upper right down to the
+   * lower left, -1 the mirror image.
+   *
+   * Strictly alternating, not randomised. This used to flip on a 62% coin toss to
+   * avoid a mechanical rhythm, but the two diagonals are only read as an X if they
+   * reliably follow one another — a random repeat of the same cut breaks the shape.
    */
   private swingDirection = 1;
+  /**
+   * The diagonal each recent slash cut along, most recent last.
+   *
+   * Recorded rather than inferred. A test can only tell which way a slash went by
+   * catching it mid-animation, and sampling the "most extreme" pose picks whichever
+   * frame happened to land — which reported two swings as travelling the same way
+   * when they had not. The history makes the alternation checkable after the fact.
+   */
+  private swingHistory: number[] = [];
   private lastSwingPhase: ViewPhase = 'none';
   private recoil = 0;
   private lastShotCounter = 0;
@@ -346,9 +231,9 @@ export class ViewModel {
     this.keyLight.position.set(-0.4, 0.9, 0.6);
 
     this.mainHand.scale.setScalar(HAND_SCALE);
-    this.offHand.scale.setScalar(HAND_SCALE);
-    this.torchHand.scale.setScalar(HAND_SCALE);
-    this.scene.add(this.ambient, this.keyLight, this.mainHand, this.offHand, this.torchHand);
+    this.offHand.scale.setScalar(OFFHAND_SCALE);
+    this.torchHand.scale.setScalar(OFFHAND_SCALE);
+    this.scene.add(this.ambient, this.keyLight, this.mainHand, this.offHand, this.torchHand, this.embers.points);
   }
 
   setAspect(aspect: number): void {
@@ -393,34 +278,31 @@ export class ViewModel {
 
     if (def.kind === 'block' && def.block !== undefined) {
       const c = blockDef(def.block).side;
-      group = blockMesh(new THREE.Color(c[0], c[1], c[2]));
+      group = blockModel(new THREE.Color(c[0], c[1], c[2]));
       rest.rotation.set(-0.2, 0.5, 0.1);
     } else if (def.kind === 'spell' && def.spell) {
       const color = def.spell.type === 'fire' ? 0xff7a30 : def.spell.kind === 'heal' ? 0x7ce890 : 0xa870ff;
-      spell = spellMesh(color);
+      spell = spellModel(color);
       group = spell.group;
       rest.rotation.set(-0.25, 0, 0);
     } else if (def.kind === 'torch') {
-      torch = torchMesh();
+      torch = torchModel(TORCH_SCALE);
       group = torch.group;
-      // Held near-upright so the flame sits clear of the hand.
-      rest.rotation.set(1.02, 0.15, 0.18);
+      // Carried near-upright and canted outwards, so the flame sits clear of both
+      // the hand and the shield behind it.
+      rest.rotation.set(-0.2, 0.12, 0.2);
     } else if (def.kind === 'shield') {
-      // Bucklers are small, tower shields are walls; reflect that on screen.
-      const size = def.id === 'tower_shield' ? 1.45 : def.id === 'iron_kite_shield' ? 1.18 : 1;
-      group = shieldMesh(size);
-      rest.rotation.set(0.05, 0.42, 0.08);
+      // Bucklers are round and small; kite and tower shields are cover you hide
+      // behind, and have to be big enough on screen to read that way.
+      const shape = def.id === 'wooden_buckler' ? 'buckler' : def.id === 'tower_shield' ? 'tower' : 'kite';
+      const size = def.id === 'tower_shield' ? 1.25 : def.id === 'iron_kite_shield' ? 1.2 : 1.1;
+      group = shieldModel(shape, size);
+      rest.rotation.set(0.04, 0.34, 0.06);
     } else if (def.kind === 'tool') {
-      // A boxy sidearm silhouette, so it reads as a device rather than a weapon.
-      group = new THREE.Group();
-      group.add(box(0.07, 0.09, 0.26, MAT.darkIron, 0, 0.01, -0.06));
-      group.add(box(0.05, 0.05, 0.16, MAT.steel, 0, 0.05, -0.2));
-      group.add(box(0.05, 0.1, 0.06, MAT.gold, 0, 0.09, -0.02));
-      group.add(box(0.05, 0.12, 0.06, MAT.darkWood, 0, -0.07, 0.05));
-      group.add(hand(0, -0.05, 0.05));
+      group = buildToolModel();
       rest.rotation.set(-0.05, 0.2, 0.05);
     } else if (def.kind === 'consumable' || def.kind === 'ammo' || def.kind === 'armor') {
-      group = blockMesh(0xa08050);
+      group = blockModel(0xa08050);
       rest.rotation.set(-0.2, 0.4, 0);
     } else if (def.weapon) {
       const weapon = def.weapon;
@@ -428,50 +310,61 @@ export class ViewModel {
 
       switch (weapon.class) {
         case 'bow':
-          bow = bowMesh();
+          bow = bowModel();
           group = bow.group;
           rest.rotation.set(0, -0.55, 0.14);
           break;
         case 'crossbow':
-          group = crossbowMesh();
+          group = crossbowModel();
           rest.rotation.set(-0.04, 0.16, 0.03);
           break;
         case 'firearm':
-          group = firearmMesh(def.id !== 'flintlock_pistol');
+          group = firearmModel(def.id !== 'flintlock_pistol');
           rest.rotation.set(-0.03, 0.18, 0.04);
           break;
         case 'thrown':
-          group = new THREE.Group();
-          group.add(new THREE.Mesh(new THREE.SphereGeometry(0.09, 10, 8), MAT.darkIron));
-          group.add(box(0.02, 0.06, 0.02, MAT.cloth, 0, 0.09, 0));
-          group.add(hand(0, -0.06, 0.06));
+          group = thrownModel();
           rest.rotation.set(-0.2, 0, 0);
           break;
         default: {
           // Melee: the silhouette follows the weapon's available attack modes.
           const id = def.id;
-          if (id === 'mace') group = haftedWeapon(0.56, 'mace');
-          else if (id === 'warhammer') group = haftedWeapon(0.72, 'hammer');
-          else if (id === 'battleaxe') group = haftedWeapon(0.66, 'axe');
-          else if (id === 'spear') group = haftedWeapon(0.95, 'spear');
-          else if (id === 'halberd') group = haftedWeapon(0.9, 'halberd');
-          else if (id === 'dagger') group = bladeWeapon(0.22, 0.035, 0.1, MAT.steel);
-          else if (id === 'rapier') group = bladeWeapon(0.7, 0.026, 0.17, MAT.steel);
-          else if (id === 'longsword') group = bladeWeapon(0.72, 0.062, 0.22, MAT.steel);
-          else if (id === 'fists') group = fistMesh();
-          else group = bladeWeapon(0.52, 0.05, 0.17, MAT.steel);
+          if (id === 'mace') group = haftedModel(0.56, 'mace');
+          else if (id === 'warhammer') group = haftedModel(0.72, 'hammer');
+          else if (id === 'battleaxe') group = haftedModel(0.66, 'axe');
+          else if (id === 'spear') group = haftedModel(0.95, 'spear');
+          else if (id === 'halberd') group = haftedModel(0.9, 'halberd');
+          else if (id === 'dagger') {
+            group = swordModel({ bladeLength: 0.24, bladeWidth: 0.05, guardSpan: 0.07, gripLength: 0.09 });
+          } else if (id === 'rapier') {
+            // Almost no taper and a square section: all point, no cutting edge.
+            group = swordModel({
+              bladeLength: 0.74,
+              bladeWidth: 0.032,
+              guardSpan: 0.12,
+              thickness: 0.8,
+              taper: 0.85,
+              fittingMaterial: MODEL_MAT.darkIron,
+            });
+          } else if (id === 'longsword') {
+            group = swordModel({ bladeLength: 0.76, bladeWidth: 0.085, guardSpan: 0.17, gripLength: 0.16 });
+          } else if (id === 'fists') {
+            group = fistModel();
+          } else {
+            group = swordModel({ bladeLength: 0.56, bladeWidth: 0.07, guardSpan: 0.13 });
+          }
           // Angled across the screen with the tip raised. A weapon pointing
           // straight down the view axis is invisible in first person — you only
           // ever see its pommel — so the rest pose has to both yaw it out of the
           // line of sight and pitch the tip up. Note the sign: the blade runs
           // along -Z, and rotating that about +X by `a` gives (0, sin a, -cos a),
           // so a *positive* pitch is what lifts the point.
-          rest.rotation.set(0.46, 0.6, 0.1);
+          rest.rotation.set(0.42, 0.52, 0.16);
           break;
         }
       }
     } else {
-      group = fistMesh();
+      group = fistModel();
     }
 
     return { group, bow, spell, torch, rest, bulky };
@@ -493,10 +386,11 @@ export class ViewModel {
     );
     this.sway.lerp(this.swayTarget, Math.min(1, dt * 9));
 
-    // A new wind-up means a new attack: pick the other side, with a coin flip so
-    // it never settles into a strict left-right-left rhythm.
+    // A new wind-up means a new attack: cut along the other diagonal.
     if (input.phase === 'windup' && this.lastSwingPhase !== 'windup') {
-      this.swingDirection = Math.random() < 0.62 ? -this.swingDirection : this.swingDirection;
+      this.swingDirection = -this.swingDirection;
+      this.swingHistory.push(this.swingDirection);
+      if (this.swingHistory.length > 8) this.swingHistory.shift();
     }
     this.lastSwingPhase = input.phase;
 
@@ -513,6 +407,12 @@ export class ViewModel {
     this.poseMainHand(input);
     this.poseOffHand();
     this.poseTorchHand(input);
+
+    // After posing, so embers spawn from where the flame actually ended up rather
+    // than from where it was last frame.
+    this.torchHand.updateMatrixWorld(true);
+    this.emitTorchEmbers(dt);
+    this.embers.update(dt);
 
     // Held items dim at night unless a torch is lighting them.
     const lit = Math.max(input.daylight, this.currentTorch ? 0.85 : 0);
@@ -574,53 +474,54 @@ export class ViewModel {
 
     switch (input.action) {
       case 'swing': {
-        // A horizontal slash, rotating about the vertical axis so the blade sweeps
-        // across the screen rather than chopping down like a hammer.
+        // A diagonal slash. `side` is +1 for a cut starting at the upper right and
+        // finishing at the lower left, -1 for the mirror image; consecutive
+        // attacks alternate, so the pair traces an X.
         //
         // The pivot is the hand group's own origin, which sits at the grip — i.e.
         // the wrist, at the lower right of the view — so the weapon rotates about
         // the hand rather than about its own centre.
         //
-        // Three phases, following the proportions of a Minecraft-style swing:
-        // a quick cock-back, a fast sweep, then an eased return. The sweep and
-        // return together occupy the recovery window, which is where the visible
-        // motion belongs; the cock-back rides the tail of the wind-up so the blade
-        // is already travelling when the damage lands.
+        // Three phases: a quick cock-back up into the starting corner, a fast cut
+        // down across the view, then an eased return. The cut and return occupy the
+        // recovery window, where the visible motion belongs; the cock-back rides
+        // the tail of the wind-up so the blade is already travelling when the
+        // damage lands.
         const side = this.swingDirection;
 
         if (input.phase === 'windup') {
-          // Hold near rest, then snap back over the last stretch. Anticipation is
-          // only readable if it happens immediately before the strike.
-          const w = easeIn(Math.max(0, (input.progress - 0.55) / 0.45));
+          // Raise into the high corner, late. Anticipation is only readable if it
+          // happens immediately before the strike.
+          const w = easeIn(Math.max(0, (input.progress - 0.5) / 0.5));
           ry += w * SWING_WINDBACK * side;
-          rx += w * -0.2; // tilt back
-          rz += w * 0.1 * side;
-          oz += w * 0.07;
-          ox += w * 0.04 * side;
+          rx += w * SWING_PITCH_RISE;
+          rz += w * SWING_ROLL * side;
+          ox += w * SWING_CROSS_X * 0.3 * side;
+          oy += w * SWING_RISE_Y;
+          oz += w * 0.06;
           break;
         }
 
         if (input.progress < SWING_SWEEP_FRACTION) {
-          // The sweep: the fastest, most emphasised part of the motion.
+          // The cut: the fastest, most emphasised part of the motion. Yaw carries
+          // it across, pitch carries it down, roll keeps the edge leading.
           const t = easeOut(input.progress / SWING_SWEEP_FRACTION);
-          const travel = SWING_WINDBACK + SWING_ARC;
-          ry += (SWING_WINDBACK - travel * t) * side;
-          // A dip and a forward push layered on, so it is not a flat rotation.
-          rx += -0.2 + t * 0.34;
-          rz += (0.1 - t * 0.4) * side;
-          oy += t * -0.1;
-          oz += 0.07 - t * 0.17;
-          ox += (0.04 - t * 0.2) * side;
+          ry += (SWING_WINDBACK - (SWING_WINDBACK + SWING_ARC) * t) * side;
+          rx += SWING_PITCH_RISE - SWING_PITCH_DROP * t;
+          rz += (SWING_ROLL - SWING_ROLL * 2 * t) * side;
+          ox += (SWING_CROSS_X * 0.3 - SWING_CROSS_X * 1.3 * t) * side;
+          oy += SWING_RISE_Y - (SWING_RISE_Y + SWING_DROP_Y) * t;
+          // A slight forward push through the middle of the cut, easing back out.
+          oz += 0.06 - Math.sin(t * Math.PI) * 0.12;
         } else {
-          // The return: ease everything back to rest.
+          // The return: ease everything back to rest from the low corner.
           const t = easeInOut((input.progress - SWING_SWEEP_FRACTION) / (1 - SWING_SWEEP_FRACTION));
           const settle = 1 - t;
           ry += -SWING_ARC * side * settle;
-          rx += 0.14 * settle;
-          rz += -0.3 * side * settle;
-          oy += -0.1 * settle;
-          oz += -0.1 * settle;
-          ox += -0.16 * side * settle;
+          rx += (SWING_PITCH_RISE - SWING_PITCH_DROP) * settle;
+          rz += -SWING_ROLL * side * settle;
+          ox += -SWING_CROSS_X * side * settle;
+          oy += -SWING_DROP_Y * settle;
         }
         break;
       }
@@ -792,15 +693,14 @@ export class ViewModel {
     const torch = this.currentTorch;
     if (!torch) return;
 
-    // Sits above and behind the shield, so both are visible at once.
-    // Sits just above the shield rim, not up at the horizon.
-    const shieldOffset = this.currentShield ? 0.07 : 0;
+    // Sits out to the left and low, with the head up and clear of the shield.
+    const shieldOffset = this.currentShield ? 0.06 : 0;
     const moveFactor = Math.min(1, input.speed / 5);
-    const bob = Math.sin(this.walkClock * 0.9) * 0.018 * moveFactor;
+    const bob = Math.sin(this.walkClock * 0.9) * 0.02 * moveFactor;
 
     this.torchHand.position.set(
-      REST_OFFHAND.x + 0.05 + this.sway.x * 0.5,
-      REST_OFFHAND.y + 0.03 + shieldOffset + bob + this.sway.y * 0.5,
+      REST_OFFHAND.x + 0.02 + this.sway.x * 0.5,
+      REST_OFFHAND.y - 0.02 + shieldOffset + bob + this.sway.y * 0.5,
       REST_OFFHAND.z + 0.04,
     );
     this.torchHand.rotation.set(
@@ -809,19 +709,96 @@ export class ViewModel {
       torch.rest.rotation.z + Math.sin(this.idleClock * 0.8) * 0.05,
     );
 
-    // Flicker, so the flame is never a static blob.
-    if (torch.torch) {
-      const flicker = 0.82 + Math.sin(this.idleClock * 11) * 0.1 + Math.sin(this.idleClock * 23.3) * 0.07;
-      torch.torch.light.intensity = 1.35 * flicker;
-      torch.torch.flame.scale.setScalar(0.85 + flicker * 0.3);
-      torch.torch.flame.rotation.y += 0.08;
+    if (!torch.torch) return;
+    const parts = torch.torch;
+
+    // Flame animation.
+    //
+    // Each layer is driven by its own pair of incommensurate sine terms, so the
+    // fire never repeats visibly and the layers never move in lockstep — a single
+    // shared flicker scaled uniformly just looks like the whole flame pulsing.
+    for (let i = 0; i < parts.flameLayers.length; i++) {
+      const layer = parts.flameLayers[i];
+      const rate = 9 + i * 4.5;
+      const wobble = Math.sin(this.idleClock * rate) * 0.5 + Math.sin(this.idleClock * (rate * 1.71) + i) * 0.5;
+      const lean = Math.sin(this.idleClock * (rate * 0.6) + i * 2);
+      // Stretch along the flame rather than uniformly: fire is tall and licks up.
+      // The teardrops run along local Z, so that is the axis to stretch.
+      layer.scale.set(0.92 + wobble * 0.1, 0.92 + wobble * 0.1, 1 + wobble * 0.24);
+      // Lean the tongue, but only a little, and about the two axes across the
+      // flame. Rotating about Y is a *tumble*, not a spin: the flame's long axis is
+      // Z, so an accumulating Y rotation turned each layer end-over-end until they
+      // stuck out sideways as separate petals instead of nesting.
+      layer.rotation.x = wobble * 0.1;
+      layer.rotation.y = lean * 0.08;
+      // This one is a spin about the flame's own axis: free shimmer on the facets,
+      // and invisible in silhouette because the teardrop is symmetric about it.
+      layer.rotation.z += 0.05 + i * 0.03;
+    }
+
+    const flicker = 0.84 + Math.sin(this.idleClock * 11) * 0.1 + Math.sin(this.idleClock * 23.3) * 0.07;
+    parts.light.intensity = 1.7 * flicker;
+    parts.coals.scale.setScalar(0.94 + flicker * 0.1);
+  }
+
+  /** Sparks lifting off the held torch's flame. */
+  private emitTorchEmbers(dt: number): void {
+    const parts = this.currentTorch?.torch;
+    if (!parts) return;
+
+    this.emberTimer -= dt;
+    if (this.emberTimer > 0) return;
+    this.emberTimer = 0.03;
+
+    const origin = parts.flameAnchor.getWorldPosition(this.tmpVec);
+    // Distance from the view model camera, which sits at this scene's origin.
+    const distance = Math.max(0.15, origin.length());
+
+    for (let i = 0; i < 2; i++) {
+      const pixels = EMBER_PIXELS + Math.random() * 3;
+      this.embers.spawn(
+        new THREE.Vector3(
+          origin.x + (Math.random() - 0.5) * 0.035,
+          origin.y + (Math.random() - 0.5) * 0.02,
+          origin.z + (Math.random() - 0.5) * 0.035,
+        ),
+        // Small velocities: this scene is only about half a unit deep, so world
+        // scale speeds would fling every spark off the screen instantly.
+        new THREE.Vector3((Math.random() - 0.5) * 0.11, 0.2 + Math.random() * 0.17, (Math.random() - 0.5) * 0.11),
+        {
+          color: EMBER_COLORS[Math.floor(Math.random() * EMBER_COLORS.length)],
+          size: (pixels * distance) / POINT_SIZE_SCALE,
+          life: 0.3 + Math.random() * 0.26,
+          gravity: -0.4,
+          drag: 1.1,
+        },
+      );
     }
   }
 
-  /** World-space position of the torch flame, for placing the world light. */
+  /** Live ember count, for tests. */
+  get emberCount(): number {
+    return this.embers.count;
+  }
+
+  /** The diagonal each recent slash cut along, for tests. */
+  get recentSwingDirections(): readonly number[] {
+    return this.swingHistory;
+  }
+
+  /**
+   * Position of the torch flame in the view model's scene, for placing the world
+   * light that the held torch casts.
+   *
+   * Fine for a light, whose job is to illuminate geometry a few blocks away, but
+   * *not* fine for anything that has to line up with the flame on screen: this
+   * scene is viewed through a narrower camera than the world, so the same point
+   * projects to two different pixels. Embers are emitted inside this scene instead
+   * for exactly that reason.
+   */
   get torchFlameLocalPosition(): THREE.Vector3 | null {
     if (!this.currentTorch?.torch) return null;
-    return this.currentTorch.torch.flame.getWorldPosition(new THREE.Vector3());
+    return this.currentTorch.torch.flameAnchor.getWorldPosition(new THREE.Vector3());
   }
 
   get hasTorch(): boolean {

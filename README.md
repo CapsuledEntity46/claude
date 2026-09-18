@@ -198,6 +198,22 @@ by distance. This is not a voxel lighting engine: there is no light propagation
 or per-block light level, so a distant cave full of torches will not glow. What
 it does do is make a torch feel like it lights the room you are standing in.
 
+The torch is a chunky model — tapered haft, bound pitch-soaked head, glowing coals
+— under a flame of three nested lathed teardrops, each leaning and stretching on
+its own pair of incommensurate sine terms so the fire never visibly repeats.
+
+Its embers are emitted **inside the view model's own scene**, and that detail
+matters. The view model renders through a separate, narrower camera, so a point
+expressed in that space and a point expressed in the world project to two
+different pixels. Sparks spawned in the world therefore drifted visibly away from
+the flame that was supposedly throwing them. Scaling them by distance — an earlier
+attempt at the same symptom — fixed only their size, and overshot into specks.
+Sharing a scene with the flame makes the two agree by construction.
+
+Ember size is specified in **screen pixels** and converted through the shader's
+perspective divide, rather than guessed in world units. Half a block from the lens,
+an eyeballed world size is wrong by an order of magnitude in either direction.
+
 ## Water and food
 
 Fish swim in lakes and rivers. They flee rather than fight, and out of water they
@@ -257,11 +273,44 @@ src/
   player/      Physics and collision, stats and levelling, tabbed inventory
   combat/      Damage model, item registry, player actions, the build tool
   entities/    Enemy AI, fish, projectiles, orbs, loot tables
-  fx/          Particles, view model, trails, rain, stars, lights, cracks, arc
+  fx/          Low-poly item models, particles, view model, trails, rain, stars,
+               lights, cracks, arc
   ui/          HUD, minimap and compass, character sheet, icon fallback
   save/        IndexedDB persistence
 scripts/       Tests: unit checks, headless smoke test, screenshots, diagnostics
 ```
+
+### Items are low-poly, not voxelised
+
+**The voxel grid is for the world, not for the things in it.** Terrain and placed
+blocks are voxels because that is the game; weapons, shields, tools and torches are
+free low-poly geometry with no grid restriction at all. Swords are tapered blades
+with a real point, a cross-guard and a turned pommel; shields are bowed bevelled
+plates with a ring rim and a boss; bows are swept curves; mace heads carry flanges.
+
+Everything is still generated in code — there are no external assets. Geometry is
+built **non-indexed** so `computeVertexNormals` gives one normal per triangle
+instead of averaging across them, which is what produces faceted low-poly shading
+rather than a soft blob.
+
+Earlier versions assembled every item from axis-aligned boxes to match the terrain,
+which made each weapon read as a stack of bricks — a rectangular slab with a
+smaller slab on the end is not a sword. The unit checks now assert this directly by
+counting distinct face normals: a cube has exactly six, so anything built from boxes
+cannot get far past six however it is arranged. A sword has 118.
+
+Three traps worth knowing if you extend `fx/models.ts`:
+
+- **`toNonIndexed()` returns the same object** when a geometry is already
+  non-indexed, so disposing the input unconditionally destroys the geometry you are
+  returning. `ExtrudeGeometry` is non-indexed; `LatheGeometry` and `TubeGeometry`
+  are not, so both paths occur.
+- **Never recentre an extruded outline.** Parts like an axe bit are authored with
+  their socket at x=0 and their edge out at +x; centring the bounding box slides the
+  head off the end of its own shaft.
+- **Compose two rotations with a parent group, not two Euler angles.** Setting both
+  on one object applies them in Euler XYZ order, which is rarely the order you
+  meant: six "radial" mace flanges came out stacked in nearly the same plane.
 
 ### How the world is shaded
 
@@ -327,11 +376,15 @@ Some notes on the parts that are less obvious than they look:
 - **Melee does not move the camera.** Kicking the view during a swing reads as the
   camera glitching or clipping rather than as a weapon being swung, so all of the
   motion belongs to the weapon. Firearms still recoil, where a shove is expected.
-- **A swing is a yaw sweep about the vertical axis**, pivoting near the wrist at
-  the bottom-right of the screen, in three phases: a short wind-up, a ~50° sweep
-  left-to-right with a slight downward dip, and a slower return. An earlier version
-  drove the weapon along a circular screen-space path, which sent the blade off the
-  edge of the view at the extremes.
+- **A swing is a diagonal slash, and consecutive swings alternate** — one from the
+  upper right down to the lower left, the next mirrored — so a run of attacks traces
+  an X. It pivots near the wrist at the bottom right, in three phases: a short
+  wind-up up into the high corner, a fast cut carrying yaw, pitch and roll together,
+  and a slower return. The alternation is strict rather than randomised; the two
+  diagonals only read as an X if they reliably follow one another. Two earlier
+  versions failed differently: a circular screen-space path sent the blade off the
+  edge of the view, and a flat horizontal yaw sweep read as the weapon being waved
+  rather than swung, because nothing about it travelled the way a cut does.
 - **A thrust is offset in view space, not along the weapon's own axis.** Translating
   along the blade's local forward axis is the physically honest reading, but the
   weapon is held at an angle, so it drove the point *away* from the crosshair — the
@@ -346,13 +399,15 @@ Some notes on the parts that are less obvious than they look:
 ## Tests
 
 ```bash
-npm test            # typecheck + 187 unit checks
+npm test            # typecheck + 197 unit checks
 npm run test:unit   # damage model, mesher, terrain determinism, inventory
 npm run test:smoke  # boots the real build in headless Chromium and plays it
 ```
 
-The unit checks assert the *design*, not just the code: that a torch is a slim post
-rather than a cube, that an open door has no collision, that mana never
+The unit checks assert the *design*, not just the code: that a sword is not built
+out of boxes and converges on a real point, that a tower shield is big enough to be
+cover, that torch embers are anchored inside the flame, that a placed torch is a
+slim post rather than a cube, that an open door has no collision, that mana never
 regenerates on its own, that materials add no carry weight, that dungeon layouts
 are deterministic and chunk-order independent, that a dungeon entrance is both
 open *and* lit at the mouth, that stair treads face uphill, that a mace beats plate,
@@ -375,6 +430,25 @@ a fixed stretch of wall-clock: the distance-travelled gate that survived the rew
 later failed a run where the direction under test was perfectly correct, simply
 because a slow frame rate meant 1.6 real seconds moved the player less than half a
 block.
+
+Two more lessons the animation checks paid for, both worth copying:
+
+- **Measure a motion by its range over the whole animation, not from one sampled
+  frame.** "Is the swing diagonal?" was first asked of the most extreme pose seen
+  during an attack. But a diagonal cut crosses the middle of its own X, where the
+  vertical offset is back at rest by construction — so the answer depended purely on
+  which frame the poller caught, and it failed a swing that was behaving perfectly.
+  Sampling the trajectory and taking each axis's range gives the same numbers
+  (1.85 across, 1.03 down) whether the run captures 24 frames or 51.
+- **Assert state the game records rather than state a test infers.** Whether
+  consecutive swings alternate is now read from a recorded history of the directions
+  used. Inferring it from sampled poses reported two swings as cutting the same way
+  when the second had simply been caught at the start of its travel.
+
+And the recurring one: **a single synthetic click behind a fixed wait is not a
+test.** Placement and the build tool share a cooldown with whatever attack just ran,
+so a click can be swallowed entirely. Those checks now retry and poll for the
+outcome, which is what they were always meant to assert.
 
 It needs Playwright:
 

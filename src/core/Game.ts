@@ -30,14 +30,7 @@ import { Input } from './Input';
 const SKY_COLOR = 0x8fb6d8;
 /** Stepped ember palette for torch flames. */
 const EMBER_COLORS = [0xfff0c0, 0xffc050, 0xff8a28, 0xd8541a] as const;
-/**
- * Distance a torch ember is tuned to look right at, in blocks.
- *
- * Planted torches are usually seen from several blocks away; the held one is not,
- * so its embers are scaled down by their share of this to keep the same apparent
- * size on screen.
- */
-const HAND_EMBER_REFERENCE_DISTANCE = 6;
+
 const RENDER_DISTANCE = 6;
 const MAX_FRAME_DT = 1 / 20;
 
@@ -273,17 +266,13 @@ export class Game {
       );
     };
 
-    // The held torch burns barely half a block from the lens, and on-screen point
-    // size goes as 1/distance — at that range every ember hit the shader's 14px
-    // ceiling and crawled up the whole screen, reading as floating orange debris
-    // instead of sparks. Scaling the whole ember down by its share of that
-    // distance puts it back to a few pixels, and shortening its life keeps it near
-    // the flame where a spark belongs.
-    if (handPosition) {
-      const eyeDistance = Math.max(0.35, handPosition.distanceTo(this.player.eyePosition));
-      const scale = Math.min(1, eyeDistance / HAND_EMBER_REFERENCE_DISTANCE);
-      spawnEmber(handPosition.x, handPosition.y, handPosition.z, scale, 0.26 + Math.random() * 0.16);
-    }
+    // The held torch's own embers are *not* emitted here. They live in the view
+    // model's scene, which is rendered through a narrower camera — a point shared
+    // between the two spaces lands on two different pixels, so world-space sparks
+    // visibly drifted away from the flame throwing them. Scaling them by distance
+    // (an earlier attempt at the same problem) only fixed their size, not the
+    // offset, and overshot into specks.
+    void handPosition;
 
     // Planted torches: only the nearest few, and only some of the time.
     const nearby = this.world.nearestLightSources(this.player.eyePosition, 18, 5);
@@ -854,6 +843,10 @@ export class Game {
       mainItem: this.player.inventory.activeItemId,
       torch: this.player.inventory.equipped.torch,
       shield: this.player.inventory.equipped.shield,
+      // Which diagonal each recent slash cut along. Consecutive swings alternate,
+      // so that together they trace an X.
+      swingDirections: [...this.viewModel.recentSwingDirections],
+      torchEmbers: this.viewModel.emberCount,
     };
   }
 

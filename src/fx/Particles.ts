@@ -2,6 +2,18 @@ import * as THREE from 'three';
 
 const MAX_PARTICLES = 3000;
 
+/**
+ * Pixels-per-unit at one unit from the camera, as used by the vertex shader.
+ *
+ * Exported so callers that care about a particle's *on-screen* size can invert
+ * the perspective divide — `size = pixels * distance / POINT_SIZE_SCALE` — instead
+ * of guessing a world size and hoping. Near-camera effects like a held torch's
+ * flame need this: at half a block away an eyeballed size is off by an order of
+ * magnitude, which is how the torch embers ended up first as giant slabs and then
+ * as specks.
+ */
+export const POINT_SIZE_SCALE = 420;
+
 const VERT = /* glsl */ `
   attribute vec3 aColor;
   attribute float aSize;
@@ -12,7 +24,7 @@ const VERT = /* glsl */ `
     vColor = aColor;
     vAlpha = aAlpha;
     vec4 mv = modelViewMatrix * vec4(position, 1.0);
-    float screenSize = aSize * (420.0 / max(0.001, -mv.z));
+    float screenSize = aSize * (${POINT_SIZE_SCALE}.0 / max(0.001, -mv.z));
     // Snap to whole pixels and clamp to a small range. Sub-pixel point sizes are
     // what make a square sprite render as a soft blur, so quantising here is the
     // 3D equivalent of drawing on integer pixel coordinates with smoothing off.

@@ -58,7 +58,24 @@ await page.evaluate(() => {
 });
 await page.waitForTimeout(2500);
 
-const weapons = ['longsword', 'mace', 'spear', 'halberd', 'shortbow', 'musket', 'torch'];
+// Every melee silhouette plus one of each ranged class: the low-poly models are
+// hand-authored per weapon, so each one needs looking at rather than sampling.
+const weapons = [
+  'longsword',
+  'shortsword',
+  'dagger',
+  'rapier',
+  'mace',
+  'warhammer',
+  'battleaxe',
+  'spear',
+  'halberd',
+  'shortbow',
+  'crossbow',
+  'musket',
+  'build_tool',
+  'torch',
+];
 for (const id of weapons) {
   await page.evaluate((weapon) => {
     const g = window.__voxelquest;

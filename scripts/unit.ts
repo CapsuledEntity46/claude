@@ -8,8 +8,16 @@
  *
  * Run with: npm run test:unit
  */
-import { Vector3 } from 'three';
+import { Box3, Vector3, type BufferGeometry, type Mesh, type Object3D } from 'three';
 import { item } from '../src/combat/items';
+import {
+  bladeGeometry,
+  bowModel,
+  haftedModel,
+  shieldModel,
+  swordModel,
+  torchModel,
+} from '../src/fx/models';
 import { computeDamage, type DamageInput, type DefenseProfile } from '../src/combat/types';
 import { ARCHETYPES, FISH, pickArchetype } from '../src/entities/archetypes';
 import { Inventory } from '../src/player/Inventory';
@@ -1108,6 +1116,150 @@ check(
   })(),
 );
 
+
+section('low-poly item models');
+
+// The art-direction rule: items are free low-poly geometry, not voxels. The
+// previous models were assembled from axis-aligned boxes, which is why every
+// weapon read as a stack of bricks.
+//
+// A box has exactly six distinct face normals. Counting the distinct normals of an
+// assembled weapon is therefore a direct test of the claim: anything built out of
+// cubes cannot get far past six, whatever its shape.
+function distinctNormals(object: Object3D): number {
+  const seen = new Set<string>();
+  object.updateMatrixWorld(true);
+  object.traverse((child) => {
+    const geometry = (child as Mesh).geometry as BufferGeometry | undefined;
+    if (!geometry?.getAttribute) return;
+    const normal = geometry.getAttribute('normal');
+    if (!normal) return;
+    for (let i = 0; i < normal.count; i++) {
+      // Quantised, so floating-point noise does not inflate the count.
+      const key = [normal.getX(i), normal.getY(i), normal.getZ(i)]
+        .map((v) => Math.round(v * 12) / 12)
+        .join(',');
+      seen.add(key);
+    }
+  });
+  return seen.size;
+}
+
+function modelTriangleCount(object: Object3D): number {
+  let total = 0;
+  object.traverse((child) => {
+    const geometry = (child as Mesh).geometry as BufferGeometry | undefined;
+    const position = geometry?.getAttribute?.('position');
+    if (position) total += position.count / 3;
+  });
+  return total;
+}
+
+const swordNormals = distinctNormals(swordModel({ bladeLength: 0.76, bladeWidth: 0.085, guardSpan: 0.17 }));
+check(
+  'a sword is not built out of boxes',
+  swordNormals > 30,
+  `${swordNormals} distinct face normals (a cube has 6)`,
+);
+
+const maceNormals = distinctNormals(haftedModel(0.56, 'mace'));
+check('a mace is not built out of boxes', maceNormals > 30, `${maceNormals} distinct face normals`);
+
+const bowNormals = distinctNormals(bowModel().group);
+check(
+  'a bow is a curve, not a stepped staircase',
+  bowNormals > 40,
+  `${bowNormals} distinct face normals`,
+);
+
+// A blade has to come to a real point: the side faces converge on a single apex
+// rather than stopping at a smaller rectangle stuck on the end.
+{
+  const length = 0.7;
+  const geometry = bladeGeometry({ length, width: 0.08 });
+  const position = geometry.getAttribute('position');
+  let apexCount = 0;
+  let maxZ = -Infinity;
+  for (let i = 0; i < position.count; i++) {
+    const z = position.getZ(i);
+    maxZ = Math.max(maxZ, z);
+    if (Math.abs(z - length) < 1e-6 && Math.hypot(position.getX(i), position.getY(i)) < 1e-6) apexCount++;
+  }
+  check(
+    'a blade converges on a real point',
+    apexCount > 0 && Math.abs(maxZ - length) < 1e-6,
+    `${apexCount} vertices at the apex, tip at z=${maxZ.toFixed(3)}`,
+  );
+}
+
+// The blade must actually taper, or it is a ruler with a point on it.
+{
+  const geometry = bladeGeometry({ length: 0.7, width: 0.08 });
+  const position = geometry.getAttribute('position');
+  let nearWidth = 0;
+  let farWidth = 0;
+  for (let i = 0; i < position.count; i++) {
+    const z = position.getZ(i);
+    const x = Math.abs(position.getX(i));
+    if (z < 0.1) nearWidth = Math.max(nearWidth, x);
+    else if (z > 0.55 && z < 0.62) farWidth = Math.max(farWidth, x);
+  }
+  check(
+    'a blade tapers towards the tip',
+    farWidth < nearWidth * 0.8 && farWidth > 0,
+    `half-width ${nearWidth.toFixed(3)} at the hilt, ${farWidth.toFixed(3)} near the tip`,
+  );
+}
+
+// The torch is the item the player looks at most, and its flame has to be big
+// enough to plausibly be the light source. The reported fault was a model too
+// small and a flame too small to see.
+{
+  const torch = torchModel(1);
+  const triangles = modelTriangleCount(torch.group);
+  check('the torch is a real model, not a stick', triangles > 200, `${triangles} triangles`);
+
+  // The ember anchor has to sit inside the flame. Emitting from a point outside it
+  // is what made the sparks look detached from the fire.
+  torch.group.updateMatrixWorld(true);
+  const anchor = torch.flameAnchor.getWorldPosition(new Vector3());
+  let inside = false;
+  for (const layer of torch.flameLayers) {
+    layer.geometry.computeBoundingBox();
+    const box = layer.geometry.boundingBox!.clone().applyMatrix4(layer.matrixWorld);
+    // A little slack: the anchor sits in the body of the flame, not at its centroid.
+    box.expandByScalar(0.02);
+    if (box.containsPoint(anchor)) inside = true;
+  }
+  check('torch embers are anchored inside the flame', inside, `anchor at ${anchor.toArray().map((v) => v.toFixed(3)).join(', ')}`);
+
+  check('the torch flame has layers to animate', torch.flameLayers.length >= 3, `${torch.flameLayers.length} layers`);
+}
+
+// Shields are cover. A buckler is small, a tower shield is a wall, and the
+// difference has to survive into the geometry.
+{
+  // The same scales the view model actually ships, so this measures what the
+  // player sees rather than the model function in the abstract.
+  const buckler = shieldModel('buckler', 1.1);
+  const tower = shieldModel('tower', 1.25);
+  buckler.updateMatrixWorld(true);
+  tower.updateMatrixWorld(true);
+  const span = (group: Object3D): number => {
+    const box = new Box3().setFromObject(group);
+    return box.max.y - box.min.y;
+  };
+  const bucklerSpan = span(buckler);
+  const towerSpan = span(tower);
+  check(
+    'a tower shield is substantially bigger than a buckler',
+    towerSpan > bucklerSpan * 1.5,
+    `${bucklerSpan.toFixed(2)} vs ${towerSpan.toFixed(2)} units tall`,
+  );
+  // The old shield was 0.3 units tall before scaling and read as a dinner plate.
+  check('a shield is big enough to be cover', towerSpan > 0.6, `${towerSpan.toFixed(2)} units tall`);
+}
+
 // ---------------------------------------------------------------- result
 
 console.log(`\n${passed} passed, ${failures.length} failed`);
@@ -1116,3 +1268,4 @@ if (failures.length > 0) {
   process.exit(1);
 }
 console.log('ALL UNIT CHECKS PASSED');
+

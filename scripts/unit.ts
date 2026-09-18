@@ -20,6 +20,15 @@ import {
 } from '../src/fx/models';
 import { buildCreature } from '../src/fx/creatures';
 import { clearPropCache, dungeonPropVoxels, propsForSite } from '../src/world/DungeonProps';
+import {
+  ATLAS_PIXELS,
+  TILE_PADDING,
+  TILE_PIXELS,
+  Tile,
+  tileForFace,
+  tileRect,
+  tryCreateBlockAtlas,
+} from '../src/world/textures';
 import { computeDamage, type DamageInput, type DefenseProfile } from '../src/combat/types';
 import { ARCHETYPES, FISH, pickArchetype } from '../src/entities/archetypes';
 import { Inventory } from '../src/player/Inventory';
@@ -1506,6 +1515,107 @@ check(
     return chunk.get(target.x - cx * CHUNK_SX, target.y, target.z - cz * CHUNK_SZ) === target.block;
   })(),
   'the block a prop stands on is really there',
+);
+
+
+
+section('block textures');
+
+// Every tile's UV rectangle must land inside its own padded cell. Getting this
+// arithmetic wrong samples a neighbouring tile, which looks like the wrong texture
+// rather than like a bug.
+{
+  let allInside = true;
+  for (const tile of [Tile.Blank, Tile.GrassTop, Tile.GrassSide, Tile.Dirt]) {
+    const rect = tileRect(tile);
+    if (rect.u0 < 0 || rect.v0 < 0 || rect.u1 > 1 || rect.v1 > 1) allInside = false;
+    // The drawn area is exactly one tile wide, gutters excluded.
+    const width = (rect.u1 - rect.u0) * ATLAS_PIXELS;
+    const height = (rect.v1 - rect.v0) * ATLAS_PIXELS;
+    if (Math.abs(width - TILE_PIXELS) > 0.001 || Math.abs(height - TILE_PIXELS) > 0.001) allInside = false;
+  }
+  check('every tile rectangle is inside the atlas and one tile wide', allInside);
+
+  // Tiles must not touch: the gap between them is the gutter that stops mipmapping
+  // averaging grass into dirt as the camera pulls back.
+  const a = tileRect(Tile.Blank);
+  const b = tileRect(Tile.GrassTop);
+  const gap = (b.u0 - a.u1) * ATLAS_PIXELS;
+  check(
+    'tiles are separated by a mipmap gutter',
+    gap >= TILE_PADDING * 2 - 0.001,
+    `${gap.toFixed(1)}px between tiles, padding ${TILE_PADDING}px each side`,
+  );
+}
+
+check(
+  'a grass block uses three different tiles',
+  new Set([
+    tileForFace(Block.Grass, 'top'),
+    tileForFace(Block.Grass, 'side'),
+    tileForFace(Block.Grass, 'bottom'),
+  ]).size === 3,
+  'turf on top, fringe on the sides, soil underneath',
+);
+check(
+  'untextured blocks sample the blank tile',
+  tileForFace(Block.Stone, 'top') === Tile.Blank && tileForFace(Block.DungeonBrick, 'side') === Tile.Blank,
+  'so adding a texture to one block cannot disturb the rest of the world',
+);
+
+// The mesher has to emit UVs, and has to write greyscale shading for textured blocks
+// so the texture supplies the hue. Both are invisible when wrong — a missing UV
+// attribute or a doubled-up tint both just look like the flat world that came before.
+{
+  const chunk = new Chunk(0, 0);
+  chunk.voxels[voxelIndex(4, 4, 4)] = Block.Grass;
+  chunk.voxels[voxelIndex(6, 4, 4)] = Block.Stone;
+  const { opaque } = meshChunk(chunk, () => Block.Air);
+
+  const position = opaque?.getAttribute('position');
+  const uv = opaque?.getAttribute('uv');
+  check(
+    'the mesher emits a UV for every vertex',
+    !!uv && !!position && uv.count === position.count,
+    `${uv?.count ?? 0} uvs for ${position?.count ?? 0} vertices`,
+  );
+
+  // Grass vertices are greyscale; stone keeps its tint. Identified by which tile the
+  // UV points at rather than by vertex index, which would depend on emit order.
+  const color = opaque!.getAttribute('color');
+  const grassTop = tileRect(Tile.GrassTop);
+  let greyscaleGrass = true;
+  let grassVertices = 0;
+  let tintedStone = false;
+  for (let i = 0; i < uv!.count; i++) {
+    const u = uv!.getX(i);
+    const v = uv!.getY(i);
+    const inGrassTop = u >= grassTop.u0 - 1e-6 && u <= grassTop.u1 + 1e-6 && v >= grassTop.v0 - 1e-6 && v <= grassTop.v1 + 1e-6;
+    const r = color.getX(i);
+    const g = color.getY(i);
+    const b = color.getZ(i);
+    if (inGrassTop) {
+      grassVertices++;
+      if (Math.abs(r - g) > 1e-6 || Math.abs(g - b) > 1e-6) greyscaleGrass = false;
+    }
+    if (Math.abs(r - g) > 0.02 || Math.abs(g - b) > 0.02) tintedStone = true;
+  }
+  check(
+    'a textured block writes greyscale shading, letting the texture carry the colour',
+    grassVertices > 0 && greyscaleGrass,
+    `${grassVertices} grass-top vertices, all greyscale`,
+  );
+  check(
+    'an untextured block still writes its own tint',
+    tintedStone,
+    'stone keeps the colour it had before textures existed',
+  );
+}
+
+check(
+  'the atlas is only built where there is a canvas to draw on',
+  tryCreateBlockAtlas() === null,
+  'null under Node, so the geometry tests do not need a DOM',
 );
 
 

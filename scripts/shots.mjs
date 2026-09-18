@@ -239,6 +239,26 @@ await g(() => {
 await page.waitForTimeout(1200);
 await shot('build-tool');
 
+// ---------------------------------------------------------------- ground texture
+
+// Close and steep, so the turf fills the frame, then level for the grass-over-soil
+// fringe on the block sides. Both are needed: the top and side tiles are different
+// textures and either can be wrong on its own.
+await g(() => {
+  const game = window.__voxelquest;
+  game.debugSetTime('day');
+  game.debugEquip('fists');
+  game.debugSelectHotbarByItem('fists');
+  game.debugLook(0.6, -0.75);
+});
+await page.waitForTimeout(1800);
+await shot('texture-ground-close');
+
+await g(() => window.__voxelquest.debugLook(0.6, -0.12));
+await page.waitForTimeout(1400);
+await shot('texture-ground-level');
+console.log(`  terrain material ${JSON.stringify(await g(() => window.__voxelquest.debugTerrainMaterial()))}`);
+
 // ---------------------------------------------------------------- sky
 
 // The sun low and reddened at dusk. At noon it sits almost straight overhead, so a

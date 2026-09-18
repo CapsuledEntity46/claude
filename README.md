@@ -392,6 +392,46 @@ Three traps worth knowing if you extend `fx/models.ts`:
   on one object applies them in Euler XYZ order, which is rarely the order you
   meant: six "radial" mace flanges came out stacked in nearly the same plane.
 
+### Block textures
+
+Ground cover is textured: turf on top of a grass block, a ragged fringe of it hanging
+over gritty pebbled soil on the sides, plain soil underneath. Everything else is still
+flat-coloured.
+
+The atlas is **generated in code on a canvas at load** — no external assets, same rule
+as the models. Tiles are 32px, drawn from a fixed seed so the atlas is identical every
+run and screenshots stay comparable.
+
+It coexists with the vertex colours rather than replacing them. The material
+multiplies the map by the vertex colour, and the mesher keeps writing ambient
+occlusion and per-face shading there, so occlusion, face shading and the day/night
+tint all keep working untouched. Two cases:
+
+- **Textured blocks** get greyscale shading in the vertex colour and take their hue
+  from the texture. Multiplying a green texture by an already-green tint darkens it
+  twice over. Their `top`/`side`/`bottom` colours stay defined, because the HUD, the
+  held-block model and the break particles all still read them.
+- **Everything else** samples a blank white tile and keeps writing tint×shade, which
+  multiplies to exactly what it drew before textures existed. Adding a texture to one
+  block cannot disturb the rest of the world.
+
+Two details that matter more than they look:
+
+- **Tiles are padded, and the padding is a copy of the tile's own border.** Mipmapping
+  averages neighbouring texels, and at a tile's edge those neighbours belong to a
+  different tile — so without a gutter, grass bleeds into dirt as the camera pulls
+  back. Mipmaps are on: nearest-only sampling shimmers badly on terrain seen edge-on
+  across a valley.
+- **Soil is painted lighter than the reference.** Side faces carry a baked brightness
+  of 0.70–0.88 plus ambient occlusion, so a texture painted at the reference's own
+  values lands visibly darker on the block than in the reference.
+
+Textures are easy to get wrong in ways that look like nothing happened — a null map, a
+missing UV attribute, or UVs that all land on the blank tile each reproduce the flat
+world exactly. `debugTerrainMaterial` reports the plumbing, and the smoke test asserts
+the atlas is bound, that UVs exist, that they span more than one tile, and that vertex
+colours are still in play.
+
 ### How the world is shaded
 
 There is no texture atlas and no shadow map. The look comes from three things
@@ -485,7 +525,7 @@ Some notes on the parts that are less obvious than they look:
 ## Tests
 
 ```bash
-npm test            # typecheck + 221 unit checks
+npm test            # typecheck + 229 unit checks
 npm run test:unit   # damage model, mesher, terrain determinism, inventory
 npm run test:smoke  # boots the real build in headless Chromium and plays it
 ```

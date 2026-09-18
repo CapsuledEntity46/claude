@@ -3,6 +3,7 @@ import { Block, blockCollisionBoxes, blockDef, isLightSource, isSolid, isTargeta
 import { CHUNK_SX, CHUNK_SY, CHUNK_SZ, Chunk, MeshState, chunkKey, voxelIndex } from './Chunk';
 import { meshChunk } from './ChunkMesher';
 import { TerrainGen } from './TerrainGen';
+import { tryCreateBlockAtlas } from './textures';
 import { META_OPEN, metaIsOpen } from './shapes';
 
 export interface RaycastHit {
@@ -64,12 +65,53 @@ export class World {
     this.renderDistance = renderDistance;
     this.group.name = 'world';
 
-    this.opaqueMat = new THREE.MeshLambertMaterial({ vertexColors: true });
+    // The atlas multiplies the vertex colours the mesher already writes, so ambient
+    // occlusion, per-face shading and the day/night tint all keep working. Blocks
+    // with no texture of their own sample a white tile, which multiplies to exactly
+    // what they drew before textures existed.
+    //
+    // Built lazily and tolerantly: the unit tests mesh real chunks in Node, where
+    // there is no canvas to draw on. An untextured material there is fine, because
+    // what those tests assert is geometry.
+    const atlas = tryCreateBlockAtlas();
+
+    this.opaqueMat = new THREE.MeshLambertMaterial({ vertexColors: true, map: atlas });
     this.transMat = new THREE.MeshLambertMaterial({
       vertexColors: true,
+      map: atlas,
       transparent: true,
       opacity: 0.72,
     });
+  }
+
+  /** Atlas and UV plumbing, for diagnosis. See Game.debugTerrainMaterial. */
+  debugMaterialState(): Record<string, unknown> {
+    const map = this.opaqueMat.map;
+    let uvCount = 0;
+    let uvMin = Infinity;
+    let uvMax = -Infinity;
+    let meshes = 0;
+    for (const mesh of this.opaqueMeshes.values()) {
+      const uv = mesh.geometry.getAttribute('uv');
+      meshes++;
+      if (!uv) continue;
+      uvCount += uv.count;
+      // Sampled rather than scanned in full: a chunk holds tens of thousands of
+      // vertices and this only needs to show the range is not degenerate.
+      for (let i = 0; i < uv.count; i += 97) {
+        uvMin = Math.min(uvMin, uv.getX(i));
+        uvMax = Math.max(uvMax, uv.getX(i));
+      }
+    }
+    return {
+      hasMap: !!map,
+      atlasWidth: map?.image?.width ?? 0,
+      vertexColors: this.opaqueMat.vertexColors,
+      meshes,
+      uvCount,
+      uMin: Number.isFinite(uvMin) ? Number(uvMin.toFixed(4)) : null,
+      uMax: Number.isFinite(uvMax) ? Number(uvMax.toFixed(4)) : null,
+    };
   }
 
   get seed(): number {

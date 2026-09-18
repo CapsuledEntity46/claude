@@ -184,6 +184,27 @@ try {
   }
   check('chunks streamed in', streamed.chunks >= 60, `${streamed.chunks} chunks`);
   check('mesher produced geometry', streamed.triangles > 5000, `${streamed.triangles} triangles`);
+
+  // Terrain textures. A missing atlas, a missing UV attribute, or UVs that all land on
+  // the blank tile each produce exactly the flat-coloured world that existed before
+  // textures, so none of them would be obvious from a screenshot.
+  const terrainMaterial = await page.evaluate(() => window.__voxelquest.debugTerrainMaterial());
+  check('terrain samples the block atlas', terrainMaterial.hasMap === true, JSON.stringify(terrainMaterial));
+  check(
+    'terrain geometry carries UVs',
+    terrainMaterial.uvCount > 1000,
+    `${terrainMaterial.uvCount} uvs across ${terrainMaterial.meshes} chunk meshes`,
+  );
+  check(
+    'UVs span more than one tile of the atlas',
+    terrainMaterial.uMax - terrainMaterial.uMin > 0.2,
+    `u from ${terrainMaterial.uMin} to ${terrainMaterial.uMax}`,
+  );
+  check(
+    'vertex colours still drive shading alongside the texture',
+    terrainMaterial.vertexColors === true,
+    'ambient occlusion and face shading are preserved',
+  );
   check('draw calls issued', streamed.drawCalls > 0, `${streamed.drawCalls} calls`);
   check('frame loop is running', streamed.fps > 0, `${streamed.fps} fps`);
 

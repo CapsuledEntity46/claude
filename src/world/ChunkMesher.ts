@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { Block, type BlockDef, blockDef, isOpaque } from './blocks';
 import { CHUNK_SX, CHUNK_SY, CHUNK_SZ, Chunk, voxelIndex } from './Chunk';
 import { shapeBoxes } from './shapes';
+import { isTexturedBlock, tileForFace, tileRect } from './textures';
 
 /**
  * Culled-face mesher with per-vertex ambient occlusion.
@@ -79,11 +80,12 @@ interface Buffers {
   pos: number[];
   norm: number[];
   col: number[];
+  uv: number[];
   idx: number[];
 }
 
 function newBuffers(): Buffers {
-  return { pos: [], norm: [], col: [], idx: [] };
+  return { pos: [], norm: [], col: [], uv: [], idx: [] };
 }
 
 function toGeometry(b: Buffers): THREE.BufferGeometry | null {
@@ -92,6 +94,7 @@ function toGeometry(b: Buffers): THREE.BufferGeometry | null {
   g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(b.pos), 3));
   g.setAttribute('normal', new THREE.BufferAttribute(new Float32Array(b.norm), 3));
   g.setAttribute('color', new THREE.BufferAttribute(new Float32Array(b.col), 3));
+  g.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(b.uv), 2));
   g.setIndex(b.idx);
   g.computeBoundingSphere();
   return g;
@@ -130,6 +133,10 @@ function emitShape(buf: Buffers, x: number, y: number, z: number, def: BlockDef,
       const tint = def[face.tint];
       const shade = CUBE_FACE_SHADE[f];
       const start = buf.pos.length / 3;
+      const rect = tileRect(tileForFace(def.id, face.tint));
+      // A shaped block's boxes are sub-cube, so its faces take the whole tile
+      // rather than a slice of it. Every shaped block currently samples the blank
+      // tile anyway, so there is nothing to stretch.
 
       for (const [a, b] of CORNERS) {
         // Take the corner on the *unit* cube's face, then scale it into the box.
@@ -141,6 +148,7 @@ function emitShape(buf: Buffers, x: number, y: number, z: number, def: BlockDef,
         const cz = oz + uz * a + vz * b;
         buf.pos.push(x + bx0 + cx * sizeX, y + by0 + cy * sizeY, z + bz0 + cz * sizeZ);
         buf.norm.push(dx, dy, dz);
+        buf.uv.push(rect.u0 + (rect.u1 - rect.u0) * a, rect.v0 + (rect.v1 - rect.v0) * b);
         buf.col.push(
           Math.min(1, tint[0] * shade + emissive),
           Math.min(1, tint[1] * shade + emissive),
@@ -212,6 +220,11 @@ export function meshChunk(chunk: Chunk, neighbor: NeighborLookup): MeshResult {
           const tint = def[face.tint];
           const emissive = def.emissive ?? 0;
           const faceShade = CUBE_FACE_SHADE[faceIndex];
+          const rect = tileRect(tileForFace(id, face.tint));
+          // For a textured block the vertex colour carries shading only and the
+          // texture supplies the hue. Multiplying a green texture by an already
+          // green tint would darken it twice over.
+          const textured = isTexturedBlock(id);
 
           const [ox, oy, oz] = face.o;
           const [ux, uy, uz] = face.u;
@@ -237,10 +250,11 @@ export function meshChunk(chunk: Chunk, neighbor: NeighborLookup): MeshResult {
             const shade = AO_SHADE[ao] * faceShade;
             buf.pos.push(x + ox + ux * a + vx * b, y + oy + uy * a + vy * b, z + oz + uz * a + vz * b);
             buf.norm.push(nx, ny, nz);
+            buf.uv.push(rect.u0 + (rect.u1 - rect.u0) * a, rect.v0 + (rect.v1 - rect.v0) * b);
             buf.col.push(
-              Math.min(1, tint[0] * shade + emissive),
-              Math.min(1, tint[1] * shade + emissive),
-              Math.min(1, tint[2] * shade + emissive),
+              Math.min(1, (textured ? shade : tint[0] * shade) + emissive),
+              Math.min(1, (textured ? shade : tint[1] * shade) + emissive),
+              Math.min(1, (textured ? shade : tint[2] * shade) + emissive),
             );
           }
 

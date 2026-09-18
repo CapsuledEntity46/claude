@@ -898,6 +898,18 @@ export class Game {
     return this.celestial.debugState();
   }
 
+  /**
+   * Whether terrain is actually sampling the block atlas.
+   *
+   * Textures are easy to get wrong in ways that look like "no change": a missing UV
+   * attribute, a null map, or UVs that all land on the blank tile each produce
+   * exactly the flat-coloured world that existed before. This reports the plumbing
+   * instead of leaving it to be judged by eye.
+   */
+  debugTerrainMaterial(): Record<string, unknown> {
+    return this.world.debugMaterialState();
+  }
+
   /** Dungeon prop counts by kind, for verifying the kit is being placed. */
   debugProps(): Record<string, unknown> {
     return this.props.debugState();

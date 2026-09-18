@@ -52,6 +52,10 @@ const MANA_BUBBLE_MATERIAL = new THREE.MeshBasicMaterial({
 
 export type OrbKind = 'xp' | 'mana';
 
+/** Small fixed palettes, so orb motes read as pixels and not as a soft gradient. */
+const XP_MOTE_COLORS = [0xd9a7ff, 0xb46cf5, 0x8f3fe0] as const;
+const MANA_MOTE_COLORS = [0xa8dcff, 0x5aa8f0, 0x2f6fc8] as const;
+
 /**
  * A soft radial gradient, drawn on a canvas so the project needs no textures.
  * Used as an additive billboard halo around EXP orbs — without it the orbs are
@@ -203,16 +207,19 @@ class ExpOrb extends Pickup {
     // A slow drizzle of motes, so orbs are visible in peripheral vision.
     this.trailTimer -= dt;
     if (this.trailTimer <= 0) {
-      this.trailTimer = 0.16 + Math.random() * 0.12;
+      this.trailTimer = 0.18 + Math.random() * 0.14;
+      // Two-tone palette, so the motes look like stepped pixel art rather than a
+      // continuous gradient of glow.
+      const palette = this.kind === 'mana' ? MANA_MOTE_COLORS : XP_MOTE_COLORS;
       ctx.particles.spawn(
         this.mesh.position.clone(),
-        new THREE.Vector3((Math.random() - 0.5) * 0.5, 0.3 + Math.random() * 0.4, (Math.random() - 0.5) * 0.5),
+        new THREE.Vector3((Math.random() - 0.5) * 0.45, 0.35 + Math.random() * 0.4, (Math.random() - 0.5) * 0.45),
         {
-          color: this.kind === 'mana' ? 0x8fd0ff : 0xc79cff,
-          size: 0.035,
-          life: 0.45,
-          gravity: -1.6,
-          drag: 1.8,
+          color: palette[Math.floor(Math.random() * palette.length)],
+          size: 0.055,
+          life: 0.5,
+          gravity: -1.4,
+          drag: 1.6,
         },
       );
     }

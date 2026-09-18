@@ -12,7 +12,11 @@ const VERT = /* glsl */ `
     vColor = aColor;
     vAlpha = aAlpha;
     vec4 mv = modelViewMatrix * vec4(position, 1.0);
-    gl_PointSize = aSize * (420.0 / max(0.001, -mv.z));
+    float screenSize = aSize * (420.0 / max(0.001, -mv.z));
+    // Snap to whole pixels and clamp to a small range. Sub-pixel point sizes are
+    // what make a square sprite render as a soft blur, so quantising here is the
+    // 3D equivalent of drawing on integer pixel coordinates with smoothing off.
+    gl_PointSize = clamp(floor(screenSize + 0.5), 2.0, 14.0);
     gl_Position = projectionMatrix * mv;
   }
 `;
@@ -21,10 +25,15 @@ const FRAG = /* glsl */ `
   varying vec3 vColor;
   varying float vAlpha;
   void main() {
-    vec2 d = gl_PointCoord - vec2(0.5);
-    // Round points instead of squares; cheap and much less noticeable.
-    if (dot(d, d) > 0.25) discard;
-    gl_FragColor = vec4(vColor, vAlpha);
+    // Deliberately no round mask and no edge softening: particles stay hard
+    // square pixels for the whole of their life, matching the blocky world.
+    //
+    // Alpha is quantised into a handful of steps rather than faded continuously,
+    // so particles blink out in discrete stages instead of dissolving smoothly.
+    float steps = 4.0;
+    float quantised = floor(vAlpha * steps + 0.999) / steps;
+    if (quantised <= 0.0) discard;
+    gl_FragColor = vec4(vColor, quantised);
   }
 `;
 
@@ -58,7 +67,7 @@ export class Particles {
   private gravity = new Float32Array(MAX_PARTICLES);
   private drag = new Float32Array(MAX_PARTICLES);
 
-  private count = 0;
+  private liveCount = 0;
   private readonly geometry: THREE.BufferGeometry;
   private readonly tmpColor = new THREE.Color();
 
@@ -84,9 +93,13 @@ export class Particles {
     this.points.name = 'particles';
   }
 
+  get count(): number {
+    return this.liveCount;
+  }
+
   spawn(position: THREE.Vector3, velocity: THREE.Vector3, opts: SpawnOptions): void {
-    if (this.count >= MAX_PARTICLES) return;
-    const i = this.count++;
+    if (this.liveCount >= MAX_PARTICLES) return;
+    const i = this.liveCount++;
     const i3 = i * 3;
 
     this.positions[i3] = position.x;
@@ -108,6 +121,49 @@ export class Particles {
     this.alphas[i] = 1;
     this.gravity[i] = opts.gravity ?? 18;
     this.drag[i] = opts.drag ?? 0.4;
+  }
+
+  /**
+   * A Minecraft-style block-break burst: a shower of small square particles that
+   * take their colours from the thing that just broke, so it reads as the object
+   * shattering into its own pixels rather than as generic dust.
+   *
+   * @param colors sampled palette of the source object
+   * @param count  particles to emit (20-40 is the Minecraft-ish range)
+   */
+  spawnBreakParticles(
+    position: THREE.Vector3,
+    colors: readonly THREE.ColorRepresentation[],
+    count = 28,
+    spread = 0.6,
+    speed = 4.2,
+  ): void {
+    if (colors.length === 0) return;
+    const velocity = new THREE.Vector3();
+    const origin = new THREE.Vector3();
+
+    for (let i = 0; i < count; i++) {
+      // Scatter the origin through the object's volume, not all from one point.
+      origin.set(
+        position.x + (Math.random() - 0.5) * spread,
+        position.y + (Math.random() - 0.5) * spread,
+        position.z + (Math.random() - 0.5) * spread,
+      );
+      // Outward in a random direction, with a bias upward so the shower arcs.
+      velocity
+        .set(Math.random() * 2 - 1, Math.random() * 1.4 + 0.15, Math.random() * 2 - 1)
+        .normalize()
+        .multiplyScalar(speed * (0.35 + Math.random() * 0.65));
+
+      this.spawn(origin, velocity, {
+        color: colors[Math.floor(Math.random() * colors.length)],
+        // A small spread of sizes, all still whole pixels on screen.
+        size: 0.05 + Math.random() * 0.045,
+        life: 0.55 + Math.random() * 0.45,
+        gravity: 20,
+        drag: 0.35,
+      });
+    }
   }
 
   /** Radial burst, the workhorse for hits and impacts. */
@@ -137,7 +193,7 @@ export class Particles {
   }
 
   update(dt: number): void {
-    for (let i = 0; i < this.count; i++) {
+    for (let i = 0; i < this.liveCount; i++) {
       this.life[i] -= dt;
       if (this.life[i] <= 0) {
         this.removeSwap(i);
@@ -155,12 +211,12 @@ export class Particles {
       this.positions[i3 + 1] += this.velocities[i3 + 1] * dt;
       this.positions[i3 + 2] += this.velocities[i3 + 2] * dt;
 
-      // Fade over the last 60% of life so the pop-out is not abrupt.
-      const t = this.life[i] / this.maxLife[i];
-      this.alphas[i] = Math.min(1, t / 0.6);
+      // Linear remaining-life fraction. The shader quantises this into discrete
+      // steps, so no smoothing is applied here either.
+      this.alphas[i] = this.life[i] / this.maxLife[i];
     }
 
-    this.geometry.setDrawRange(0, this.count);
+    this.geometry.setDrawRange(0, this.liveCount);
     for (const name of ['position', 'aColor', 'aSize', 'aAlpha']) {
       this.geometry.getAttribute(name).needsUpdate = true;
     }
@@ -168,7 +224,7 @@ export class Particles {
 
   /** O(1) removal by moving the last live particle into the freed index. */
   private removeSwap(i: number): void {
-    const last = this.count - 1;
+    const last = this.liveCount - 1;
     if (i !== last) {
       const a = i * 3;
       const b = last * 3;
@@ -184,11 +240,11 @@ export class Particles {
       this.gravity[i] = this.gravity[last];
       this.drag[i] = this.drag[last];
     }
-    this.count--;
+    this.liveCount--;
   }
 
   clear(): void {
-    this.count = 0;
+    this.liveCount = 0;
     this.geometry.setDrawRange(0, 0);
   }
 }

@@ -285,11 +285,20 @@ const HAND_SCALE = 0.82;
 /** Roughly where a blade's point sits, in the hand's local space. */
 const TIP_LOCAL = new THREE.Vector3(0, 0, -0.78);
 /** Half-angle of the swing arc, in radians. Wide enough to cross the whole view. */
-const SWING_ARC = 1.9;
-const SWING_RADIUS_X = 0.4;
-const SWING_RADIUS_Y = 0.3;
-/** How far the arc's anchor is pulled towards screen centre while swinging. */
-const SWING_RECENTRE = 0.62;
+/**
+ * Swing geometry.
+ *
+ * The sweep is about 53 degrees of yaw, which is the range a first-person slash
+ * reads well at: far enough to cross the view, not so far that the weapon leaves
+ * the screen. An earlier attempt drove the hand around a full circular path
+ * instead, which sent the blade over the top of the view and off the edge.
+ */
+const SWING_WINDBACK = 0.3;
+const SWING_ARC = 0.92;
+/** Share of the recovery window spent sweeping, with the rest easing back. */
+const SWING_SWEEP_FRACTION = 0.55;
+/** How far a thrust pulls the hand in towards screen centre. */
+const THRUST_CENTRING = 0.72;
 
 export class ViewModel {
   /** Rendered separately, after the world, with depth cleared. */
@@ -321,8 +330,6 @@ export class ViewModel {
    */
   private swingDirection = 1;
   private lastSwingPhase: ViewPhase = 'none';
-  /** Distance the weapon is driven along its own axis, for thrusts. */
-  private thrustExtension = 0;
   private recoil = 0;
   private lastShotCounter = 0;
   private readonly sway = new THREE.Vector2();
@@ -503,7 +510,6 @@ export class ViewModel {
     const blockTarget = input.blocking ? 1 : 0;
     this.blockAmount += (blockTarget - this.blockAmount) * Math.min(1, dt * 12);
 
-    this.thrustExtension = 0;
     this.poseMainHand(input);
     this.poseOffHand();
     this.poseTorchHand(input);
@@ -568,60 +574,86 @@ export class ViewModel {
 
     switch (input.action) {
       case 'swing': {
-        // An over-the-top arc. The hand travels a circular path in screen space:
-        // low on one side, up across the top of the view, and down the other. The
-        // blade rolls with the arc so the edge always leads.
+        // A horizontal slash, rotating about the vertical axis so the blade sweeps
+        // across the screen rather than chopping down like a hammer.
         //
-        // Driving position along a circle (rather than nudging a few offsets)
-        // is what makes it read as a sweep instead of the weapon jittering — the
-        // earlier version moved so little, so fast, that it looked like the camera
-        // was glitching rather than the sword travelling anywhere.
+        // The pivot is the hand group's own origin, which sits at the grip — i.e.
+        // the wrist, at the lower right of the view — so the weapon rotates about
+        // the hand rather than about its own centre.
+        //
+        // Three phases, following the proportions of a Minecraft-style swing:
+        // a quick cock-back, a fast sweep, then an eased return. The sweep and
+        // return together occupy the recovery window, which is where the visible
+        // motion belongs; the cock-back rides the tail of the wind-up so the blade
+        // is already travelling when the damage lands.
         const side = this.swingDirection;
-        const swinging = input.phase !== 'windup';
-        const t = swinging ? easeInOut(input.progress) : 0;
-        // Sweep the arc angle from one extreme to the other.
-        const angle = (-SWING_ARC + 2 * SWING_ARC * t) * side;
 
-        // Recentre while swinging. The hand rests well off to the right, so an arc
-        // drawn around that rest point runs the blade off the edge of the screen at
-        // one extreme and barely leaves centre at the other. Easing the anchor
-        // towards the middle keeps the whole sweep visible and symmetric.
-        const centring = swinging ? 1 : easeOut(input.progress);
-        ox -= px * SWING_RECENTRE * centring;
+        if (input.phase === 'windup') {
+          // Hold near rest, then snap back over the last stretch. Anticipation is
+          // only readable if it happens immediately before the strike.
+          const w = easeIn(Math.max(0, (input.progress - 0.55) / 0.45));
+          ry += w * SWING_WINDBACK * side;
+          rx += w * -0.2; // tilt back
+          rz += w * 0.1 * side;
+          oz += w * 0.07;
+          ox += w * 0.04 * side;
+          break;
+        }
 
-        ox += Math.sin(angle) * SWING_RADIUS_X;
-        oy += Math.cos(angle) * SWING_RADIUS_Y - SWING_RADIUS_Y * 0.3;
-        oz += Math.sin(Math.abs(angle)) * -0.05;
-        rz += -angle * 0.85;
-        ry += -Math.sin(angle) * 0.5;
-        rx += Math.cos(angle) * 0.5;
-
-        if (!swinging) {
-          // Cock back towards the start of the arc and load up.
-          const w = easeOut(input.progress);
-          oz += w * 0.12;
-          oy += w * -0.03;
+        if (input.progress < SWING_SWEEP_FRACTION) {
+          // The sweep: the fastest, most emphasised part of the motion.
+          const t = easeOut(input.progress / SWING_SWEEP_FRACTION);
+          const travel = SWING_WINDBACK + SWING_ARC;
+          ry += (SWING_WINDBACK - travel * t) * side;
+          // A dip and a forward push layered on, so it is not a flat rotation.
+          rx += -0.2 + t * 0.34;
+          rz += (0.1 - t * 0.4) * side;
+          oy += t * -0.1;
+          oz += 0.07 - t * 0.17;
+          ox += (0.04 - t * 0.2) * side;
+        } else {
+          // The return: ease everything back to rest.
+          const t = easeInOut((input.progress - SWING_SWEEP_FRACTION) / (1 - SWING_SWEEP_FRACTION));
+          const settle = 1 - t;
+          ry += -SWING_ARC * side * settle;
+          rx += 0.14 * settle;
+          rz += -0.3 * side * settle;
+          oy += -0.1 * settle;
+          oz += -0.1 * settle;
+          ox += -0.16 * side * settle;
         }
         break;
       }
 
       case 'thrust': {
-        // Straight along the blade. The extension is applied after the rotation,
-        // as a translation down the hand's own -Z axis, so the sword slides along
-        // its length exactly as it points rather than drifting off at an angle.
-        if (input.phase === 'windup') {
-          const w = easeOut(input.progress);
-          this.thrustExtension = -w * 0.16;
-          rx += w * -0.1;
-          oy += w * 0.03;
-        } else {
-          const t = input.progress;
-          // Snap out fast, draw back slower.
-          const extend = t < 0.3 ? easeOut(t / 0.3) : 1 - easeInOut((t - 0.3) / 0.7);
-          this.thrustExtension = -0.16 + extend * 0.72;
-          rx += -0.1 + extend * 0.14;
-          oy += 0.03 - extend * 0.05;
-        }
+        // Straight at the crosshair.
+        //
+        // The weapon rests angled up and to the left, so simply extending along
+        // its own axis sent the point off towards the upper-left corner instead of
+        // at whatever the player was aiming at. The fix is to straighten the
+        // weapon as it extends: cancel the resting yaw and pitch in proportion to
+        // how far it is thrust, and draw the hand in towards screen centre, so the
+        // tip converges on the crosshair at full extension.
+        const extension =
+          input.phase === 'windup'
+            ? -0.2 * easeOut(input.progress)
+            : input.progress < 0.3
+              ? // Snap out fast...
+                -0.2 + easeOut(input.progress / 0.3) * 0.92
+              : // ...then draw back more slowly.
+                0.72 * (1 - easeInOut((input.progress - 0.3) / 0.7));
+
+        // Only straighten while actually extending forward.
+        const align = Math.max(0, extension) / 0.72;
+
+        // Cancel the resting angles so the blade lines up with the view axis.
+        rx -= rest.rotation.x * align * 0.92;
+        ry -= rest.rotation.y * align * 0.92;
+        rz -= rest.rotation.z * align * 0.6;
+        // And bring the hand in from its resting offset towards the centre.
+        ox -= px * THRUST_CENTRING * align;
+        oy += (-0.05 - py) * 0.3 * align;
+        oz -= extension;
         break;
       }
 
@@ -708,9 +740,11 @@ export class ViewModel {
     this.mainHand.position.set(px + ox + this.sway.x, py + oy + this.sway.y, pz + oz);
     this.mainHand.rotation.set(rest.rotation.x + rx, rest.rotation.y + ry, rest.rotation.z + rz);
 
-    // Translate along the weapon's own forward axis. Done here, after the rotation
-    // is final, so a thrust follows wherever the blade is actually pointing.
-    if (this.thrustExtension !== 0) this.mainHand.translateZ(-this.thrustExtension);
+    // Note: the thrust is applied as a view-space offset in the pose above rather
+    // than as a translation along the weapon's local axis. Moving along the local
+    // axis is more physically honest, but with the weapon carried at an angle it
+    // drives the point away from the crosshair — which is where the player is
+    // actually aiming, and what they judge the attack against.
 
     // In thrust mode the weapon is levelled along the line of attack; in swing
     // mode it is carried angled, so the stance reads before you even attack.
@@ -841,6 +875,11 @@ export class ViewModel {
     renderer.render(this.scene, this.camera);
     renderer.autoClear = previousAutoClear;
   }
+}
+
+function easeIn(t: number): number {
+  const c = THREE.MathUtils.clamp(t, 0, 1);
+  return c * c;
 }
 
 function easeOut(t: number): number {

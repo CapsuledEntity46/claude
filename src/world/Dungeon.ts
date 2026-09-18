@@ -416,14 +416,12 @@ export class DungeonGenerator {
   /**
    * A stairway cut down from the surface to the top room.
    *
-   * A descending tunnel rather than a vertical shaft. The previous version ran a
-   * fixed height straight up from the rooms, which meant it either stopped short
-   * of the surface or — far more often — stood proud of it as a hollow tower, and
-   * its one-stair-per-level spiral was not walkable in either direction.
+   * A descending tunnel rather than a vertical shaft, dropping exactly one block
+   * per block travelled so the player's step assist handles it in both directions.
    *
-   * Here the floor drops exactly one block per block travelled, which the player's
-   * step assist handles in both directions, and the whole thing terminates at the
-   * ground with a raised frame so it is findable from a distance.
+   * Order matters here: the surface frame is built *first* and the tunnel carved
+   * afterwards. Done the other way round, the frame's masonry was written back
+   * over the top of the opening and sealed the entrance shut.
    */
   private carveEntrance(chunk: Chunk, baseX: number, baseZ: number, site: DungeonSite): void {
     const dirX = site.entranceDirX;
@@ -436,6 +434,24 @@ export class DungeonGenerator {
     const headroom = 4;
     const steps = site.entranceY - site.topY;
 
+    // --- 1. the surface frame -------------------------------------------------
+    //
+    // Side walls plus a back wall on the *uphill* side (+dir). The tunnel descends
+    // towards -dir, so writing the back wall at -dir would put it directly in the
+    // stairway — which is exactly what blocked the way down before.
+    for (let across = -halfWidth - 1; across <= halfWidth + 1; across++) {
+      for (let along = 0; along <= 1; along++) {
+        const onSide = Math.abs(across) > halfWidth;
+        const onBack = along === 1;
+        if (!onSide && !onBack) continue;
+        const wx = site.entranceX + sideX * across + dirX * along;
+        const wz = site.entranceZ + sideZ * across + dirZ * along;
+        for (let y = site.entranceY; y < site.entranceY + 2; y++) {
+          this.setLocal(chunk, wx - baseX, y, wz - baseZ, this.wallBlock(wx, y, wz));
+        }
+      }
+    }
+    // --- 2. the descending tunnel --------------------------------------------
     for (let i = 0; i <= steps + 5; i++) {
       const floorY = site.entranceY - i;
       if (floorY < site.topY) break;
@@ -458,7 +474,7 @@ export class DungeonGenerator {
 
         // Floor beneath, and a lid overhead once we are underground.
         this.setLocal(chunk, lx, floorY - 1, lz, this.wallBlock(wx, floorY - 1, wz));
-        if (i > 0) {
+        if (i > 1) {
           this.setLocal(chunk, lx, floorY + headroom, lz, this.wallBlock(wx, floorY + headroom, wz));
         }
 
@@ -467,17 +483,23 @@ export class DungeonGenerator {
           else this.setLocal(chunk, lx, y, lz, Block.Air);
         }
 
-        // Clear anything left standing above the mouth, so no tower remains.
-        if (i === 0) {
-          for (let y = floorY + headroom; y < Math.min(CHUNK_SY, floorY + headroom + 8); y++) {
+        // Keep the first couple of slices open to the sky, so the way in is an
+        // obvious hole in the ground rather than a covered hatch.
+        if (i <= 1) {
+          for (let y = floorY + headroom; y < Math.min(CHUNK_SY, site.entranceY + 4); y++) {
             this.setLocal(chunk, lx, y, lz, Block.Air);
           }
         }
       }
 
-      // A stair block on the descent, so the slope reads as steps.
+      // Step treads on the descent.
+      //
+      // The raised half of a stair faces its facing direction, and it belongs on
+      // the *uphill* side so the player steps down onto the low half as they
+      // descend. Facing the other way (which is how this first shipped) puts a
+      // riser in front of every step and reads as a staircase built backwards.
       if (i > 0 && floorY > site.topY) {
-        const stairFacing = facingFromDelta(-dirX, -dirZ);
+        const stairFacing = facingFromDelta(dirX, dirZ);
         for (let across = -halfWidth; across <= halfWidth; across++) {
           const wx = cx + sideX * across;
           const wz = cz + sideZ * across;
@@ -491,23 +513,16 @@ export class DungeonGenerator {
       }
     }
 
-    // A raised frame around the mouth: this is the landmark players look for.
-    for (let across = -halfWidth - 1; across <= halfWidth + 1; across++) {
-      for (let along = -1; along <= 1; along++) {
-        const wx = site.entranceX + sideX * across + dirX * along;
-        const wz = site.entranceZ + sideZ * across + dirZ * along;
-        const onRim = Math.abs(across) > halfWidth || along === -1;
-        if (!onRim) continue;
-        for (let y = site.entranceY; y < site.entranceY + 2; y++) {
-          this.setLocal(chunk, wx - baseX, y, wz - baseZ, this.wallBlock(wx, y, wz));
-        }
-      }
-    }
-    // Two torches on the rim, visible from the surface at night.
+    // --- 3. braziers on the rim ----------------------------------------------
+    //
+    // Last, and deliberately so. These sit on top of the mouth's side walls, and
+    // the tunnel's own wall pass runs the full height of those columns — placed
+    // before the tunnel (as they first were) every one of them was overwritten by
+    // masonry, which is how the entrance came out unlit.
     for (const side of [-halfWidth - 1, halfWidth + 1]) {
       const wx = site.entranceX + sideX * side;
       const wz = site.entranceZ + sideZ * side;
-      this.setLocal(chunk, wx - baseX, site.entranceY + 2, wz - baseZ, Block.Torch);
+      this.setLocal(chunk, wx - baseX, site.entranceY + headroom, wz - baseZ, Block.Torch);
     }
   }
 

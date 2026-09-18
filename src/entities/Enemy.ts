@@ -7,8 +7,8 @@ import type { EnemyArchetype } from './archetypes';
 const GRAVITY = 26;
 const ENEMY_HALF_WIDTH = 0.35;
 const STEP_HEIGHT = 1.02;
-/** Long enough for the dissolve to be legible. */
-const DEATH_DURATION = 0.85;
+/** Just long enough for the manager to read the corpse before it is reaped. */
+const DEATH_DURATION = 0.1;
 
 type AIState = 'idle' | 'chase' | 'windup' | 'recover' | 'reposition' | 'backoff' | 'dying';
 
@@ -77,8 +77,6 @@ export class Enemy {
   private burnTick = 0;
   /** Seconds the enemy is held rigid and cannot act. */
   private stunTimer = 0;
-  /** Paces the death dissolve emission. */
-  private disintegrationTimer = 0;
   /** Drives the forward strike: counts down through the swing itself. */
   private strikeTimer = 0;
   private strikeDuration = 0.14;
@@ -111,6 +109,26 @@ export class Enemy {
 
   get name(): string {
     return `${this.archetype.name} (Lv ${this.level})`;
+  }
+
+  /**
+   * The enemy's own colours, for break particles.
+   *
+   * Sampled from the materials it is actually built from, so the shatter is made
+   * of the creature's own pixels rather than generic grey dust. Slight tonal
+   * variation per entry stops the shower looking like three flat colours.
+   */
+  breakPalette(): THREE.Color[] {
+    const look = this.archetype.look;
+    const base = [look.body, look.head, look.accent];
+    const palette: THREE.Color[] = [];
+    for (const hex of base) {
+      const colour = new THREE.Color(hex);
+      palette.push(colour.clone());
+      palette.push(colour.clone().multiplyScalar(0.72));
+      palette.push(colour.clone().multiplyScalar(1.22));
+    }
+    return palette;
   }
 
   /** Aim point: mid-torso rather than the feet. */
@@ -328,64 +346,12 @@ export class Enemy {
     this.state = 'dying';
     this.dyingTimer = DEATH_DURATION;
     this.healthBar.visible = false;
-    // Materials switch to additive so the body glows as it comes apart.
-    for (const m of this.materials) {
-      m.transparent = true;
-      m.emissive.setScalar(0.35);
-    }
+    // The body disappears immediately; the shatter that replaces it is emitted by
+    // EntityManager, which owns the particle system.
+    this.body.visible = false;
   }
 
   // ---------------------------------------------------------------- AI
-
-  /**
-   * The dissolve: bright motes rising off the body plus a slow expanding cloud of
-   * dust. Emitted over the whole animation rather than as one burst, which is
-   * what makes it read as disintegration instead of an explosion.
-   */
-  private emitDisintegration(dt: number, ctx: GameContext, progress: number): void {
-    const isBone = this.archetype.id === 'skeleton_knight';
-    const moteColor = isBone ? 0xe8e2d0 : this.archetype.aquatic ? 0x9fd8e8 : 0xffb060;
-    const dustColor = isBone ? 0x8a8578 : 0x54484a;
-
-    this.disintegrationTimer -= dt;
-    if (this.disintegrationTimer > 0) return;
-    this.disintegrationTimer = 0.02;
-
-    const centre = this.center;
-    const spread = this.radius * 2.2;
-
-    // Rising embers.
-    for (let i = 0; i < 3; i++) {
-      const point = centre
-        .clone()
-        .add(
-          new THREE.Vector3(
-            (Math.random() - 0.5) * spread,
-            (Math.random() - 0.5) * this.height * 0.8,
-            (Math.random() - 0.5) * spread,
-          ),
-        );
-      ctx.particles.spawn(
-        point,
-        new THREE.Vector3((Math.random() - 0.5) * 1.2, 1.4 + Math.random() * 2.2, (Math.random() - 0.5) * 1.2),
-        { color: moteColor, size: 0.07 + Math.random() * 0.05, life: 0.7, gravity: -3.5, drag: 1.4 },
-      );
-    }
-
-    // Dust cloud, thickest early and drifting outward.
-    if (progress < 0.7) {
-      for (let i = 0; i < 2; i++) {
-        const point = centre
-          .clone()
-          .add(new THREE.Vector3((Math.random() - 0.5) * spread, (Math.random() - 0.5) * 0.6, (Math.random() - 0.5) * spread));
-        ctx.particles.spawn(
-          point,
-          new THREE.Vector3((Math.random() - 0.5) * 2.2, 0.4 + Math.random() * 0.7, (Math.random() - 0.5) * 2.2),
-          { color: dustColor, size: 0.26 + Math.random() * 0.18, life: 1.5, gravity: -0.7, drag: 2.4 },
-        );
-      }
-    }
-  }
 
   /** Wakes the enemy — used by loud noises like gunfire and explosions. */
   alert(): void {
@@ -442,22 +408,10 @@ export class Enemy {
     }
 
     if (this.state === 'dying') {
+      // Nothing to animate: the body is already gone and the break particles are
+      // independent of the entity. The timer only delays reaping so the manager
+      // has a frame to read the corpse's position and palette.
       this.dyingTimer -= dt;
-      const remaining = Math.max(0, this.dyingTimer / DEATH_DURATION);
-      const progress = 1 - remaining;
-
-      // Come apart rather than simply shrink: the body sags, thins out, and fades
-      // while motes and a cloud of dust lift away from it.
-      this.body.scale.set(
-        this.archetype.look.scale * (1 + progress * 0.25),
-        this.archetype.look.scale * Math.max(0.05, remaining),
-        this.archetype.look.scale * (1 + progress * 0.25),
-      );
-      this.body.rotation.z = progress * 0.5;
-      this.body.rotation.y = this.yaw + progress * 1.2;
-      for (const m of this.materials) m.opacity = Math.max(0, remaining * remaining);
-
-      this.emitDisintegration(dt, ctx, progress);
       if (this.dyingTimer <= 0) this.removable = true;
       return;
     }

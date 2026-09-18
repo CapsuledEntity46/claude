@@ -929,6 +929,150 @@ check(
   sites.every((s) => Math.abs(s.entranceDirX) + Math.abs(s.entranceDirZ) === 1),
 );
 
+// The reported bug: the entrance looked right but was walled shut, and the steps
+// were laid the wrong way round. Both are verified against a real carved chunk.
+check(
+  'the entrance is open, not sealed',
+  (() => {
+    const gen = new TerrainGen(20240);
+    const site = gen.dungeons.sitesNear(-400, -400, 400, 400)[0];
+    if (!site) return true;
+    // Walk the first few steps of the stairway and require standing room at each.
+    for (let i = 0; i <= 4; i++) {
+      const wx = Math.round(site.entranceX - site.entranceDirX * i);
+      const wz = Math.round(site.entranceZ - site.entranceDirZ * i);
+      const floorY = site.entranceY - i;
+      const chunk = new Chunk(wx >> 4, wz >> 4);
+      gen.generate(chunk);
+      const lx = wx - (wx >> 4) * CHUNK_SX;
+      const lz = wz - (wz >> 4) * CHUNK_SZ;
+      // Two blocks of clear headroom above the tread is enough to walk through.
+      const a = chunk.get(lx, floorY + 1, lz);
+      const b = chunk.get(lx, floorY + 2, lz);
+      if (a !== Block.Air || b !== Block.Air) return false;
+    }
+    return true;
+  })(),
+  'every step has standing room',
+);
+check(
+  'the stair treads face uphill, so the descent is walkable',
+  (() => {
+    const gen = new TerrainGen(20240);
+    const site = gen.dungeons.sitesNear(-400, -400, 400, 400)[0];
+    if (!site) return true;
+    // The raised half must sit on the +dir (uphill) side of each tread.
+    const expected =
+      Math.abs(site.entranceDirX) > Math.abs(site.entranceDirZ)
+        ? site.entranceDirX > 0
+          ? 1
+          : 3
+        : site.entranceDirZ > 0
+          ? 2
+          : 0;
+    const wx = Math.round(site.entranceX - site.entranceDirX * 2);
+    const wz = Math.round(site.entranceZ - site.entranceDirZ * 2);
+    const chunk = new Chunk(wx >> 4, wz >> 4);
+    gen.generate(chunk);
+    const lx = wx - (wx >> 4) * CHUNK_SX;
+    const lz = wz - (wz >> 4) * CHUNK_SZ;
+    const floorY = site.entranceY - 2;
+    if (chunk.get(lx, floorY, lz) !== Block.StoneStairs) return false;
+    return (chunk.getMeta(lx, floorY, lz) & 0b11) === expected;
+  })(),
+);
+
+// The entrance must be *lit*, not merely open.
+//
+// The frame and the tunnel write to overlapping columns, so whichever runs last
+// wins. Unsealing the entrance meant carving the frame first, which silently put
+// the tunnel's full-height wall pass on top of the rim braziers and left the mouth
+// dark. The smoke test that caught this sampled every other voxel, so it only
+// noticed by parity accident — this walks every voxel around the mouth.
+check(
+  'the entrance is lit, not just open',
+  (() => {
+    const gen = new TerrainGen(20240);
+    const sites = gen.dungeons.sitesNear(-400, -400, 400, 400).slice(0, 6);
+    if (sites.length === 0) return true;
+    const chunks = new Map<string, Chunk>();
+    const blockAt = (wx: number, y: number, wz: number): Block => {
+      const cx = wx >> 4;
+      const cz = wz >> 4;
+      const key = `${cx},${cz}`;
+      let chunk = chunks.get(key);
+      if (!chunk) {
+        chunk = new Chunk(cx, cz);
+        gen.generate(chunk);
+        chunks.set(key, chunk);
+      }
+      return chunk.get(wx - cx * CHUNK_SX, y, wz - cz * CHUNK_SZ);
+    };
+
+    // Torches in a band of the stairway, measured in steps in from the mouth.
+    const torchesBetween = (site: (typeof sites)[number], fromAlong: number, toAlong: number): number => {
+      const sideX = site.entranceDirZ;
+      const sideZ = -site.entranceDirX;
+      let torches = 0;
+      for (let along = fromAlong; along <= toAlong; along++) {
+        for (let across = -3; across <= 3; across++) {
+          const wx = Math.round(site.entranceX - site.entranceDirX * along + sideX * across);
+          const wz = Math.round(site.entranceZ - site.entranceDirZ * along + sideZ * across);
+          const floorY = site.entranceY - Math.max(0, along);
+          for (let y = floorY; y <= floorY + 5; y++) {
+            if (blockAt(wx, y, wz) === Block.Torch) torches++;
+          }
+        }
+      }
+      return torches;
+    };
+
+    // The mouth itself, which is the part that has to read as a dungeon from
+    // across open ground. Deliberately excludes the first stairway torch further
+    // in, so stairway lighting cannot mask a missing brazier.
+    return sites.every((site) => torchesBetween(site, -1, 1) > 0);
+  })(),
+  'the mouth carries a brazier',
+);
+check(
+  'the stairway down is lit',
+  (() => {
+    const gen = new TerrainGen(20240);
+    const sites = gen.dungeons.sitesNear(-400, -400, 400, 400).slice(0, 6);
+    if (sites.length === 0) return true;
+    const chunks = new Map<string, Chunk>();
+    const blockAt = (wx: number, y: number, wz: number): Block => {
+      const cx = wx >> 4;
+      const cz = wz >> 4;
+      const key = `${cx},${cz}`;
+      let chunk = chunks.get(key);
+      if (!chunk) {
+        chunk = new Chunk(cx, cz);
+        gen.generate(chunk);
+        chunks.set(key, chunk);
+      }
+      return chunk.get(wx - cx * CHUNK_SX, y, wz - cz * CHUNK_SZ);
+    };
+    return sites.every((site) => {
+      const sideX = site.entranceDirZ;
+      const sideZ = -site.entranceDirX;
+      let torches = 0;
+      for (let along = 2; along <= 12; along++) {
+        for (let across = -3; across <= 3; across++) {
+          const wx = Math.round(site.entranceX - site.entranceDirX * along + sideX * across);
+          const wz = Math.round(site.entranceZ - site.entranceDirZ * along + sideZ * across);
+          const floorY = site.entranceY - along;
+          for (let y = floorY; y <= floorY + 5; y++) {
+            if (blockAt(wx, y, wz) === Block.Torch) torches++;
+          }
+        }
+      }
+      return torches > 0;
+    });
+  })(),
+  'the descent is not a dark hole',
+);
+
 // Carving must actually hollow out the rock, and identically every time.
 check(
   'carving a chunk hollows out dungeon space',

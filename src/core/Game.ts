@@ -28,6 +28,16 @@ import type { GameContext, LogClass, FloaterClass, ProjectileRequest } from './C
 import { Input } from './Input';
 
 const SKY_COLOR = 0x8fb6d8;
+/** Stepped ember palette for torch flames. */
+const EMBER_COLORS = [0xfff0c0, 0xffc050, 0xff8a28, 0xd8541a] as const;
+/**
+ * Distance a torch ember is tuned to look right at, in blocks.
+ *
+ * Planted torches are usually seen from several blocks away; the held one is not,
+ * so its embers are scaled down by their share of this to keep the same apparent
+ * size on screen.
+ */
+const HAND_EMBER_REFERENCE_DISTANCE = 6;
 const RENDER_DISTANCE = 6;
 const MAX_FRAME_DT = 1 / 20;
 
@@ -138,8 +148,11 @@ export class Game {
     this.ctx = this.buildContext();
     this.entities.attach(this.ctx);
     this.combat.onPlayerDeath = (source) => this.onPlayerDeath(source);
+    // Routed through the context rather than straight into the combat system, so
+    // it passes the same guards as every other damage source. Calling the combat
+    // system directly meant falling ignored invulnerability entirely.
     this.player.onFallDamage = (amount) =>
-      this.combat.damagePlayer(this.ctx, { amount, type: 'blunt', canCrit: false }, this.player.position, 'The fall');
+      this.ctx.damagePlayer({ amount, type: 'blunt', canCrit: false }, this.player.position, 'The fall');
 
     this.bindUi();
     this.spawnPlayer();
@@ -241,28 +254,43 @@ export class Game {
     if (this.emberTimer > 0) return;
     this.emberTimer = 0.07;
 
-    const spawnEmber = (x: number, y: number, z: number, scale: number) => {
+    const spawnEmber = (x: number, y: number, z: number, scale: number, life: number) => {
       this.particles.spawn(
-        new THREE.Vector3(x + (Math.random() - 0.5) * 0.12, y, z + (Math.random() - 0.5) * 0.12),
-        new THREE.Vector3((Math.random() - 0.5) * 0.35, 0.7 + Math.random() * 0.9, (Math.random() - 0.5) * 0.35),
+        new THREE.Vector3(x + (Math.random() - 0.5) * 0.12 * scale, y, z + (Math.random() - 0.5) * 0.12 * scale),
+        new THREE.Vector3(
+          (Math.random() - 0.5) * 0.35 * scale,
+          (0.7 + Math.random() * 0.9) * scale,
+          (Math.random() - 0.5) * 0.35 * scale,
+        ),
         {
-          color: Math.random() < 0.35 ? 0xffe0a0 : 0xff9432,
-          size: (0.035 + Math.random() * 0.03) * scale,
-          life: 0.55 + Math.random() * 0.35,
-          gravity: -1.9,
-          drag: 1.7,
+          // A stepped flame palette rather than a blend, to match the blocky look.
+          color: EMBER_COLORS[Math.floor(Math.random() * EMBER_COLORS.length)],
+          size: (0.055 + Math.random() * 0.035) * scale,
+          life,
+          gravity: -1.8 * scale,
+          drag: 1.6,
         },
       );
     };
 
-    if (handPosition) spawnEmber(handPosition.x, handPosition.y, handPosition.z, 0.8);
+    // The held torch burns barely half a block from the lens, and on-screen point
+    // size goes as 1/distance — at that range every ember hit the shader's 14px
+    // ceiling and crawled up the whole screen, reading as floating orange debris
+    // instead of sparks. Scaling the whole ember down by its share of that
+    // distance puts it back to a few pixels, and shortening its life keeps it near
+    // the flame where a spark belongs.
+    if (handPosition) {
+      const eyeDistance = Math.max(0.35, handPosition.distanceTo(this.player.eyePosition));
+      const scale = Math.min(1, eyeDistance / HAND_EMBER_REFERENCE_DISTANCE);
+      spawnEmber(handPosition.x, handPosition.y, handPosition.z, scale, 0.26 + Math.random() * 0.16);
+    }
 
     // Planted torches: only the nearest few, and only some of the time.
     const nearby = this.world.nearestLightSources(this.player.eyePosition, 18, 5);
     for (const light of nearby) {
       if (this.world.getBlock(light.x, light.y, light.z) !== Block.Torch) continue;
       if (Math.random() > 0.45) continue;
-      spawnEmber(light.x + 0.5, light.y + 0.72, light.z + 0.5, 1);
+      spawnEmber(light.x + 0.5, light.y + 0.72, light.z + 0.5, 1, 0.5 + Math.random() * 0.35);
     }
   }
 
@@ -702,6 +730,35 @@ export class Game {
     this.player.velocity.set(0, 0, 0);
   }
 
+  /**
+   * Test hook: clears the death state and puts the player back in control.
+   *
+   * Debug teleports can drop the player and kill them, and nothing else clears the
+   * overlay — which left every subsequent screenshot with a stale "You Died"
+   * banner across it.
+   */
+  debugRevive(): void {
+    this.player.dead = false;
+    this.player.stats.resetForRespawn();
+    this.hud.hideDeath();
+    if (this.mode === 'dead') this.mode = 'playing';
+  }
+
+  /** Test hook: removes the ground under the player, to exercise falling. */
+  debugDropPlayer(): void {
+    const x = Math.floor(this.player.position.x);
+    const y = Math.floor(this.player.position.y);
+    const z = Math.floor(this.player.position.z);
+    for (let dz = -2; dz <= 2; dz++) {
+      for (let dx = -2; dx <= 2; dx++) this.world.setBlock(x + dx, y - 1, z + dz, Block.Air, false);
+    }
+  }
+
+  /** True while the death overlay is showing. */
+  debugIsDead(): boolean {
+    return this.player.dead || this.mode === 'dead';
+  }
+
   /** Test hook: freezes enemy AI so attack geometry is deterministic. */
   debugFreezeEnemies(frozen: boolean): void {
     this.entities.frozen = frozen;
@@ -812,16 +869,29 @@ export class Game {
     return this.entities.debugSpawnFishNear(this.ctx);
   }
 
-  /** Teleports to the nearest dungeon entrance, for testing. */
+  /**
+   * Teleports to the nearest dungeon entrance, for testing.
+   *
+   * Lands a few blocks back from the mouth on solid ground. Dropping the player
+   * into the opening itself meant arriving mid-air over a stairwell.
+   */
   debugGoToDungeon(): { x: number; y: number; z: number } | null {
-    const entrance = this.world.gen.dungeons.nearestEntrance(
-      this.player.position.x,
-      this.player.position.z,
-      600,
-    );
+    const dungeons = this.world.gen.dungeons;
+    const entrance = dungeons.nearestEntrance(this.player.position.x, this.player.position.z, 600);
     if (!entrance) return null;
-    this.world.ensureLoadedAround(Math.floor(entrance.x), Math.floor(entrance.z), 2);
-    this.player.spawnAt(this.world, Math.floor(entrance.x), Math.floor(entrance.z));
+
+    const site = dungeons
+      .sitesNear(entrance.x - 2, entrance.z - 2, entrance.x + 2, entrance.z + 2)
+      .find((candidate) => candidate.entranceX === entrance.x && candidate.entranceZ === entrance.z);
+
+    // Stand back along the uphill side, facing the mouth.
+    const backX = Math.floor(entrance.x + (site?.entranceDirX ?? 0) * 4);
+    const backZ = Math.floor(entrance.z + (site?.entranceDirZ ?? 1) * 4);
+
+    this.world.ensureLoadedAround(backX, backZ, 2);
+    this.player.spawnAt(this.world, backX, backZ);
+    this.player.yaw = Math.atan2(-(entrance.x - backX), -(entrance.z - backZ));
+    this.player.pitch = -0.18;
     return { x: this.player.position.x, y: this.player.position.y, z: this.player.position.z };
   }
 
@@ -1023,9 +1093,13 @@ export class Game {
     let masonry = 0;
     let torches = 0;
     const centre = this.player.position;
+    // Every voxel, not every other one. Torches are isolated single blocks, so a
+    // strided sample only finds one when its coordinates happen to share the
+    // stride's parity — the count was a coin toss that moved whenever entrance
+    // geometry shifted by a block.
     for (let y = Math.max(1, Math.floor(centre.y) - 40); y < Math.floor(centre.y) + 6; y++) {
-      for (let dz = -20; dz <= 20; dz += 2) {
-        for (let dx = -20; dx <= 20; dx += 2) {
+      for (let dz = -20; dz <= 20; dz += 1) {
+        for (let dx = -20; dx <= 20; dx += 1) {
           const id = this.world.getBlock(Math.floor(centre.x) + dx, y, Math.floor(centre.z) + dz);
           if (id === Block.Air && y < Math.floor(centre.y)) airBelow++;
           else if (id === Block.DungeonBrick || id === Block.MossyBrick || id === Block.CrackedBrick) masonry++;
@@ -1062,6 +1136,11 @@ export class Game {
   }
 
   private viewModelHidden = false;
+
+  /** Live particle count, for verifying bursts. */
+  debugParticleCount(): number {
+    return this.particles.count;
+  }
 
   /** Number of rain drops currently falling. */
   debugRainDrops(): number {
@@ -1124,6 +1203,11 @@ export class Game {
   /** Points the camera at the ground a few blocks ahead. */
   debugLookDown(): void {
     this.player.pitch = -0.6;
+  }
+
+  /** Sets pitch alone, leaving whatever the camera is facing intact. */
+  debugPitch(pitch: number): void {
+    this.player.pitch = pitch;
   }
 
   /** Current stamina, for tests that need to know whether an action can fire. */

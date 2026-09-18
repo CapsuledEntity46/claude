@@ -149,15 +149,16 @@ export class EntityManager implements EnemyWorld {
     if (loot.length > 0) this.pickups.spawnLoot(enemy.center, loot);
 
     this.ctx.log(`${enemy.name} falls.`, 'good');
-    // A single bright flash at the moment of death; the lingering dissolve and
-    // dust cloud are emitted by the enemy itself over the following second.
-    this.ctx.particles.burst(enemy.center, 14, 6, {
-      color: enemy.archetype.id === 'skeleton_knight' ? 0xf0e8d0 : 0xffc070,
-      size: 0.12,
-      life: 0.4,
-      gravity: -2,
-      drag: 2,
-    });
+
+    // A block-break shatter: the enemy bursts into a shower of square particles
+    // coloured from its own materials, which arc under gravity and blink out.
+    this.ctx.particles.spawnBreakParticles(
+      enemy.center,
+      enemy.breakPalette(),
+      24 + Math.floor(this.rng() * 14),
+      Math.max(0.5, enemy.radius * 2.2),
+      4.2 + enemy.radius,
+    );
   }
 
   // ---------------------------------------------------------------- lifecycle

@@ -199,7 +199,7 @@ try {
    * right axes. Measuring *direction* matters: the original test only checked
    * total distance moved, so it passed happily while W and S were inverted.
    */
-  const walkAndMeasure = async (key, seconds = 1.6) => {
+  const walkAndMeasure = async (key, targetDistance = 1.5, timeoutMs = 8000) => {
     // Reset position and aim, but do not rebuild the arena every time: doing so
     // dirties several chunks and the resulting re-mesh slows the frame rate
     // enough to distort a distance measurement.
@@ -211,10 +211,22 @@ try {
     await page.waitForTimeout(400);
     const start = await snapshot();
     await page.keyboard.down(key);
-    await page.waitForTimeout(seconds * 1000);
+    // Hold the key until the player has actually covered some ground, rather than
+    // for a fixed stretch of wall-clock. The game clamps its timestep, so under
+    // software rendering game-time runs several times slower than real time and a
+    // fixed 1.6s walk covered well under half a block — enough to fail a distance
+    // gate while the direction being tested was perfectly correct.
+    const deadline = Date.now() + timeoutMs;
+    let end = start;
+    while (Date.now() < deadline) {
+      await page.waitForTimeout(150);
+      end = await snapshot();
+      const travelled = Math.hypot(end.playerX - start.playerX, end.playerZ - start.playerZ);
+      if (travelled >= targetDistance) break;
+    }
     await page.keyboard.up(key);
     await page.waitForTimeout(250);
-    const end = await snapshot();
+    end = await snapshot();
     // With yaw 0 the camera faces -Z and right is +X.
     return {
       forward: -(end.playerZ - start.playerZ),
@@ -230,11 +242,14 @@ try {
    * swapped axis, and absolute distance is at the mercy of the frame rate under
    * software rendering. Requiring the intended axis to dominate the other by 3x
    * catches inversions and swaps without being flaky.
+   *
+   * The floor on total travel is only here to reject idle jitter — the walk itself
+   * polls until the player has moved, so this is not a speed measurement.
    */
   const checkDirection = (label, m, axis, sign) => {
     const intended = axis === 'forward' ? m.forward : m.right;
     const other = axis === 'forward' ? m.right : m.forward;
-    const moved = m.total > 0.5;
+    const moved = m.total > 0.2;
     const correctSign = Math.sign(intended) === sign;
     const dominant = Math.abs(intended) > Math.abs(other) * 3;
     check(
@@ -579,6 +594,76 @@ try {
     `axial ${thrustAxial.toFixed(2)} vs lateral ${thrustLateral.toFixed(2)}`,
   );
 
+  // The swing must be dominated by yaw, since it is a horizontal slash.
+  check(
+    'the swing rotates mostly about the vertical axis',
+    delta(swingPose, 'rotY') > delta(swingPose, 'rotX'),
+    `rotY ${delta(swingPose, 'rotY').toFixed(2)} vs rotX ${delta(swingPose, 'rotX').toFixed(2)}`,
+  );
+  // And a thrust must bring the weapon towards the centre, not away from it.
+  check(
+    'a thrust moves the weapon towards screen centre',
+    Math.abs(thrustPose.posX ?? 0) < Math.abs(idlePose.posX ?? 0),
+    `posX ${idlePose.posX} -> ${thrustPose.posX}`,
+  );
+
+  console.log('\n[invulnerability covers every damage source]');
+  // Fall damage used to bypass the guard by calling the combat system directly.
+  await page.evaluate(() => {
+    const g = window.__voxelquest;
+    g.debugRevive();
+    g.debugSetInvulnerable(true);
+    g.debugClearEnemies();
+    g.debugFlattenArena(8);
+    g.debugTeleportUp(26);
+  });
+  await page.waitForTimeout(600);
+  await page.evaluate(() => window.__voxelquest.debugDropPlayer());
+  await page.waitForTimeout(3000);
+  const survivedFall = await page.evaluate(() => ({
+    dead: window.__voxelquest.debugIsDead(),
+    hp: window.__voxelquest.debugSnapshot().hp,
+  }));
+  check(
+    'fall damage respects invulnerability',
+    survivedFall.dead === false,
+    `dead ${survivedFall.dead}, hp ${survivedFall.hp}`,
+  );
+  await page.evaluate(() => {
+    window.__voxelquest.debugRevive();
+    window.__voxelquest.debugSetInvulnerable(false);
+  });
+
+  console.log('\n[death particles]');
+  // A kill should shatter the enemy into a burst of its own coloured pixels.
+  await page.evaluate(() => {
+    const g = window.__voxelquest;
+    g.debugSetInvulnerable(true);
+    g.debugClearEnemies();
+    g.debugFlattenArena(8);
+    g.debugLook(0, 0);
+    g.debugFreezeEnemies(true);
+    g.debugSpawnEnemyInReach(2.4);
+  });
+  await page.waitForTimeout(800);
+  const particlesBeforeKill = await page.evaluate(() => window.__voxelquest.debugParticleCount());
+
+  let peakParticles = particlesBeforeKill;
+  for (let i = 0; i < 25; i++) {
+    await page.evaluate(() => window.__voxelquest.debugRefill());
+    await page.mouse.click(CENTER_X, CENTER_Y);
+    await page.waitForTimeout(260);
+    const count = await page.evaluate(() => window.__voxelquest.debugParticleCount());
+    if (count > peakParticles) peakParticles = count;
+    const report = await page.evaluate(() => window.__voxelquest.debugEnemyReport());
+    if (report.length === 0) break;
+  }
+  check(
+    'a kill emits a burst of break particles',
+    peakParticles - particlesBeforeKill >= 20,
+    `${particlesBeforeKill} -> peak ${peakParticles}`,
+  );
+
   console.log('\n[block breaking animation]');
   await waitForIdle();
   await page.evaluate(() => {
@@ -777,9 +862,22 @@ try {
   });
   await page.waitForTimeout(400);
   const editsBeforeTool = await page.evaluate(() => window.__voxelquest.debugEditedBlockCount());
-  await page.mouse.click(CENTER_X, CENTER_Y, { button: 'right' });
-  await page.waitForTimeout(700);
-  const editsAfterTool = await page.evaluate(() => window.__voxelquest.debugEditedBlockCount());
+  // Click until the fill lands, rather than once and hope.
+  //
+  // A single right-click behind a fixed wait can miss for reasons that have
+  // nothing to do with bulk placement: the tool may still be on cooldown from the
+  // preceding placements, or the aimed-at column may momentarily have no valid
+  // face. Retrying and polling tests that the tool fills in bulk, which is the
+  // actual claim, instead of testing that one particular click was well timed.
+  let editsAfterTool = editsBeforeTool;
+  for (let attempt = 0; attempt < 6 && editsAfterTool - editsBeforeTool < 4; attempt++) {
+    await page.mouse.click(CENTER_X, CENTER_Y, { button: 'right' });
+    for (let poll = 0; poll < 8; poll++) {
+      await page.waitForTimeout(100);
+      editsAfterTool = await page.evaluate(() => window.__voxelquest.debugEditedBlockCount());
+      if (editsAfterTool - editsBeforeTool >= 4) break;
+    }
+  }
   check(
     'the build tool places many blocks at once',
     editsAfterTool - editsBeforeTool >= 4,

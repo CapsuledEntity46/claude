@@ -149,9 +149,21 @@ Stone complexes are cut into the rock across the world: connected rooms, corrido
 wall torches, rubble, and a vault at the end holding the best loot and a guard
 several levels above you.
 
-Look for a **lit stone frame at ground level** — two torches on the rim make it
+Look for a **lit stone frame at ground level** — two braziers on the rim make it
 visible at night. Inside, a stairway descends one block per step down to the first
 room. The compass carries a pip for the nearest entrance.
+
+The entrance is carved in a deliberate order: the surface frame first, the tunnel
+second, the braziers last. Both of the ways of getting that wrong actually shipped.
+Carving the tunnel first let the frame's back wall land inside the stairway and
+seal the entrance shut. Fixing that by carving the frame first then put the
+tunnel's full-height wall pass straight over the braziers, leaving the mouth open
+but pitch dark. Anything written into a column that two passes share belongs in the
+pass that runs last.
+
+Stair treads face *uphill*, so descending steps you down onto the low half of each
+one. Facing them the other way — which is how they first shipped — puts a riser in
+front of every step and reads as a staircase built backwards.
 
 Layouts are generated per *site* from the world seed and the site's grid position,
 never from neighbouring chunks. That matters because chunks stream in an
@@ -199,6 +211,29 @@ Kills drop glowing orbs that home in on you once you are close — purple for
 experience, blue for mana. Each level grants 2 points to spend on **Might** (melee
 damage, health), **Agility** (ranged damage, stamina, speed), or **Focus** (spell
 damage, mana, spell slots).
+
+### Dying looks like a block breaking
+
+An enemy that dies **shatters into its own pixels**: 20–40 hard-edged squares burst
+outward, coloured from that enemy's own materials, arc under gravity, and blink out.
+There is no fade and no dissolve — the body simply stops being drawn on the frame
+the burst spawns.
+
+Every particle in the game follows the same rules, so nothing looks smoother than
+the world it sits in:
+
+- **Squares, never discs.** No round mask, no soft edges.
+- **Whole-pixel sizes.** Point size is rounded and clamped, because a sub-pixel
+  square renders as a soft blur — the 3D equivalent of drawing on integer pixel
+  coordinates with image smoothing off.
+- **Alpha in four discrete steps**, so particles blink out in stages instead of
+  dissolving continuously.
+
+Torch embers and orb motes draw from small stepped palettes for the same reason.
+Embers from the torch *in your hand* are scaled down by their distance from the eye:
+on-screen point size goes as 1/distance, and a flame burning half a block from the
+lens drove every ember into the size clamp, so they read as orange debris floating
+across the view rather than as sparks.
 
 ## Inventory
 
@@ -292,18 +327,26 @@ Some notes on the parts that are less obvious than they look:
 - **Melee does not move the camera.** Kicking the view during a swing reads as the
   camera glitching or clipping rather than as a weapon being swung, so all of the
   motion belongs to the weapon. Firearms still recoil, where a shove is expected.
-- **A swing is driven along a circular path** in screen space rather than by
-  nudging a few offsets, and its anchor eases towards screen centre so the whole
-  sweep stays visible. A thrust is a translation along the weapon's *own* forward
-  axis, applied after its rotation, so the blade slides along its length exactly
-  as it points.
+- **A swing is a yaw sweep about the vertical axis**, pivoting near the wrist at
+  the bottom-right of the screen, in three phases: a short wind-up, a ~50° sweep
+  left-to-right with a slight downward dip, and a slower return. An earlier version
+  drove the weapon along a circular screen-space path, which sent the blade off the
+  edge of the view at the extremes.
+- **A thrust is offset in view space, not along the weapon's own axis.** Translating
+  along the blade's local forward axis is the physically honest reading, but the
+  weapon is held at an angle, so it drove the point *away* from the crosshair — the
+  tip has to converge on where you are actually aiming.
+- **Animation timings ride the combat phases rather than a fixed clock.** The
+  visible sweep lands in the 200–300ms a swing should feel like, but tying it to
+  wind-up and commitment keeps the telegraph window that makes the fighting
+  readable.
 - **Enemies hold their distance and circle** rather than walking into you. They
   also lose interest if you get far enough away, so a fight is escapable.
 
 ## Tests
 
 ```bash
-npm test            # typecheck + 67 unit checks
+npm test            # typecheck + 187 unit checks
 npm run test:unit   # damage model, mesher, terrain determinism, inventory
 npm run test:smoke  # boots the real build in headless Chromium and plays it
 ```
@@ -311,7 +354,8 @@ npm run test:smoke  # boots the real build in headless Chromium and plays it
 The unit checks assert the *design*, not just the code: that a torch is a slim post
 rather than a cube, that an open door has no collision, that mana never
 regenerates on its own, that materials add no carry weight, that dungeon layouts
-are deterministic and chunk-order independent, that a mace beats plate,
+are deterministic and chunk-order independent, that a dungeon entrance is both
+open *and* lit at the mouth, that stair treads face uphill, that a mace beats plate,
 that thrusts beat swings against armour, that a weapon's attack modes follow from
 its shape, that the mesher culls shared faces and bakes AO, that terrain is
 deterministic per seed, that night raises the spawn cap above daytime, that
@@ -325,7 +369,12 @@ cycles day to night and clear to storm, saves and loads, and opens the character
 sheet, asserting the *effects* of each rather than just the absence of exceptions.
 
 It checks movement by *direction*, not distance. An earlier version only measured
-how far the player travelled, which passed happily while W and S were inverted.
+how far the player travelled, which passed happily while W and S were inverted. The
+walk also holds the key until the player has actually covered ground rather than for
+a fixed stretch of wall-clock: the distance-travelled gate that survived the rewrite
+later failed a run where the direction under test was perfectly correct, simply
+because a slow frame rate meant 1.6 real seconds moved the player less than half a
+block.
 
 It needs Playwright:
 

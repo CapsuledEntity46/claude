@@ -78,6 +78,7 @@ await page.waitForTimeout(9000);
 const stage = async () => {
   await g(() => {
     const game = window.__voxelquest;
+    game.debugRevive();
     game.debugClearEnemies();
     game.debugFlattenArena(12);
     game.debugLook(0, -0.06);
@@ -244,18 +245,69 @@ const wentUnderground = await g(() => window.__voxelquest.debugGoToDungeon());
 if (wentUnderground) {
   await g(() => {
     const game = window.__voxelquest;
+    game.debugRevive();
     game.debugSetTime('day');
     game.debugEquip('longsword');
     game.debugSelectHotbarByItem('longsword');
     game.debugEquip('torch');
   });
+  // The mouth is a hole in the ground a few blocks ahead, so a near-level gaze
+  // looks straight over it at the horizon — which is what the first version of
+  // this shot did. Tip the camera down far enough to put the opening in frame.
+  await g(() => window.__voxelquest.debugPitch(-0.42));
   await page.waitForTimeout(5000);
   await shot('dungeon-entrance');
 
   // Drop into the first room.
-  await g(() => window.__voxelquest.debugDescendDungeon());
+  await g(() => {
+    window.__voxelquest.debugDescendDungeon();
+    window.__voxelquest.debugRevive();
+  });
   await page.waitForTimeout(4500);
   await shot('dungeon-interior');
+}
+
+// ---------------------------------------------------------------- death burst
+
+await stage();
+await g(() => {
+  const game = window.__voxelquest;
+  game.debugSetTime('day');
+  game.debugEquip('longsword');
+  game.debugSelectHotbarByItem('longsword');
+  game.debugSetAttackMode('swing');
+  game.debugFreezeEnemies(true);
+  game.debugSpawnEnemyInReach(2.4);
+});
+await page.waitForTimeout(1200);
+// Shoot the burst at its peak, not after it has settled.
+//
+// The particles only live about a second, and a fixed wait after the killing blow
+// landed well past that — the first version of this shot caught bare ground with
+// the debris already gone. So poll the particle count and fire the moment it
+// jumps, which is the frame the enemy shatters.
+{
+  const baseline = await g(() => window.__voxelquest.debugParticleCount());
+  let captured = false;
+  for (let i = 0; i < 25 && !captured; i++) {
+    await g(() => window.__voxelquest.debugRefill());
+    await page.mouse.click(CENTER_X, CENTER_Y);
+    for (let poll = 0; poll < 12; poll++) {
+      await page.waitForTimeout(40);
+      const count = await g(() => window.__voxelquest.debugParticleCount());
+      if (count > baseline + 20) {
+        await shot('death-break-particles');
+        captured = true;
+        break;
+      }
+    }
+    const report = await g(() => window.__voxelquest.debugEnemyReport());
+    if (report.length === 0) break;
+  }
+  if (!captured) {
+    await shot('death-break-particles');
+    console.log('  note  death burst peak not observed; captured anyway');
+  }
 }
 
 // ---------------------------------------------------------------- sheet

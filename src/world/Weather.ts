@@ -24,13 +24,14 @@ interface WeatherProfile {
 }
 
 const PROFILES: Record<WeatherKind, WeatherProfile> = {
-  clear: { weight: 46, minDuration: 150, maxDuration: 420, rainRate: 0, fogTighten: 0, dim: 0, label: 'Clear' },
-  fog: { weight: 20, minDuration: 90, maxDuration: 240, rainRate: 0, fogTighten: 0.68, dim: 0.18, label: 'Fog' },
-  rain: { weight: 24, minDuration: 100, maxDuration: 280, rainRate: 1500, fogTighten: 0.42, dim: 0.4, label: 'Rain' },
-  storm: { weight: 10, minDuration: 60, maxDuration: 160, rainRate: 2800, fogTighten: 0.62, dim: 0.68, label: 'Storm' },
+  clear: { weight: 50, minDuration: 420, maxDuration: 900, rainRate: 0, fogTighten: 0, dim: 0, label: 'Clear' },
+  fog: { weight: 18, minDuration: 240, maxDuration: 480, rainRate: 0, fogTighten: 0.68, dim: 0.18, label: 'Fog' },
+  rain: { weight: 22, minDuration: 280, maxDuration: 560, rainRate: 1500, fogTighten: 0.42, dim: 0.4, label: 'Rain' },
+  storm: { weight: 10, minDuration: 160, maxDuration: 320, rainRate: 2800, fogTighten: 0.62, dim: 0.68, label: 'Storm' },
 };
 
-const TRANSITION_SECONDS = 9;
+/** Long, so weather rolls in and out rather than flickering between states. */
+const TRANSITION_SECONDS = 14;
 
 export class Weather {
   kind: WeatherKind = 'clear';

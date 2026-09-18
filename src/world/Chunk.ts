@@ -32,6 +32,11 @@ export class Chunk {
   readonly cx: number;
   readonly cz: number;
   readonly voxels: Uint8Array;
+  /**
+   * Per-voxel orientation and state, parallel to `voxels`.
+   * See shapes.ts for the bit layout. Zero for ordinary cubes.
+   */
+  readonly meta: Uint8Array;
 
   state: MeshState = MeshState.Empty;
 
@@ -39,8 +44,8 @@ export class Chunk {
   readonly heightMap: Uint8Array;
 
   /**
-   * Player edits, as voxelIndex -> block id. Saves store only this map plus the
-   * world seed, so terrain is regenerated rather than persisted.
+   * Player edits, as voxelIndex -> packed (blockId | meta << 8). Saves store only
+   * this map plus the world seed, so terrain is regenerated rather than persisted.
    */
   edits = new Map<number, number>();
 
@@ -48,6 +53,7 @@ export class Chunk {
     this.cx = cx;
     this.cz = cz;
     this.voxels = new Uint8Array(CHUNK_VOLUME);
+    this.meta = new Uint8Array(CHUNK_VOLUME);
     this.heightMap = new Uint8Array(CHUNK_SX * CHUNK_SZ);
   }
 
@@ -57,20 +63,30 @@ export class Chunk {
     return this.voxels[voxelIndex(x, y, z)];
   }
 
+  getMeta(x: number, y: number, z: number): number {
+    if (y < 0 || y >= CHUNK_SY) return 0;
+    return this.meta[voxelIndex(x, y, z)];
+  }
+
   /** Local-coordinate set. Does not mark the chunk dirty — callers do that. */
-  set(x: number, y: number, z: number, id: number): void {
+  set(x: number, y: number, z: number, id: number, meta = 0): void {
     if (y < 0 || y >= CHUNK_SY) return;
-    this.voxels[voxelIndex(x, y, z)] = id;
+    const i = voxelIndex(x, y, z);
+    this.voxels[i] = id;
+    this.meta[i] = meta;
   }
 
   /** Records an edit so it survives save/load and terrain regeneration. */
-  recordEdit(x: number, y: number, z: number, id: number): void {
-    this.edits.set(voxelIndex(x, y, z), id);
+  recordEdit(x: number, y: number, z: number, id: number, meta = 0): void {
+    this.edits.set(voxelIndex(x, y, z), (id & 0xff) | ((meta & 0xff) << 8));
   }
 
   /** Re-applies stored edits after terrain generation. */
   applyEdits(): void {
-    for (const [idx, id] of this.edits) this.voxels[idx] = id;
+    for (const [idx, packed] of this.edits) {
+      this.voxels[idx] = packed & 0xff;
+      this.meta[idx] = (packed >> 8) & 0xff;
+    }
   }
 
   /** Full rebuild. Only needed after generating or bulk-loading a chunk. */

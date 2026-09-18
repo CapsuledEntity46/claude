@@ -1,6 +1,8 @@
 import * as THREE from 'three';
 import { CombatSystem } from '../combat/CombatSystem';
-import { item } from '../combat/items';
+import { blockCollisionBoxes, blockDef } from '../world/blocks';
+import { makeMeta, shapeBoxes } from '../world/shapes';
+import { item, tryItem } from '../combat/items';
 import { EntityManager } from '../entities/EntityManager';
 import { PickupManager } from '../entities/Pickups';
 import { ProjectileManager } from '../entities/Projectile';
@@ -9,6 +11,8 @@ import { LightManager } from '../fx/LightManager';
 import { Particles } from '../fx/Particles';
 import { Rain } from '../fx/Rain';
 import { Starfield } from '../fx/Starfield';
+import { Trail } from '../fx/Trail';
+import { TrajectoryArc } from '../fx/TrajectoryArc';
 import { ViewModel } from '../fx/ViewModel';
 import { Inventory, type Stack } from '../player/Inventory';
 import { Player } from '../player/Player';
@@ -52,7 +56,11 @@ export class Game {
   private stars = new Starfield();
   private lights = new LightManager();
   private highlight = new BlockHighlight();
+  private trails = new Trail();
+  private arc = new TrajectoryArc();
   private viewModel: ViewModel;
+  /** Base camera field of view, restored when not aiming. */
+  private readonly baseFov = 78;
 
   /** Reused colour scratch, so the render loop allocates nothing. */
   private readonly skyColor = new THREE.Color();
@@ -98,7 +106,7 @@ export class Game {
 
     this.viewModel = new ViewModel(78, window.innerWidth / window.innerHeight);
     this.setupLights();
-    this.scene.add(this.stars.points, this.rain.lines, this.lights.group, this.highlight.group);
+    this.scene.add(this.stars.points, this.rain.lines, this.lights.group, this.highlight.group, this.trails.mesh, this.arc.group);
 
     // Rain kicks up a little spray where it lands.
     this.rain.onSplash = (x, y, z) => {
@@ -117,6 +125,10 @@ export class Game {
 
     this.pickups = new PickupManager({
       onXp: (amount) => this.grantXp(amount),
+      onMana: (amount) => {
+        const restored = this.player.stats.restoreMana(amount);
+        if (restored > 0) this.hud.log(`Absorbed ${Math.round(restored)} mana.`, 'magic');
+      },
       onItem: (stack) => this.collectItem(stack),
     });
     this.entities = new EntityManager(this.pickups);
@@ -212,7 +224,46 @@ export class Game {
     // Rain, and the lights that matter once it gets dark.
     this.rain.setBrightness(0.35 + daylight * 0.65);
     this.rain.update(dt, this.world, this.player.position, this.underwater ? 0 : this.weather.rainRate);
-    this.lights.update(this.world, eye, this.worldTorchPosition(), 1 - daylight);
+    const torchPosition = this.worldTorchPosition();
+    this.lights.update(this.world, eye, torchPosition, 1 - daylight);
+    this.updateTorchEmbers(dt, torchPosition);
+  }
+
+  private emberTimer = 0;
+
+  /**
+   * Embers rising from live flames: the one in your hand, and any planted torches
+   * close enough to notice. Emission is throttled rather than per-frame, so a
+   * corridor lined with torches does not flood the particle pool.
+   */
+  private updateTorchEmbers(dt: number, handPosition: THREE.Vector3 | null): void {
+    this.emberTimer -= dt;
+    if (this.emberTimer > 0) return;
+    this.emberTimer = 0.07;
+
+    const spawnEmber = (x: number, y: number, z: number, scale: number) => {
+      this.particles.spawn(
+        new THREE.Vector3(x + (Math.random() - 0.5) * 0.12, y, z + (Math.random() - 0.5) * 0.12),
+        new THREE.Vector3((Math.random() - 0.5) * 0.35, 0.7 + Math.random() * 0.9, (Math.random() - 0.5) * 0.35),
+        {
+          color: Math.random() < 0.35 ? 0xffe0a0 : 0xff9432,
+          size: (0.035 + Math.random() * 0.03) * scale,
+          life: 0.55 + Math.random() * 0.35,
+          gravity: -1.9,
+          drag: 1.7,
+        },
+      );
+    };
+
+    if (handPosition) spawnEmber(handPosition.x, handPosition.y, handPosition.z, 0.8);
+
+    // Planted torches: only the nearest few, and only some of the time.
+    const nearby = this.world.nearestLightSources(this.player.eyePosition, 18, 5);
+    for (const light of nearby) {
+      if (this.world.getBlock(light.x, light.y, light.z) !== Block.Torch) continue;
+      if (Math.random() > 0.45) continue;
+      spawnEmber(light.x + 0.5, light.y + 0.72, light.z + 0.5, 1);
+    }
   }
 
   /**
@@ -241,7 +292,7 @@ export class Game {
         if (this.invulnerable) return;
         this.combat.damagePlayer(this.ctx, input, from, sourceName);
       },
-      spawnProjectile: (req: ProjectileRequest) => this.projectiles.spawn(req),
+      spawnProjectile: (req: ProjectileRequest) => this.projectiles.spawn(req, this.trails),
       alert: (position, radius) => this.entities.alert(position, radius),
       explode: (position, radius, damage, type, pierce, blockDamage, hostile, sourceName) =>
         this.combat.explode(this.ctx, position, radius, damage, type, pierce, blockDamage, hostile, sourceName),
@@ -407,6 +458,7 @@ export class Game {
     this.entities.faceCamera(this.camera);
     this.pickups.faceCamera(this.camera.quaternion);
 
+    this.updateMinimap(dt);
     this.hud.update(this.player, this.combat.hudState(this.ctx), {
       fps: this.fps,
       chunks: this.world.loadedChunkCount,
@@ -423,7 +475,7 @@ export class Game {
 
     // The held item is drawn last, over a cleared depth buffer, so it is never
     // sliced open by a wall the player is standing against.
-    this.viewModel.render(this.renderer);
+    if (!this.viewModelHidden) this.viewModel.render(this.renderer);
     this.input.endFrame();
   }
 
@@ -446,6 +498,9 @@ export class Game {
 
     this.updateBlockHighlight();
     this.updateViewModel(dt);
+    this.updateAiming(dt);
+    this.updateSwingTrail();
+    this.trails.update(dt, this.player.eyePosition);
   }
 
   /** Outlines the block under the crosshair and cracks it as it breaks. */
@@ -456,6 +511,60 @@ export class Game {
       return;
     }
     this.highlight.show(state.x, state.y, state.z, state.progress);
+  }
+
+  /**
+   * Aim-down-sights: narrows the field of view and previews the flight path.
+   * The preview is traced with the projectile's own integration, so it cannot
+   * disagree with where the shot actually goes.
+   */
+  private updateAiming(dt: number): void {
+    const aim = this.combat.aimState(this.ctx);
+    const targetFov = aim ? this.baseFov / aim.zoom : this.baseFov;
+
+    if (Math.abs(this.camera.fov - targetFov) > 0.01) {
+      this.camera.fov += (targetFov - this.camera.fov) * Math.min(1, dt * 11);
+      this.camera.updateProjectionMatrix();
+    }
+
+    if (!aim) {
+      this.arc.hide();
+      return;
+    }
+    this.arc.show(this.world, aim.origin, aim.direction, aim.speed, aim.gravityScale);
+  }
+
+  /** Handle of the ribbon currently tracing a melee swing, or -1. */
+  private swingTrailHandle = -1;
+
+  /**
+   * Traces the weapon tip while an attack is in motion.
+   *
+   * Only during the strike itself, not the wind-up: a trail on the wind-up would
+   * imply the blade is already travelling, which misreads the timing the player
+   * is supposed to learn.
+   */
+  private updateSwingTrail(): void {
+    const view = this.combat.viewState(this.ctx);
+    const striking = (view.action === 'swing' || view.action === 'thrust') && view.phase === 'recovery';
+
+    if (!striking) {
+      if (this.swingTrailHandle >= 0) {
+        this.trails.release(this.swingTrailHandle);
+        this.swingTrailHandle = -1;
+      }
+      return;
+    }
+
+    this.viewModel.refreshMatrices();
+    const tip = this.viewModel.weaponTipWorldPosition(this.camera.matrixWorld);
+    if (!tip) return;
+
+    if (this.swingTrailHandle < 0) {
+      const wide = view.action === 'swing';
+      this.swingTrailHandle = this.trails.spawn(wide ? 0xdfe8ff : 0xfff0d0, wide ? 0.3 : 0.16, 0.42);
+    }
+    if (this.swingTrailHandle >= 0) this.trails.push(this.swingTrailHandle, tip);
   }
 
   private updateViewModel(dt: number): void {
@@ -477,6 +586,19 @@ export class Game {
       lookDx: this.input.mouseDX,
       lookDy: this.input.mouseDY,
     });
+  }
+
+  /** Feeds the minimap the terrain, enemies, and the nearest dungeon entrance. */
+  private updateMinimap(dt: number): void {
+    const markers: { x: number; z: number; kind: 'enemy' | 'dungeon' }[] = [];
+    for (const enemy of this.entities.enemies) {
+      if (enemy.dead || enemy.archetype.passive) continue;
+      markers.push({ x: enemy.position.x, z: enemy.position.z, kind: 'enemy' });
+    }
+    const entrance = this.world.gen.dungeons.nearestEntrance(this.player.position.x, this.player.position.z);
+    if (entrance) markers.push({ x: entrance.x, z: entrance.z, kind: 'dungeon' });
+
+    this.hud.minimap.update(dt, this.world, this.player.position, this.player.yaw, markers, this.time.daylight);
   }
 
   private handleGlobalKeys(): void {
@@ -580,6 +702,16 @@ export class Game {
     this.player.velocity.set(0, 0, 0);
   }
 
+  /** Test hook: freezes enemy AI so attack geometry is deterministic. */
+  debugFreezeEnemies(frozen: boolean): void {
+    this.entities.frozen = frozen;
+  }
+
+  /** Test hook: clears any in-progress block mining. */
+  debugResetMining(): void {
+    this.combat.debugResetMining();
+  }
+
   /** Test/debug helper: tops up health, stamina, and spell slots. */
   debugRefill(): void {
     this.player.stats.hp = this.player.stats.maxHp;
@@ -679,6 +811,257 @@ export class Game {
   debugSpawnFish(): number {
     return this.entities.debugSpawnFishNear(this.ctx);
   }
+
+  /** Teleports to the nearest dungeon entrance, for testing. */
+  debugGoToDungeon(): { x: number; y: number; z: number } | null {
+    const entrance = this.world.gen.dungeons.nearestEntrance(
+      this.player.position.x,
+      this.player.position.z,
+      600,
+    );
+    if (!entrance) return null;
+    this.world.ensureLoadedAround(Math.floor(entrance.x), Math.floor(entrance.z), 2);
+    this.player.spawnAt(this.world, Math.floor(entrance.x), Math.floor(entrance.z));
+    return { x: this.player.position.x, y: this.player.position.y, z: this.player.position.z };
+  }
+
+  /** Dungeon layout summary near the player, for tests. */
+  debugDungeonInfo(): Record<string, unknown> {
+    const dungeons = this.world.gen.dungeons;
+    const nearest = dungeons.nearestEntrance(this.player.position.x, this.player.position.z, 600);
+    const sites = dungeons.sitesNear(
+      this.player.position.x - 300,
+      this.player.position.z - 300,
+      this.player.position.x + 300,
+      this.player.position.z + 300,
+    );
+    return {
+      sitesNearby: sites.length,
+      rooms: sites.reduce((sum, site) => sum + site.rooms.length, 0),
+      corridors: sites.reduce((sum, site) => sum + site.corridors.length, 0),
+      vaults: sites.reduce((sum, site) => sum + site.rooms.filter((r) => r.vault).length, 0),
+      nearestEntranceDistance: nearest ? Math.round(nearest.distance) : -1,
+      spawnPoints: dungeons.spawnPointsNear(this.player.position.x, this.player.position.z, 64).length,
+      insideDungeon: dungeons.isInsideDungeon(
+        this.player.position.x,
+        this.player.position.y,
+        this.player.position.z,
+      ),
+    };
+  }
+
+  /** Mana readouts for tests. */
+  debugMana(): Record<string, number> {
+    return {
+      mana: Math.round(this.player.stats.mana),
+      maxMana: this.player.stats.maxMana,
+      trails: this.trails.activeCount,
+    };
+  }
+
+  debugSetMana(value: number): void {
+    this.player.stats.mana = Math.max(0, Math.min(this.player.stats.maxMana, value));
+  }
+
+  /** Aim state, for verifying zoom and the arc preview. */
+  debugAim(): Record<string, unknown> {
+    const aim = this.combat.aimState(this.ctx);
+    return {
+      aiming: !!aim,
+      zoom: aim?.zoom ?? 1,
+      fov: Number(this.camera.fov.toFixed(2)),
+      arcVisible: this.arc.group.visible,
+    };
+  }
+
+  /** Shape details of the most recently placed instance of an item's block. */
+  debugPlacedShape(itemId: string): Record<string, unknown> | null {
+    const def = tryItem(itemId);
+    if (!def || def.block === undefined) return null;
+    const centre = this.player.position;
+    // Search the immediate area for the block we just placed.
+    for (let dy = -3; dy <= 3; dy++) {
+      for (let dz = -4; dz <= 4; dz++) {
+        for (let dx = -4; dx <= 4; dx++) {
+          const x = Math.floor(centre.x) + dx;
+          const y = Math.floor(centre.y) + dy;
+          const z = Math.floor(centre.z) + dz;
+          if (this.world.getBlock(x, y, z) !== def.block) continue;
+          const meta = this.world.getMeta(x, y, z);
+          const blockDefinition = blockDef(def.block);
+          const boxes = shapeBoxes(blockDefinition.shape, meta);
+          const fillsVoxel =
+            boxes.length === 1 &&
+            boxes[0].min.every((v) => v === 0) &&
+            boxes[0].max.every((v) => v === 1);
+          this.lastProbedBlock = { x, y, z };
+          return {
+            shape: blockDefinition.shape,
+            meta,
+            boxes: boxes.length,
+            fillsVoxel,
+            blocks: blockCollisionBoxes(def.block, meta).length > 0,
+            at: [x, y, z],
+          };
+        }
+      }
+    }
+    return null;
+  }
+
+  private lastProbedBlock: { x: number; y: number; z: number } | null = null;
+
+  /** Opens the door found by the last debugPlacedShape probe. */
+  debugToggleNearestDoor(): boolean {
+    const at = this.lastProbedBlock;
+    if (!at) return false;
+    return this.world.toggleBlock(at.x, at.y, at.z);
+  }
+
+  /** Sets the build tool's shape mode. */
+  debugSetToolMode(mode: 'single' | 'line' | 'wall' | 'box' | 'floor'): void {
+    this.combat.debugSetToolMode(mode);
+  }
+
+  /** Builds a small structure showing off every shaped material, for screenshots. */
+  debugBuildShowcase(): void {
+    this.debugFlattenArena(16);
+    const ox = Math.floor(this.player.position.x) - 3;
+    const oy = Math.floor(this.player.position.y);
+    const oz = Math.floor(this.player.position.z) - 10;
+    const put = (x: number, y: number, z: number, id: Block, meta = 0) =>
+      this.world.setBlock(x, y, z, id, false, meta);
+
+    const width = 7;
+    const depth = 6;
+
+    // Floor and walls.
+    for (let x = 0; x < width; x++) {
+      for (let z = 0; z < depth; z++) {
+        put(ox + x, oy - 1, oz + z, Block.Planks);
+        const wall = x === 0 || x === width - 1 || z === 0 || z === depth - 1;
+        for (let y = 0; y < 3; y++) {
+          put(ox + x, oy + y, oz + z, wall ? Block.Brick : Block.Air);
+        }
+      }
+    }
+
+    // Doorway in the front wall, with windows either side.
+    const doorX = ox + 3;
+    const frontZ = oz + depth - 1;
+    put(doorX, oy, frontZ, Block.Door, makeMeta(2));
+    put(doorX, oy + 1, frontZ, Block.Door, makeMeta(2));
+    put(ox + 1, oy + 1, frontZ, Block.Window, makeMeta(2));
+    put(ox + 5, oy + 1, frontZ, Block.Window, makeMeta(2));
+    put(ox + 1, oy + 1, oz, Block.Window, makeMeta(0));
+    put(ox + 5, oy + 1, oz, Block.Window, makeMeta(0));
+
+    // A gable roof: each course is a full row of wedges, stepping inward and up,
+    // so the slope is continuous instead of a row of floating flaps.
+    const ridge = Math.floor(width / 2);
+    for (let step = 0; step <= ridge; step++) {
+      for (let z = -1; z <= depth; z++) {
+        const y = oy + 3 + step;
+        if (step < ridge) {
+          // Both slopes, facing outward from the ridge.
+          put(ox + step, y, oz + z, Block.Shingles, makeMeta(3));
+          put(ox + width - 1 - step, y, oz + z, Block.Shingles, makeMeta(1));
+          // Fill the interior of the course so there is no gap to see through.
+          for (let x = step + 1; x < width - 1 - step; x++) {
+            put(ox + x, y, oz + z, step === 0 ? Block.Air : Block.Planks);
+          }
+        } else {
+          put(ox + ridge, y, oz + z, Block.PlankSlab, makeMeta(0));
+        }
+      }
+    }
+
+    // Steps up to the door, each one block higher than the last.
+    for (let i = 0; i < 3; i++) {
+      put(doorX, oy - 1 + i, frontZ + 3 - i, Block.StoneStairs, makeMeta(2));
+    }
+
+    // A fenced porch either side of the steps.
+    for (let x = 0; x < width; x++) {
+      if (ox + x === doorX) continue;
+      put(ox + x, oy, frontZ + 2, Block.Fence, makeMeta(0));
+    }
+
+    // A slab path leading away, laid *on* the ground rather than flush with it.
+    for (let z = 4; z < 10; z++) put(doorX, oy, frontZ + z, Block.PlankSlab, makeMeta(0));
+
+    // Stand back on the path, looking at the front of the house. Forward is
+    // (-sin yaw, 0, -cos yaw), so yaw 0 looks towards smaller Z — which is where
+    // the house is from here.
+    this.player.position.set(doorX + 0.5, oy + 1.05, frontZ + 12.5);
+    this.player.velocity.set(0, 0, 0);
+    this.player.yaw = 0;
+    this.player.pitch = -0.02;
+  }
+
+  /** Drops the player into the nearest dungeon room, for screenshots. */
+  debugDescendDungeon(): boolean {
+    const dungeons = this.world.gen.dungeons;
+    const entrance = dungeons.nearestEntrance(this.player.position.x, this.player.position.z, 600);
+    if (!entrance) return false;
+    const sites = dungeons.sitesNear(entrance.x - 4, entrance.z - 4, entrance.x + 4, entrance.z + 4);
+    const room = sites[0]?.rooms[0];
+    if (!room) return false;
+
+    const x = room.x + Math.floor(room.width / 2);
+    const z = room.z + Math.floor(room.depth / 2);
+    this.world.ensureLoadedAround(x, z, 2);
+    this.player.position.set(x + 0.5, room.floorY + 0.05, z + 0.5);
+    this.player.velocity.set(0, 0, 0);
+    this.player.pitch = 0;
+    return true;
+  }
+
+  /** Counts dungeon features around the player, to confirm carving happened. */
+  debugDungeonCarved(): Record<string, number> {
+    let airBelow = 0;
+    let masonry = 0;
+    let torches = 0;
+    const centre = this.player.position;
+    for (let y = Math.max(1, Math.floor(centre.y) - 40); y < Math.floor(centre.y) + 6; y++) {
+      for (let dz = -20; dz <= 20; dz += 2) {
+        for (let dx = -20; dx <= 20; dx += 2) {
+          const id = this.world.getBlock(Math.floor(centre.x) + dx, y, Math.floor(centre.z) + dz);
+          if (id === Block.Air && y < Math.floor(centre.y)) airBelow++;
+          else if (id === Block.DungeonBrick || id === Block.MossyBrick || id === Block.CrackedBrick) masonry++;
+          else if (id === Block.Torch) torches++;
+        }
+      }
+    }
+    return { airBelow, masonry, torches };
+  }
+
+  /** Which optional visual layers are currently drawing, for diagnosis. */
+  debugLayers(): Record<string, unknown> {
+    return {
+      trails: this.trails.activeCount,
+      trailMeshVisible: this.trails.mesh.visible,
+      arcVisible: this.arc.group.visible,
+      rainDrops: this.rain.dropCount,
+      highlightVisible: this.highlight.group.visible,
+      starsVisible: this.stars.points.visible,
+      particlesVisible: this.particles.points.visible,
+      pickupsInScene: this.pickups.group.children.length,
+    };
+  }
+
+  /** Test hook: hides a visual layer so it can be ruled in or out. */
+  debugHideLayer(layer: 'trails' | 'arc' | 'rain' | 'highlight' | 'stars' | 'viewmodel' | 'particles', hidden: boolean): void {
+    if (layer === 'particles') this.particles.points.visible = !hidden;
+    else if (layer === 'trails') this.trails.mesh.visible = !hidden;
+    else if (layer === 'arc') this.arc.group.visible = !hidden;
+    else if (layer === 'rain') this.rain.lines.visible = !hidden;
+    else if (layer === 'highlight') this.highlight.group.visible = !hidden;
+    else if (layer === 'stars') this.stars.points.visible = !hidden;
+    else this.viewModelHidden = hidden;
+  }
+
+  private viewModelHidden = false;
 
   /** Number of rain drops currently falling. */
   debugRainDrops(): number {
@@ -929,6 +1312,8 @@ export class Game {
       this.particles.clear();
       this.rain.clear();
       this.highlight.hide();
+      this.trails.clear();
+      this.arc.hide();
       this.combat.reset();
       this.hud.hideDeath();
       if (this.mode === 'dead') {

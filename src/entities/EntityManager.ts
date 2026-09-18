@@ -137,21 +137,36 @@ export class EntityManager implements EnemyWorld {
     const xp = xpForKill(enemy.archetype, enemy.level);
     this.pickups.spawnOrbs(enemy.center, xp);
 
+    // Mana has no passive regeneration, so kills are the main way casters refuel.
+    // Casters carry more of it, which gives a reason to hunt them specifically.
+    const isCaster = enemy.archetype.ranged?.look === 'magic';
+    if (!enemy.archetype.passive && this.rng() < (isCaster ? 0.85 : 0.45)) {
+      const mana = Math.round((isCaster ? 16 : 8) + enemy.level * 1.6);
+      this.pickups.spawnOrbs(enemy.center, mana, 'mana');
+    }
+
     const loot = rollLoot(enemy.archetype, enemy.level, this.rng);
     if (loot.length > 0) this.pickups.spawnLoot(enemy.center, loot);
 
     this.ctx.log(`${enemy.name} falls.`, 'good');
-    this.ctx.particles.burst(enemy.center, 20, 5, {
-      color: enemy.archetype.id === 'skeleton_knight' ? 0xdad6c8 : 0x7a1018,
-      size: 0.11,
-      life: 0.8,
-      gravity: 18,
+    // A single bright flash at the moment of death; the lingering dissolve and
+    // dust cloud are emitted by the enemy itself over the following second.
+    this.ctx.particles.burst(enemy.center, 14, 6, {
+      color: enemy.archetype.id === 'skeleton_knight' ? 0xf0e8d0 : 0xffc070,
+      size: 0.12,
+      life: 0.4,
+      gravity: -2,
+      drag: 2,
     });
   }
 
   // ---------------------------------------------------------------- lifecycle
 
+  /** Test hook: halts enemy AI so combat geometry can be measured. */
+  frozen = false;
+
   update(dt: number, ctx: GameContext): void {
+    if (this.frozen) return;
     for (let i = this.list.length - 1; i >= 0; i--) {
       const e = this.list[i];
       e.update(dt, ctx);
@@ -251,6 +266,10 @@ export class EntityManager implements EnemyWorld {
       (level >= 4 && this.rng() < 0.22 * night ? 1 : 0) +
       (level >= 8 && this.rng() < 0.12 * night ? 1 : 0);
 
+    // Underground: populate the dungeon around the player instead of dropping
+    // enemies onto the surface far overhead.
+    if (this.trySpawnInDungeon(ctx)) return;
+
     const anchor = this.findSpawnPoint(ctx);
     if (!anchor) return;
 
@@ -262,6 +281,38 @@ export class EntityManager implements EnemyWorld {
       point.y = ground + 1.05;
       this.spawnAt(point, ctx.player.stats.level);
     }
+  }
+
+  /**
+   * Spawns dungeon inhabitants at the layout's own marked positions.
+   *
+   * Returns true when it handled the spawn, so the surface spawner stands down.
+   * Vault guards come in several levels above the player, which is what makes a
+   * vault worth the trip and worth being careful about.
+   */
+  private trySpawnInDungeon(ctx: GameContext): boolean {
+    const player = ctx.player.position;
+    const points = ctx.world.gen.dungeons.spawnPointsNear(player.x, player.z, 44);
+    if (points.length === 0) return false;
+
+    // Only spawn out of sight, and only where the room is actually loaded.
+    const candidates = points.filter((point) => {
+      const distance = Math.hypot(point.x - player.x, point.z - player.z);
+      if (distance < 12 || distance > 44) return false;
+      if (Math.abs(point.y - player.y) > 26) return false;
+      if (!ctx.world.isLoadedAt(Math.floor(point.x), Math.floor(point.z))) return false;
+      // The marker must still be open space — the player may have walled it up.
+      return !ctx.world.isSolidAt(point.x, point.y + 1, point.z);
+    });
+    if (candidates.length === 0) return false;
+
+    const chosen = candidates[Math.floor(this.rng() * candidates.length)];
+    const level = Math.max(1, ctx.player.stats.level + (chosen.elite ? 3 + Math.floor(this.rng() * 3) : 0));
+    const enemy = this.spawnAt(new THREE.Vector3(chosen.x, chosen.y, chosen.z), level);
+    if (enemy && chosen.elite) {
+      this.ctx.log('Something heavy stirs in the vault.', 'hurt');
+    }
+    return true;
   }
 
   /** Puts fish in nearby water so there is something to hunt. */

@@ -2,15 +2,15 @@ import * as THREE from 'three';
 import type { GameContext } from '../core/Context';
 import type { Input } from '../core/Input';
 import type { Enemy } from '../entities/Enemy';
-import { Block, blockDef, blockDrop, isSolid } from '../world/blocks';
+import { Block, blockDef, blockDrop, isSolid, isTargetable } from '../world/blocks';
+import { facingFromYaw, makeMeta } from '../world/shapes';
+import type { RaycastHit } from '../world/World';
 import { PLAYER_HALF_WIDTH, PLAYER_HEIGHT } from '../player/Player';
 import { ammoItemFor, item, itemForBlock, type ItemDef } from './items';
 import { computeDamage, type AttackMode, type DamageInput, type MeleeAttack, type RangedProfile } from './types';
 import type { ViewAction, ViewPhase } from '../fx/ViewModel';
 
 const REACH = 5.2;
-/** Multiplier applied when a melee weapon chips a block instead of an enemy. */
-const WEAPON_MINING_FACTOR = 0.35;
 const MAX_EXPLOSION_BLOCKS = 700;
 
 type ActionState = 'idle' | 'windup' | 'recovery' | 'casting' | 'reloading';
@@ -55,6 +55,20 @@ export class CombatSystem {
 
   private target: Enemy | null = null;
   private rng = Math.random;
+
+  /** True while a held spell is actively running. */
+  private sustaining = false;
+  /** Batches channelled healing into readable floating numbers. */
+  private channelHealAccrued = 0;
+  /** Paces stream damage into discrete ticks. */
+  private streamTick = 0;
+  /** True while the player is holding right-click to aim a ranged weapon. */
+  private aiming = false;
+
+  /** Build tool state: shape mode, size, and the block it will place. */
+  private toolMode: BuildMode = 'single';
+  private toolSize = 3;
+  private toolBlock: Block = Block.Cobble;
 
   /** Which mode the current or just-finished melee attack used, for animation. */
   private lastMeleeMode: AttackMode = 'swing';
@@ -160,7 +174,7 @@ export class CombatSystem {
 
   /** Tracks the block under the crosshair so it can be outlined every frame. */
   private updateBlockTarget(ctx: GameContext): void {
-    const hit = ctx.world.raycast(ctx.player.eyePosition, ctx.player.lookDirection, REACH, isSolid);
+    const hit = ctx.world.raycast(ctx.player.eyePosition, ctx.player.lookDirection, REACH, isTargetable);
     this.blockTarget = hit ? { x: hit.x, y: hit.y, z: hit.z } : null;
   }
 
@@ -232,6 +246,12 @@ export class CombatSystem {
 
   private handleModeSwitch(input: Input, ctx: GameContext, active: ItemDef | null): void {
     if (!input.wasPressed('KeyX')) return;
+
+    if (active?.kind === 'tool') {
+      this.cycleToolMode(ctx);
+      return;
+    }
+
     const weapon = active?.weapon;
     if (!weapon || weapon.melee.length <= 1) {
       ctx.log('This weapon has only one way to strike.', 'info');
@@ -260,8 +280,48 @@ export class CombatSystem {
     const player = ctx.player;
     // Holding something placeable means right-click builds, so no guard.
     const placeable = active?.kind === 'block' || active?.kind === 'torch';
-    const wantsGuard = input.isMouseDown(2) && !placeable;
+
+    // Right-click aims arcing weapons instead of guarding. A crossbow is excluded
+    // deliberately: it is held at tension and fires flat, so it behaves like a
+    // firearm rather than something you lob.
+    const weaponClass = active?.weapon?.class;
+    const arcs = weaponClass === 'bow' || weaponClass === 'thrown';
+    this.aiming = arcs && input.isMouseDown(2);
+
+    const wantsGuard = input.isMouseDown(2) && !placeable && !arcs;
     player.blocking = wantsGuard && player.canBlock && this.state !== 'casting';
+  }
+
+  /** Whether the view should be zoomed, and the arc preview drawn. */
+  aimState(ctx: GameContext): {
+    aiming: boolean;
+    zoom: number;
+    origin: THREE.Vector3;
+    direction: THREE.Vector3;
+    speed: number;
+    gravityScale: number;
+  } | null {
+    if (!this.aiming) return null;
+    const active = ctx.player.inventory.activeItem;
+    const profile = active?.weapon?.ranged;
+    if (!profile) return null;
+
+    const eye = ctx.player.eyePosition;
+    const look = ctx.player.lookDirection;
+    const isThrown = active!.weapon!.class === 'thrown';
+
+    // A drawn bow shoots flatter and faster, so the preview must reflect the
+    // current draw rather than a nominal full-power shot.
+    const power = isThrown ? 1 : Math.max(0.25, this.draw || 0.25);
+
+    return {
+      aiming: true,
+      zoom: isThrown ? 1.12 : 1.35,
+      origin: eye.clone().addScaledVector(look, isThrown ? 0.6 : 0.5),
+      direction: isThrown ? look.clone().add(new THREE.Vector3(0, 0.18, 0)).normalize() : look.clone(),
+      speed: profile.speed * (isThrown ? 1 : 0.5 + power * 0.5),
+      gravityScale: profile.gravity,
+    };
   }
 
   // ------------------------------------------------------------------ primary
@@ -280,15 +340,24 @@ export class CombatSystem {
     }
     this.resetMining();
 
+    if (active?.kind === 'tool') {
+      this.handleBuildTool(input, ctx);
+      return;
+    }
+
     if (active?.kind === 'consumable') {
       if (input.mousePressed(0)) this.useConsumable(ctx, active);
       return;
     }
 
     if (active?.kind === 'spell') {
-      if (input.mousePressed(0)) this.beginCast(ctx, active);
+      // Held spells (Flames, Sparks, Healing) run continuously while the button
+      // is down and bill mana per second; everything else is a discrete cast.
+      if (active.spell?.sustained) this.updateSustained(dt, input, ctx, active);
+      else if (input.mousePressed(0)) this.beginCast(ctx, active);
       return;
     }
+    this.sustaining = false;
 
     const weapon = active?.weapon;
     if (weapon?.ranged && weapon.class === 'bow') {
@@ -308,6 +377,171 @@ export class CombatSystem {
 
     // Melee (including bare fists when nothing is equipped).
     if (input.mousePressed(0)) this.beginMelee(ctx, active);
+  }
+
+  /**
+   * The build tool.
+   *
+   * Left-click clears a region, right-click fills it, X cycles the shape, and R
+   * samples whatever you are looking at. Sampling matters more than it sounds:
+   * without it you would have to go to the inventory to change material, which is
+   * exactly the friction the tool exists to remove.
+   */
+  private handleBuildTool(input: Input, ctx: GameContext): void {
+    if (input.wasPressed('KeyR')) {
+      const hit = ctx.world.raycast(ctx.player.eyePosition, ctx.player.lookDirection, REACH * 3, isTargetable);
+      if (hit) {
+        this.toolBlock = hit.block as Block;
+        ctx.log(`Tool loaded with ${blockDef(hit.block).name}.`, 'info');
+      }
+      return;
+    }
+
+    if (this.useCooldown > 0) return;
+
+    const region = this.toolRegion(ctx);
+    if (!region) return;
+
+    if (input.mousePressed(0)) {
+      this.applyToolRegion(ctx, region, Block.Air);
+      this.useCooldown = 0.22;
+      this.placeTimer = 0.18;
+    } else if (input.mousePressed(2)) {
+      this.applyToolRegion(ctx, region, this.toolBlock);
+      this.useCooldown = 0.22;
+      this.placeTimer = 0.18;
+    }
+  }
+
+  /** Cycles the build tool's shape. Shares the X key with attack modes. */
+  private cycleToolMode(ctx: GameContext): void {
+    const order: BuildMode[] = ['single', 'line', 'wall', 'box', 'floor'];
+    this.toolMode = order[(order.indexOf(this.toolMode) + 1) % order.length];
+    ctx.log(`Mason\u2019s Gun: ${TOOL_MODE_LABEL[this.toolMode]} (${this.toolSize} blocks).`, 'info');
+  }
+
+  /**
+   * The block region the tool currently targets.
+   *
+   * Anchored on the face being looked at, and oriented by the player's facing so
+   * a wall goes up across your view and a floor lies flat.
+   */
+  private toolRegion(ctx: GameContext): { min: THREE.Vector3; max: THREE.Vector3 } | null {
+    const hit = ctx.world.raycast(ctx.player.eyePosition, ctx.player.lookDirection, REACH * 3, isTargetable);
+    if (!hit) return null;
+
+    // Build outward from the struck face; carve into the block itself.
+    const anchor = new THREE.Vector3(hit.x, hit.y, hit.z);
+    const outward = new THREE.Vector3(hit.nx, hit.ny, hit.nz);
+    const size = this.toolSize;
+    const half = Math.floor(size / 2);
+
+    const facing = ctx.player.facing;
+    const alongX = Math.abs(facing.x) > Math.abs(facing.z);
+
+    const min = anchor.clone();
+    const max = anchor.clone();
+
+    switch (this.toolMode) {
+      case 'single':
+        break;
+      case 'line': {
+        // A run straight ahead along the dominant horizontal axis.
+        const step = alongX ? new THREE.Vector3(Math.sign(facing.x), 0, 0) : new THREE.Vector3(0, 0, Math.sign(facing.z));
+        max.addScaledVector(step, size - 1);
+        break;
+      }
+      case 'wall': {
+        // Vertical panel across the view.
+        const across = alongX ? new THREE.Vector3(0, 0, 1) : new THREE.Vector3(1, 0, 0);
+        min.addScaledVector(across, -half);
+        max.addScaledVector(across, half);
+        max.y += size - 1;
+        break;
+      }
+      case 'floor':
+        min.x -= half;
+        min.z -= half;
+        max.x += half;
+        max.z += half;
+        break;
+      case 'box':
+        min.set(anchor.x - half, anchor.y - half, anchor.z - half);
+        max.set(anchor.x + half, anchor.y + half, anchor.z + half);
+        break;
+    }
+
+    // Filling places against the face; carving eats into the surface.
+    return {
+      min: min.clone().add(outward),
+      max: max.clone().add(outward),
+    };
+  }
+
+  /** Fills or clears a region, stopping when materials run out. */
+  private applyToolRegion(ctx: GameContext, region: { min: THREE.Vector3; max: THREE.Vector3 }, block: Block): void {
+    const clearing = block === Block.Air;
+    const item = clearing ? null : itemForBlock(block);
+    if (!clearing && !item) {
+      ctx.log('That material cannot be placed.', 'info');
+      return;
+    }
+
+    let changed = 0;
+    let exhausted = false;
+    const playerBox = ctx.player.position;
+
+    for (let y = region.min.y; y <= region.max.y && !exhausted; y++) {
+      for (let z = region.min.z; z <= region.max.z && !exhausted; z++) {
+        for (let x = region.min.x; x <= region.max.x && !exhausted; x++) {
+          if (clearing) {
+            const existing = ctx.world.getBlock(x, y, z);
+            if (existing === Block.Air || existing === Block.Bedrock) continue;
+            if (!ctx.world.setBlock(x, y, z, Block.Air)) continue;
+            const drop = blockDrop(existing);
+            if (drop !== null) {
+              const dropItem = itemForBlock(drop);
+              if (dropItem) ctx.player.inventory.add(dropItem.id, 1);
+            }
+            changed++;
+            continue;
+          }
+
+          // Never wall the player into their own build.
+          const overlapsPlayer =
+            x + 1 > playerBox.x - PLAYER_HALF_WIDTH &&
+            x < playerBox.x + PLAYER_HALF_WIDTH &&
+            z + 1 > playerBox.z - PLAYER_HALF_WIDTH &&
+            z < playerBox.z + PLAYER_HALF_WIDTH &&
+            y + 1 > playerBox.y &&
+            y < playerBox.y + PLAYER_HEIGHT;
+          if (overlapsPlayer) continue;
+          if (isSolid(ctx.world.getBlock(x, y, z))) continue;
+
+          if (!ctx.player.inventory.remove(item!.id, 1)) {
+            exhausted = true;
+            break;
+          }
+          if (!ctx.world.setBlock(x, y, z, block)) {
+            // Refund a block the world refused, e.g. an unloaded chunk.
+            ctx.player.inventory.add(item!.id, 1);
+            continue;
+          }
+          changed++;
+        }
+      }
+    }
+
+    if (exhausted) ctx.log(`Out of ${item!.name}.`, 'info');
+    if (changed > 0) {
+      ctx.log(clearing ? `Cleared ${changed} blocks.` : `Placed ${changed} blocks.`, 'good');
+      ctx.particles.burst(region.min.clone().add(region.max).multiplyScalar(0.5), 8, 3, {
+        color: clearing ? 0x9a8a78 : 0xd8c090,
+        size: 0.1,
+        life: 0.4,
+        gravity: 12,
+      });
+    }
   }
 
   private handleSecondary(input: Input, ctx: GameContext, active: ItemDef | null): void {
@@ -411,28 +645,13 @@ export class CombatSystem {
         attack.mode === 'swing' ? 0.7 : 0.25,
         { color: 0xffe4b0, size: 0.06, life: 0.2, gravity: 6 },
       );
-    } else {
-      // A miss still bites into whatever is in front of you.
-      this.chipBlock(ctx, attack);
     }
   }
 
-  /** A whiffed melee swing damages the block it lands on. */
-  private chipBlock(ctx: GameContext, attack: MeleeAttack): void {
-    const hit = ctx.world.raycast(ctx.player.eyePosition, ctx.player.lookDirection, attack.reach, isSolid);
-    if (!hit) return;
-    const key = `${hit.x},${hit.y},${hit.z}`;
-    if (this.miningKey !== key) {
-      this.miningKey = key;
-      this.miningProgress = 0;
-      this.miningTarget = { x: hit.x, y: hit.y, z: hit.z };
-    }
-    const hardness = blockDef(hit.block).hardness;
-    if (!Number.isFinite(hardness)) return;
-    this.miningProgress += (WEAPON_MINING_FACTOR * (attack.damage / 10 + 0.4)) / Math.max(0.15, hardness);
-    this.spawnBlockParticles(ctx, hit.x, hit.y, hit.z, 3);
-    if (this.miningProgress >= 1) this.breakBlock(ctx, hit.x, hit.y, hit.z);
-  }
+  // Note: a missed melee swing deliberately does *not* damage terrain. It used to,
+  // which meant a run of whiffed attacks could quietly break the floor out from
+  // under the player — a surprising way to lose your own building. Mining is the
+  // job of a selected block, a torch, or the build tool.
 
   // ------------------------------------------------------------------ mining
 
@@ -446,7 +665,7 @@ export class CombatSystem {
 
   private mine(dt: number, ctx: GameContext, speed: number): void {
     this.diag.mineCalls++;
-    const hit = ctx.world.raycast(ctx.player.eyePosition, ctx.player.lookDirection, REACH, isSolid);
+    const hit = ctx.world.raycast(ctx.player.eyePosition, ctx.player.lookDirection, REACH, isTargetable);
     if (!hit) {
       this.diag.lastReason = 'mine: nothing in reach';
       this.resetMining();
@@ -507,10 +726,21 @@ export class CombatSystem {
 
   private placeBlock(ctx: GameContext, active: ItemDef): void {
     if (active.block === undefined) return;
-    if (!ctx.player.inventory.has(active.id, 1)) return;
 
-    const hit = ctx.world.raycast(ctx.player.eyePosition, ctx.player.lookDirection, REACH, isSolid);
+    const hit = ctx.world.raycast(ctx.player.eyePosition, ctx.player.lookDirection, REACH, isTargetable);
     if (!hit) return;
+
+    // Interacting beats building: right-clicking a door opens it rather than
+    // stacking another door against its face.
+    if (blockDef(hit.block).interactive) {
+      if (ctx.world.toggleBlock(hit.x, hit.y, hit.z)) {
+        this.useCooldown = 0.25;
+        this.placeTimer = 0.18;
+        return;
+      }
+    }
+
+    if (!ctx.player.inventory.has(active.id, 1)) return;
 
     const x = hit.x + hit.nx;
     const y = hit.y + hit.ny;
@@ -528,7 +758,7 @@ export class CombatSystem {
       y < player.y + PLAYER_HEIGHT;
     if (overlapsPlayer) return;
 
-    if (!ctx.world.setBlock(x, y, z, active.block)) return;
+    if (!ctx.world.setBlock(x, y, z, active.block, true, placementMeta(active.block, hit, ctx.player.yaw))) return;
     ctx.player.inventory.remove(active.id, 1);
     this.useCooldown = 0.16;
     this.placeTimer = 0.18;
@@ -705,11 +935,110 @@ export class CombatSystem {
 
   // ------------------------------------------------------------------ spells
 
+  /**
+   * A held spell: a cone of flame, an arc of lightning, or a healing channel.
+   * Mana is charged continuously, and the effect stops the moment it runs dry.
+   */
+  private updateSustained(dt: number, input: Input, ctx: GameContext, active: ItemDef): void {
+    const spell = active.spell!;
+    if (!input.isMouseDown(0)) {
+      this.sustaining = false;
+      return;
+    }
+
+    if (!ctx.player.stats.spendMana(spell.mana * dt)) {
+      if (this.sustaining) ctx.log('Out of mana.', 'magic');
+      this.sustaining = false;
+      return;
+    }
+    this.sustaining = true;
+
+    const eye = ctx.player.eyePosition;
+    const look = ctx.player.lookDirection;
+
+    if (spell.kind === 'channel') {
+      const healed = ctx.player.stats.heal(spell.amount * dt * ctx.player.stats.spellMultiplier);
+      this.channelHealAccrued += healed;
+      if (this.channelHealAccrued >= 5) {
+        ctx.floater(ctx.player.center, `+${Math.round(this.channelHealAccrued)}`, 'heal');
+        this.channelHealAccrued = 0;
+      }
+      ctx.particles.spawn(
+        ctx.player.center.clone().add(new THREE.Vector3((Math.random() - 0.5) * 0.8, Math.random() * 1.2 - 0.4, (Math.random() - 0.5) * 0.8)),
+        new THREE.Vector3(0, 1.2, 0),
+        { color: 0x8ce89c, size: 0.09, life: 0.5, gravity: -2.5, drag: 1.6 },
+      );
+      return;
+    }
+
+    // A stream: everything inside a cone out to the spell's range. Lightning is a
+    // tight arc you have to aim; flame is a broad wash you sweep.
+    const isLightning = spell.stunChance > 0;
+    const coneCos = Math.cos(THREE.MathUtils.degToRad(isLightning ? 16 : 26));
+    const reach = spell.range;
+
+    for (let i = 0; i < (isLightning ? 5 : 9); i++) {
+      const spread = isLightning ? 0.05 : 0.16;
+      const dir = look
+        .clone()
+        .add(new THREE.Vector3((this.rng() - 0.5) * spread, (this.rng() - 0.5) * spread, (this.rng() - 0.5) * spread))
+        .normalize();
+      const travel = reach * (0.25 + this.rng() * 0.75);
+      ctx.particles.spawn(
+        eye.clone().addScaledVector(look, 0.7).addScaledVector(dir, travel * 0.15),
+        dir.multiplyScalar(travel * 2.2),
+        {
+          color: isLightning ? (this.rng() < 0.5 ? 0xcfe8ff : 0x7fb0ff) : this.rng() < 0.45 ? 0xffd060 : 0xff6a20,
+          size: isLightning ? 0.07 : 0.14,
+          life: isLightning ? 0.12 : 0.28,
+          gravity: isLightning ? 0 : -2.5,
+          drag: 2.2,
+        },
+      );
+    }
+
+    this.streamTick -= dt;
+    if (this.streamTick > 0) return;
+    this.streamTick = 0.2;
+
+    for (const enemy of ctx.enemies.enemies) {
+      if (enemy.dead) continue;
+      // Aim at the body, not the centre of mass. A short enemy's midpoint sits
+      // well below eye level, so a cone measured to it misses at close range even
+      // with the crosshair squarely on the target — the same mistake that made
+      // thrusts whiff before.
+      const to = meleeAimPoint(enemy, eye.y).sub(eye);
+      const distance = to.length();
+      if (distance > reach + enemy.radius) continue;
+      to.normalize();
+      if (to.dot(look) < coneCos) continue;
+      if (ctx.world.raycast(eye, to, Math.max(0.1, distance - enemy.radius), isSolid)) continue;
+
+      ctx.enemies.damageEnemy(
+        enemy,
+        { amount: spell.damage * 0.2 * ctx.player.stats.spellMultiplier, type: spell.type, armorPierce: spell.armorPierce, canCrit: false },
+        eye,
+        0.6,
+      );
+      if (spell.burn > 0) enemy.applyBurn(spell.burn, spell.burnDuration);
+      if (spell.stunChance > 0 && this.rng() < spell.stunChance) {
+        enemy.applyStun(spell.stunDuration);
+        ctx.log(`${enemy.archetype.name} is stunned rigid.`, 'magic');
+      }
+    }
+  }
+
   private beginCast(ctx: GameContext, active: ItemDef): void {
     const spell = active.spell!;
     if (this.useCooldown > 0) return;
 
-    if (!ctx.player.stats.consumeSlot(spell.tier)) {
+    // Mana spells draw on the pool; slot spells consume a rationed slot.
+    if (spell.cost === 'mana') {
+      if (!ctx.player.stats.spendMana(spell.mana)) {
+        ctx.log('Not enough mana.', 'magic');
+        return;
+      }
+    } else if (!ctx.player.stats.consumeSlot(spell.tier)) {
       ctx.log(`No tier ${spell.tier} spell slots left.`, 'magic');
       return;
     }
@@ -755,7 +1084,9 @@ export class CombatSystem {
           hostile: false,
           look: 'magic',
           color: spell.type === 'fire' ? 0xff7830 : 0x70c8ff,
-          slow: spell.duration > 0 ? spell.duration : undefined,
+          slow: spell.duration > 0 && spell.burn === 0 ? spell.duration : undefined,
+          burn: spell.burn,
+          burnDuration: spell.burnDuration,
           sourceName: active.name,
         });
         break;
@@ -893,6 +1224,10 @@ export class CombatSystem {
       ctx.floater(ctx.player.center, `+${Math.round(healed)}`, 'heal');
     }
     if (c.stamina > 0) stats.stamina = Math.min(stats.maxStamina, stats.stamina + c.stamina);
+    if (c.mana && c.mana > 0) {
+      const restored = stats.restoreMana(c.mana);
+      ctx.floater(ctx.player.center, `+${Math.round(restored)} MP`, 'xp');
+    }
     if (c.restoreTier > 0) {
       if (stats.restoreSlot(c.restoreTier as 1 | 2 | 3)) ctx.log('A spell slot returns to you.', 'magic');
       else ctx.log('Nothing to restore.', 'info');
@@ -1071,7 +1406,9 @@ export class CombatSystem {
     const isWeapon = active?.kind === 'weapon' || active === null;
     const melee = isWeapon ? this.currentMelee(ctx, active) : null;
     let modeLabel = '';
-    if (active && !isWeapon && active.kind !== 'spell') {
+    if (active?.kind === 'tool') {
+      modeLabel = `${TOOL_MODE_LABEL[this.toolMode]} ${this.toolSize} · ${blockDef(this.toolBlock).name} · X shape · R sample`;
+    } else if (active && !isWeapon && active.kind !== 'spell') {
       modeLabel =
         active.kind === 'block'
           ? 'Left-click mines · right-click places'
@@ -1081,7 +1418,11 @@ export class CombatSystem {
               ? 'Left-click to use'
               : '';
     } else if (active?.kind === 'spell' && active.spell) {
-      modeLabel = `Tier ${active.spell.tier} · ${ctx.player.stats.slotsAvailable(active.spell.tier)} slots left`;
+      const spell = active.spell;
+      modeLabel =
+        spell.cost === 'mana'
+          ? `${spell.mana} mana${spell.sustained ? '/sec · hold to cast' : ''}`
+          : `Tier ${spell.tier} · ${ctx.player.stats.slotsAvailable(spell.tier)} slots left`;
     } else if (profile && active?.weapon?.class !== 'melee') {
       const modes = active?.weapon?.melee.length ?? 0;
       modeLabel = `${profile.type} · ${Math.round(profile.armorPierce * 100)}% pierce${modes > 1 ? ' · X to switch' : ''}`;
@@ -1105,9 +1446,22 @@ export class CombatSystem {
     };
   }
 
+  /** Test hook: sets the build tool's shape mode directly. */
+  debugSetToolMode(mode: BuildMode): void {
+    this.toolMode = mode;
+  }
+
   /** The action state machine's current state, for diagnostics. */
   debugState(): string {
     return this.state;
+  }
+
+  /**
+   * Clears in-progress mining. A missed melee swing chips whatever block it
+   * lands on, so tests that measure mining from zero need a clean slate.
+   */
+  debugResetMining(): void {
+    this.resetMining();
   }
 
   reset(): void {
@@ -1123,6 +1477,14 @@ export class CombatSystem {
     this.blockTarget = null;
     this.placeTimer = 0;
     this.shotCounter = 0;
+    this.sustaining = false;
+    this.channelHealAccrued = 0;
+    this.aiming = false;
+  }
+
+  /** True while a held spell is running, for the view model. */
+  get isSustaining(): boolean {
+    return this.sustaining;
   }
 }
 
@@ -1167,3 +1529,43 @@ function lookForClass(cls: string, ammo: string): 'arrow' | 'bolt' | 'bullet' | 
   if (ammo === 'bolt') return 'bolt';
   return 'arrow';
 }
+
+/**
+ * Orientation for a freshly placed block.
+ *
+ * Stairs, panes, doors, fences, and roof wedges face the player, matching what
+ * every voxel builder expects. Slabs and stairs additionally pick a top or bottom
+ * half from where on the block face the click landed, so you can build a
+ * descending staircase without walking around to the other side.
+ */
+function placementMeta(block: Block, hit: RaycastHit, playerYaw: number): number {
+  const def = blockDef(block);
+  if (def.shape === 'cube' || def.shape === 'torch') return 0;
+
+  // Face the player: the block should present its front to whoever placed it.
+  const facing = facingFromYaw(playerYaw + Math.PI);
+
+  let upper = false;
+  if (def.shape === 'slab' || def.shape === 'stairs' || def.shape === 'wedge') {
+    if (hit.ny > 0) upper = false;
+    else if (hit.ny < 0) upper = true;
+    else {
+      // Placed against a side face: use the height of the click within the block.
+      const fraction = hit.point.y - Math.floor(hit.point.y);
+      upper = fraction > 0.5;
+    }
+  }
+
+  return makeMeta(facing, upper);
+}
+
+/** Build tool shapes. */
+export type BuildMode = 'single' | 'line' | 'wall' | 'box' | 'floor';
+
+const TOOL_MODE_LABEL: Record<BuildMode, string> = {
+  single: 'Single',
+  line: 'Line',
+  wall: 'Wall',
+  box: 'Box',
+  floor: 'Floor',
+};

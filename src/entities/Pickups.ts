@@ -10,11 +10,42 @@ const LOOT_COLLECT_RANGE = 1.7;
 const GRAVITY = 22;
 
 const GEO = {
-  orb: new THREE.OctahedronGeometry(0.13, 0),
+  /** The bright core, suspended inside the bubble. */
+  orb: new THREE.OctahedronGeometry(0.075, 0),
+  /** The surrounding bubble shell. */
+  bubble: new THREE.IcosahedronGeometry(0.17, 1),
   loot: new THREE.BoxGeometry(0.26, 0.26, 0.26),
 };
 
-const ORB_MATERIAL = new THREE.MeshBasicMaterial({ color: 0xd0a0ff });
+const ORB_MATERIAL = new THREE.MeshBasicMaterial({ color: 0xf0dcff });
+
+/**
+ * The bubble shell around an orb.
+ *
+ * Additive and back-face rendered so it reads as a thin film of light with the
+ * core showing through, rather than an opaque ball hiding it.
+ */
+const BUBBLE_MATERIAL = new THREE.MeshBasicMaterial({
+  color: 0x9a68e0,
+  transparent: true,
+  opacity: 0.42,
+  blending: THREE.AdditiveBlending,
+  depthWrite: false,
+  side: THREE.BackSide,
+});
+
+/** Mana orbs are blue, so the two currencies are never confused mid-fight. */
+const MANA_CORE_MATERIAL = new THREE.MeshBasicMaterial({ color: 0xd8f0ff });
+const MANA_BUBBLE_MATERIAL = new THREE.MeshBasicMaterial({
+  color: 0x3f8fe0,
+  transparent: true,
+  opacity: 0.42,
+  blending: THREE.AdditiveBlending,
+  depthWrite: false,
+  side: THREE.BackSide,
+});
+
+export type OrbKind = 'xp' | 'mana';
 
 /**
  * A soft radial gradient, drawn on a canvas so the project needs no textures.
@@ -100,10 +131,19 @@ class ExpOrb extends Pickup {
    * keep the billboard facing the camera.
    */
   readonly halo: THREE.Mesh;
+  /** The shell; a child of the core so it follows without extra bookkeeping. */
+  private readonly bubble: THREE.Mesh;
+  private trailTimer = 0;
 
-  constructor(position: THREE.Vector3, value: number) {
-    super(new THREE.Mesh(GEO.orb, ORB_MATERIAL), position);
+  readonly kind: OrbKind;
+
+  constructor(position: THREE.Vector3, value: number, kind: OrbKind = 'xp') {
+    super(new THREE.Mesh(GEO.orb, kind === 'mana' ? MANA_CORE_MATERIAL : ORB_MATERIAL), position);
     this.value = value;
+    this.kind = kind;
+
+    this.bubble = new THREE.Mesh(GEO.bubble, kind === 'mana' ? MANA_BUBBLE_MATERIAL : BUBBLE_MATERIAL);
+    this.mesh.add(this.bubble);
 
     this.halo = new THREE.Mesh(GLOW_GEOMETRY, GLOW_MATERIAL);
     this.halo.scale.setScalar(0.95);
@@ -148,6 +188,27 @@ class ExpOrb extends Pickup {
     this.halo.position.copy(this.mesh.position);
     const pulse = 0.85 + Math.sin(this.bob * 1.7) * 0.18;
     this.halo.scale.setScalar(0.95 * pulse);
+
+    // The bubble wobbles independently of the core spinning inside it.
+    this.bubble.scale.setScalar(0.92 + Math.sin(this.bob * 2.3) * 0.1);
+    this.bubble.rotation.y -= dt * 1.4;
+
+    // A slow drizzle of motes, so orbs are visible in peripheral vision.
+    this.trailTimer -= dt;
+    if (this.trailTimer <= 0) {
+      this.trailTimer = 0.09 + Math.random() * 0.08;
+      ctx.particles.spawn(
+        this.mesh.position.clone(),
+        new THREE.Vector3((Math.random() - 0.5) * 0.5, 0.3 + Math.random() * 0.4, (Math.random() - 0.5) * 0.5),
+        {
+          color: this.kind === 'mana' ? 0x8fd0ff : 0xc79cff,
+          size: 0.05,
+          life: 0.5,
+          gravity: -1.6,
+          drag: 1.8,
+        },
+      );
+    }
   }
 
   faceCamera(cameraQuaternion: THREE.Quaternion): void {
@@ -182,6 +243,7 @@ class LootDrop extends Pickup {
 
 export interface PickupCallbacks {
   onXp(amount: number): void;
+  onMana(amount: number): void;
   /** Returns true if the item was taken; false leaves the drop on the ground. */
   onItem(stack: Stack): boolean;
 }
@@ -196,8 +258,9 @@ export class PickupManager {
   private drops: LootDrop[] = [];
   private lootMaterials = new Map<string, THREE.MeshLambertMaterial>();
   private callbacks: PickupCallbacks;
-  /** Batches XP collected in the same frame into one message. */
+  /** Batches orbs collected in the same frame into one message each. */
   private pendingXp = 0;
+  private pendingMana = 0;
 
   constructor(callbacks: PickupCallbacks) {
     this.callbacks = callbacks;
@@ -209,12 +272,13 @@ export class PickupManager {
   }
 
   /** Splits an XP reward into a handful of orbs so pickup feels granular. */
-  spawnOrbs(position: THREE.Vector3, totalXp: number): void {
+  spawnOrbs(position: THREE.Vector3, totalXp: number, kind: OrbKind = 'xp'): void {
     if (totalXp <= 0) return;
     const count = Math.max(1, Math.min(8, Math.round(totalXp / 8)));
     const per = totalXp / count;
     for (let i = 0; i < count; i++) {
-      const orb = new ExpOrb(position, i === count - 1 ? totalXp - Math.floor(per) * (count - 1) : Math.floor(per));
+      const value = i === count - 1 ? totalXp - Math.floor(per) * (count - 1) : Math.floor(per);
+      const orb = new ExpOrb(position, value, kind);
       this.orbs.push(orb);
       this.group.add(orb.mesh, orb.halo);
     }
@@ -245,7 +309,10 @@ export class PickupManager {
       const orb = this.orbs[i];
       orb.update(dt, ctx);
       if (orb.dead) {
-        if (orb.life > 0) this.pendingXp += orb.value;
+        if (orb.life > 0) {
+          if (orb.kind === 'mana') this.pendingMana += orb.value;
+          else this.pendingXp += orb.value;
+        }
         this.group.remove(orb.mesh, orb.halo);
         this.orbs.splice(i, 1);
       }
@@ -255,6 +322,12 @@ export class PickupManager {
       this.callbacks.onXp(this.pendingXp);
       ctx.floater(ctx.player.center, `+${this.pendingXp} XP`, 'xp');
       this.pendingXp = 0;
+    }
+
+    if (this.pendingMana > 0) {
+      this.callbacks.onMana(this.pendingMana);
+      ctx.floater(ctx.player.center, `+${this.pendingMana} MP`, 'mana');
+      this.pendingMana = 0;
     }
 
     for (let i = this.drops.length - 1; i >= 0; i--) {
@@ -280,5 +353,6 @@ export class PickupManager {
     this.orbs.length = 0;
     this.drops.length = 0;
     this.pendingXp = 0;
+    this.pendingMana = 0;
   }
 }

@@ -1,6 +1,7 @@
 import * as THREE from 'three';
-import { Block, blockDef, isOpaque } from './blocks';
+import { Block, type BlockDef, blockDef, isOpaque } from './blocks';
 import { CHUNK_SX, CHUNK_SY, CHUNK_SZ, Chunk, voxelIndex } from './Chunk';
+import { shapeBoxes } from './shapes';
 
 /**
  * Culled-face mesher with per-vertex ambient occlusion.
@@ -90,6 +91,59 @@ export interface MeshResult {
   translucent: THREE.BufferGeometry | null;
 }
 
+/** Flat brightness per face direction, used for non-cube shapes. */
+const FACE_SHADE = [0.86, 0.86, 1.0, 0.62, 0.93, 0.93];
+
+/**
+ * Emits every box of a shaped block.
+ *
+ * All six faces of every box are written. Culling them against neighbours would
+ * need to know how much of each shared plane the adjacent shape actually covers,
+ * which is far more bookkeeping than the handful of hidden triangles is worth —
+ * shaped blocks are a small fraction of any chunk.
+ */
+function emitShape(buf: Buffers, x: number, y: number, z: number, def: BlockDef, meta: number): void {
+  const boxes = shapeBoxes(def.shape, meta);
+  const emissive = def.emissive ?? 0;
+
+  for (const shapeBox of boxes) {
+    const [bx0, by0, bz0] = shapeBox.min;
+    const [bx1, by1, bz1] = shapeBox.max;
+    const sizeX = bx1 - bx0;
+    const sizeY = by1 - by0;
+    const sizeZ = bz1 - bz0;
+
+    for (let f = 0; f < FACES.length; f++) {
+      const face = FACES[f];
+      const [dx, dy, dz] = face.n;
+      const [ox, oy, oz] = face.o;
+      const [ux, uy, uz] = face.u;
+      const [vx, vy, vz] = face.v;
+      const tint = def[face.tint];
+      const shade = FACE_SHADE[f];
+      const start = buf.pos.length / 3;
+
+      for (const [a, b] of CORNERS) {
+        // Take the corner on the *unit* cube's face, then scale it into the box.
+        // Every component there is exactly 0 or 1, so scaling maps 0 to the box's
+        // low bound and 1 to its high bound — which keeps the winding identical
+        // to the cube path instead of having to reason about signed bases.
+        const cx = ox + ux * a + vx * b;
+        const cy = oy + uy * a + vy * b;
+        const cz = oz + uz * a + vz * b;
+        buf.pos.push(x + bx0 + cx * sizeX, y + by0 + cy * sizeY, z + bz0 + cz * sizeZ);
+        buf.norm.push(dx, dy, dz);
+        buf.col.push(
+          Math.min(1, tint[0] * shade + emissive),
+          Math.min(1, tint[1] * shade + emissive),
+          Math.min(1, tint[2] * shade + emissive),
+        );
+      }
+      buf.idx.push(start, start + 1, start + 2, start, start + 2, start + 3);
+    }
+  }
+}
+
 /**
  * Builds geometry for one chunk. Positions are chunk-local; the caller
  * positions the resulting mesh in world space.
@@ -118,12 +172,22 @@ export function meshChunk(chunk: Chunk, neighbor: NeighborLookup): MeshResult {
   for (let y = 0; y < CHUNK_SY; y++) {
     for (let z = 0; z < CHUNK_SZ; z++) {
       for (let x = 0; x < CHUNK_SX; x++) {
-        const id = vox[voxelIndex(x, y, z)];
+        const index = voxelIndex(x, y, z);
+        const id = vox[index];
         if (id === Block.Air) continue;
 
         const def = blockDef(id);
         const translucent = isTranslucent(id);
         const buf = translucent ? transBuf : opaqueBuf;
+
+        // Anything that is not a full cube is emitted as an explicit set of
+        // boxes. Those get flat face shading rather than per-vertex AO: the AO
+        // term is defined against the voxel lattice, and sampling it at
+        // arbitrary sub-block positions produces creases in the wrong places.
+        if (def.shape !== 'cube') {
+          emitShape(buf, x, y, z, def, chunk.meta[index]);
+          continue;
+        }
 
         for (const face of FACES) {
           const [nx, ny, nz] = face.n;

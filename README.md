@@ -20,9 +20,9 @@ npm run dev     # then open the printed localhost URL
 | `WASD` | Move · `Space` jump / swim up · `Shift` sprint |
 | Mouse | Look (click the canvas to capture the pointer) |
 | `LMB` | Attack, cast, throw, use — or mine, when a block or torch is selected |
-| `RMB` | Raise your shield — or place a block / plant a torch |
-| `X` | Switch between swinging and thrusting |
-| `R` | Reload a crossbow or firearm |
+| `RMB` | Guard · place a block · **aim** a bow or grenade · open a door |
+| `X` | Switch swing / thrust, or cycle the build tool's shape |
+| `R` | Reload a firearm, or sample a block with the build tool |
 | `1`–`8` / wheel | Hotbar |
 | `Tab` | Character sheet: stats, attribute points, equipment, bag |
 | `F5` / `F9` | Save / load · `Esc` pause |
@@ -88,9 +88,72 @@ level 7 and up.
   penetration, and loud enough to pull every enemy within 46 blocks onto you.
 - **Grenades** bounce, cook for ~2.6s, and blow a hole in the terrain. They do
   not care who threw them.
-- **Spells** consume a slot of their tier. Tier 2 unlocks at level 4, tier 3 at
-  level 8, and slot counts come from Focus. Slots refill on level-up, trickle
-  back over time, and can be restored with a Mana Tonic.
+- **Aiming** — hold right-click with a bow or a grenade to zoom in and see a
+  dotted arc showing exactly where the shot will land. The preview is traced with
+  the projectile's own integration, so it cannot disagree with the real shot. A
+  crossbow is excluded on purpose: it is held at tension and fires flat.
+
+## Magic: mana and spell slots
+
+Two separate resources, for two different kinds of spell.
+
+**Mana spells** are what you actually fight with. You start with three, and mana
+has *no passive regeneration* — the only sources are potions and the mana orbs
+enemies drop, with casters carrying the most. That makes casting a resource you
+manage rather than a cooldown you wait out.
+
+| Spell | Cost | Effect |
+| --- | --- | --- |
+| Flames | 14/sec, held | A cone of fire that leaves targets burning |
+| Sparks | 16/sec, held | A tight arc of lightning with a chance to stun rigid |
+| Healing | 11/sec, held | Channels health back into you |
+| Fire Dart | 20 | A fast bolt that hits harder than Flames and keeps its distance |
+| Oakflesh | 32 | +14 armor for a minute — vital if you travel light |
+
+**Slot spells** stay rationed for the powerful ones: Arcane Nova, Chain Lightning,
+Stoneskin, and the Meteor. Tier 2 unlocks at level 4, tier 3 at level 8, slot
+counts come from Focus, and slots refill on level-up and trickle back over time.
+
+## Building
+
+Blocks are not all cubes. A block carries a shape and an orientation byte, which
+gives stairs, slabs, panes, doors, fences, and roof wedges — all of them just
+different lists of boxes used for both geometry and collision. Slabs really are
+half-height steps, stairs really are walkable, and an open door really is a hole.
+
+Shaped pieces orient themselves to face you when placed, and stairs and slabs pick
+a top or bottom half from where on the face you clicked, so you can run a
+staircase downwards without walking round to the other side. Doors open on
+right-click rather than stacking another door against themselves.
+
+### The Mason's Gun
+
+A build tool for working in bulk. Left-click clears the target region, right-click
+fills it, `X` cycles the shape, and `R` samples whatever you are looking at so you
+can change material without opening the inventory.
+
+| Mode | Shape |
+| --- | --- |
+| Single | one block |
+| Line | a run straight ahead |
+| Wall | a vertical panel across your view |
+| Floor | a flat square |
+| Box | a solid cube |
+
+It draws from your materials and stops when they run out, and it will not wall you
+into your own build.
+
+## Dungeons
+
+Stone complexes are cut into the rock across the world: connected rooms, corridors,
+wall torches, rubble, and a vault at the end holding the best loot and a guard
+several levels above you. A spiral stair shaft leads down from the surface, and the
+compass carries a pip for the nearest entrance.
+
+Layouts are generated per *site* from the world seed and the site's grid position,
+never from neighbouring chunks. That matters because chunks stream in an
+unpredictable order — a dungeon that depended on its neighbours already existing
+would come out differently every time you approached it from a new direction.
 
 ## Day, night, and weather
 
@@ -124,23 +187,37 @@ into a proper heal.
 
 ## Progression
 
-Kills drop EXP orbs that home in on you once you are close. Each level grants
-2 points to spend on **Might** (melee damage, health), **Agility** (ranged damage,
-stamina, speed), or **Focus** (spell damage, spell slots).
+Kills drop glowing orbs that home in on you once you are close — purple for
+experience, blue for mana. Each level grants 2 points to spend on **Might** (melee
+damage, health), **Agility** (ranged damage, stamina, speed), or **Focus** (spell
+damage, mana, spell slots).
+
+## Inventory
+
+Three bags, split by purpose so a building session never buries your potions:
+
+| Tab | Slots | Holds |
+| --- | --- | --- |
+| Main | 48 | Potions, ammunition, food, spells |
+| Tools | 44 | Weapons, armour, shields, torches, the build tool |
+| Materials | 192 | Building blocks — **and these carry no weight** |
+
+Materials are weightless on purpose. Hauling a thousand blocks around is the point
+of a voxel game, and taxing it would make building feel like a penalty.
 
 ## Project layout
 
 ```
 src/
   core/        Game loop, input, and the service interface entities talk through
-  world/       Blocks, chunks, AO mesher, terrain gen, streaming, time, weather
-  player/      Physics and collision, stats and levelling, inventory
-  combat/      Damage model, item registry, and the player action system
-  entities/    Enemy AI, fish, projectiles, EXP orbs, loot tables
-  fx/          Particles, first-person view model, rain, stars, lights, cracks
-  ui/          HUD, character sheet, icon fallback
+  world/       Blocks and shapes, chunks, AO mesher, terrain, dungeons, time, weather
+  player/      Physics and collision, stats and levelling, tabbed inventory
+  combat/      Damage model, item registry, player actions, the build tool
+  entities/    Enemy AI, fish, projectiles, orbs, loot tables
+  fx/          Particles, view model, trails, rain, stars, lights, cracks, arc
+  ui/          HUD, minimap and compass, character sheet, icon fallback
   save/        IndexedDB persistence
-scripts/       Tests: unit checks, headless smoke test, screenshot capture
+scripts/       Tests: unit checks, headless smoke test, screenshots, diagnostics
 ```
 
 Some notes on the parts that are less obvious than they look:
@@ -175,6 +252,15 @@ Some notes on the parts that are less obvious than they look:
   times more expensive than it needed to be and turned an explosion into a stall.
 - **Mining progress resets when the targeted block changes**, which is correct but
   means being knocked around mid-dig costs you the block.
+- **Non-cube blocks are flat-shaded rather than AO-shaded.** Ambient occlusion is
+  defined against the voxel lattice; sampling it at arbitrary sub-block positions
+  puts creases in the wrong places.
+- **A shaped block never culls its neighbours.** It does not fill its voxel, so
+  hiding the faces behind it would let you see through the gaps around it.
+- **Melee attacks deliberately do not damage terrain.** They used to, which meant a
+  run of missed swings could quietly break the floor out from under you.
+- **Enemies hold their distance and circle** rather than walking into you. They
+  also lose interest if you get far enough away, so a fight is escapable.
 
 ## Tests
 
@@ -184,7 +270,10 @@ npm run test:unit   # damage model, mesher, terrain determinism, inventory
 npm run test:smoke  # boots the real build in headless Chromium and plays it
 ```
 
-The unit checks assert the *design*, not just the code: that a mace beats plate,
+The unit checks assert the *design*, not just the code: that a torch is a slim post
+rather than a cube, that an open door has no collision, that mana never
+regenerates on its own, that materials add no carry weight, that dungeon layouts
+are deterministic and chunk-order independent, that a mace beats plate,
 that thrusts beat swings against armour, that a weapon's attack modes follow from
 its shape, that the mesher culls shared faces and bakes AO, that terrain is
 deterministic per seed, that night raises the spawn cap above daytime, that
@@ -219,6 +308,7 @@ Two more scripts help when something looks wrong rather than behaves wrong:
 ```bash
 node scripts/shots.mjs      # day, night, weather, mining, both attack motions
 node scripts/pose.mjs       # every weapon's first-person pose, side by side
+node scripts/diagnose.mjs   # toggle visual layers off one at a time to isolate one
 node scripts/ao-probe.mjs   # is a shading artifact stale geometry, or real AO?
 ```
 
@@ -240,5 +330,9 @@ streaming, spawning, or aim.
   which is the most obvious thing to build next.
 - Lighting is direct only. Placed torches light their surroundings through a small
   pool of point lights rather than a propagating light level, so deep caves stay
-  dark no matter how many torches are in them.
+  dark no matter how many torches are in them, and only the nearest few planted
+  torches actually cast light.
+- Dungeon rooms are rectangles connected by axis-aligned corridors. There are no
+  hand-authored layouts, traps, or puzzles yet.
+- Doors are a single block tall; stack two for a full doorway.
 - No audio.

@@ -5,6 +5,7 @@ import type { FloaterClass, LogClass } from '../core/Context';
 import { HOTBAR_SIZE } from '../player/Inventory';
 import type { Player } from '../player/Player';
 import { applyGlyph } from './glyphs';
+import { Minimap } from './Minimap';
 
 const LOG_LIMIT = 7;
 const LOG_LIFETIME = 6000;
@@ -33,6 +34,8 @@ export class Hud {
   private hpFill = el<HTMLDivElement>('hp-fill');
   private hpText = el<HTMLSpanElement>('hp-text');
   private staFill = el<HTMLDivElement>('sta-fill');
+  private manaFill = el<HTMLDivElement>('mana-fill');
+  private manaText = el<HTMLSpanElement>('mana-text');
   private grdFill = el<HTMLDivElement>('grd-fill');
   private grdRow = this.grdFill.parentElement!.parentElement!;
   private slotsHost = el<HTMLDivElement>('spell-slots');
@@ -55,6 +58,7 @@ export class Hud {
   private deathDetail = el<HTMLParagraphElement>('death-detail');
   private menu = el<HTMLDivElement>('menu');
 
+  readonly minimap = new Minimap();
   private slotCells: HTMLDivElement[][] = [];
   private hotbarCells: { root: HTMLDivElement; glyph: HTMLSpanElement; qty: HTMLSpanElement; cd: HTMLDivElement }[] = [];
 
@@ -64,6 +68,8 @@ export class Hud {
 
   constructor() {
     this.buildHotbar();
+    const host = document.getElementById('minimap');
+    host?.append(this.minimap.canvas, this.minimap.compass);
   }
 
   setCamera(camera: THREE.Camera): void {
@@ -103,6 +109,10 @@ export class Hud {
     this.hpText.textContent = `${Math.ceil(Math.max(0, stats.hp))} / ${stats.maxHp}`;
 
     this.staFill.style.width = `${(stats.stamina / stats.maxStamina) * 100}%`;
+
+    // Mana never refills on its own, so its exact value matters more than stamina's.
+    this.manaFill.style.width = `${(stats.mana / stats.maxMana) * 100}%`;
+    this.manaText.textContent = `${Math.floor(stats.mana)} / ${stats.maxMana}`;
 
     // The guard bar only exists when a shield does.
     if (stats.maxGuard > 0) {

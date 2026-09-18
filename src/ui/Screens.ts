@@ -1,5 +1,5 @@
 import { describeMode, item } from '../combat/items';
-import { BAG_SIZE, type EquipSlot } from '../player/Inventory';
+import { BAG_CAPACITY, type BagTab, type EquipSlot } from '../player/Inventory';
 import type { Player } from '../player/Player';
 import { ATTRIBUTE_INFO, type AttributeKey } from '../player/Stats';
 import { applyGlyph, itemGlyph } from './glyphs';
@@ -24,6 +24,10 @@ export class Screens {
 
   private player: Player | null = null;
   private onChange: () => void;
+  /** Which bag tab is showing. Remembered across openings. */
+  private activeTab: BagTab = 'main';
+  /** Scroll offset per tab, so switching back does not jump to the top. */
+  private scrollByTab: Record<BagTab, number> = { main: 0, tools: 0, materials: 0 };
 
   constructor(onChange: () => void) {
     this.onChange = onChange;
@@ -77,7 +81,9 @@ export class Screens {
       ['Ranged damage', `x${stats.rangedMultiplier.toFixed(2)}`],
       ['Spell damage', `x${stats.spellMultiplier.toFixed(2)}`],
       ['Move speed', `${stats.moveSpeed.toFixed(1)} b/s`],
-      ['Carry weight', stats.weight.toFixed(1)],
+      ['Equipment weight', stats.weight.toFixed(1)],
+      ['Carried weight', `${player.inventory.carriedWeight.toFixed(1)} (materials free)`],
+      ['Mana', `${Math.floor(stats.mana)} / ${stats.maxMana}`],
     ];
     for (const [label, value] of rows) this.statsHost.append(statRow(label, value));
 
@@ -241,13 +247,46 @@ export class Screens {
 
   private renderBag(player: Player): void {
     this.bagHost.replaceChildren();
-    this.bagHost.append(heading(`Bag  (slot ${player.inventory.selected + 1} highlighted)`));
+    this.bagHost.append(heading(`Inventory  (hotbar slot ${player.inventory.selected + 1} highlighted)`));
+
+    // Tab strip. Counts are shown so you can see at a glance where things are.
+    const tabs: [BagTab, string][] = [
+      ['main', 'Main'],
+      ['tools', 'Tools'],
+      ['materials', 'Materials'],
+    ];
+    const strip = document.createElement('div');
+    strip.className = 'bag-tabs';
+    for (const [tab, label] of tabs) {
+      const button = document.createElement('button');
+      button.className = `bag-tab${tab === this.activeTab ? ' active' : ''}`;
+      const used = player.inventory.slots(tab).filter(Boolean).length;
+      button.textContent = `${label} ${used}/${BAG_CAPACITY[tab]}`;
+      button.addEventListener('click', () => {
+        this.activeTab = tab;
+        this.refresh();
+      });
+      strip.append(button);
+    }
+    this.bagHost.append(strip);
+
+    if (this.activeTab === 'materials') {
+      const note = document.createElement('p');
+      note.className = 'hint';
+      note.textContent = 'Building materials carry no weight.';
+      this.bagHost.append(note);
+    }
+
+    // The grid keeps its visible size and scrolls, rather than growing the panel.
+    const scroller = document.createElement('div');
+    scroller.className = 'bag-scroll';
 
     const grid = document.createElement('div');
     grid.className = 'bag-grid';
 
-    for (let i = 0; i < BAG_SIZE; i++) {
-      const stack = player.inventory.bag[i];
+    const slots = player.inventory.slots(this.activeTab);
+    for (let i = 0; i < slots.length; i++) {
+      const stack = slots[i];
       const cell = document.createElement('div');
       cell.className = stack ? 'bag-item' : 'bag-item empty';
 
@@ -261,22 +300,31 @@ export class Screens {
           qty.textContent = String(stack.qty);
           cell.append(qty);
         }
-        cell.addEventListener('click', (event) => this.onBagClick(player, i, event.shiftKey));
+        const tab = this.activeTab;
+        cell.addEventListener('click', (event) => this.onBagClick(player, i, event.shiftKey, tab));
       }
 
       grid.append(cell);
     }
 
-    this.bagHost.append(grid);
+    scroller.append(grid);
+    // Restore the previous scroll position for this tab once it is laid out.
+    scroller.addEventListener('scroll', () => {
+      this.scrollByTab[this.activeTab] = scroller.scrollTop;
+    });
+    this.bagHost.append(scroller);
+    requestAnimationFrame(() => {
+      scroller.scrollTop = this.scrollByTab[this.activeTab];
+    });
   }
 
-  private onBagClick(player: Player, index: number, drop: boolean): void {
-    const stack = player.inventory.bag[index];
+  private onBagClick(player: Player, index: number, drop: boolean, tab: BagTab = 'main'): void {
+    const stack = player.inventory.slots(tab)[index];
     if (!stack) return;
     const def = item(stack.itemId);
 
     if (drop) {
-      player.inventory.removeAtBagIndex(index, stack.qty);
+      player.inventory.removeAtBagIndex(index, stack.qty, tab);
       // Also clear it off the hotbar so no dead reference is left behind.
       player.inventory.hotbar.forEach((id, slot) => {
         if (id === def.id) player.inventory.assignToHotbar(slot, null);

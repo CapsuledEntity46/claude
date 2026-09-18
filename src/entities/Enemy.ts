@@ -7,8 +7,10 @@ import type { EnemyArchetype } from './archetypes';
 const GRAVITY = 26;
 const ENEMY_HALF_WIDTH = 0.35;
 const STEP_HEIGHT = 1.02;
+/** Long enough for the dissolve to be legible. */
+const DEATH_DURATION = 0.85;
 
-type AIState = 'idle' | 'chase' | 'windup' | 'recover' | 'reposition' | 'dying';
+type AIState = 'idle' | 'chase' | 'windup' | 'recover' | 'reposition' | 'backoff' | 'dying';
 
 // Shared geometry — every enemy is built from the same few boxes.
 const GEO = {
@@ -67,6 +69,19 @@ export class Enemy {
   private slowTimer = 0;
   /** Seconds spent out of water, for aquatic creatures. */
   private suffocation = 0;
+  /** How long the player has been too far away to bother chasing. */
+  private lostInterestTimer = 0;
+  /** Fire damage over time: seconds remaining and damage per second. */
+  private burnTimer = 0;
+  private burnRate = 0;
+  private burnTick = 0;
+  /** Seconds the enemy is held rigid and cannot act. */
+  private stunTimer = 0;
+  /** Paces the death dissolve emission. */
+  private disintegrationTimer = 0;
+  /** Drives the forward strike: counts down through the swing itself. */
+  private strikeTimer = 0;
+  private strikeDuration = 0.14;
   /** Chosen at spawn so a group of enemies does not act in lockstep. */
   private readonly jitter: number;
 
@@ -311,11 +326,66 @@ export class Enemy {
   private die(): void {
     this.dead = true;
     this.state = 'dying';
-    this.dyingTimer = 0.35;
+    this.dyingTimer = DEATH_DURATION;
     this.healthBar.visible = false;
+    // Materials switch to additive so the body glows as it comes apart.
+    for (const m of this.materials) {
+      m.transparent = true;
+      m.emissive.setScalar(0.35);
+    }
   }
 
   // ---------------------------------------------------------------- AI
+
+  /**
+   * The dissolve: bright motes rising off the body plus a slow expanding cloud of
+   * dust. Emitted over the whole animation rather than as one burst, which is
+   * what makes it read as disintegration instead of an explosion.
+   */
+  private emitDisintegration(dt: number, ctx: GameContext, progress: number): void {
+    const isBone = this.archetype.id === 'skeleton_knight';
+    const moteColor = isBone ? 0xe8e2d0 : this.archetype.aquatic ? 0x9fd8e8 : 0xffb060;
+    const dustColor = isBone ? 0x8a8578 : 0x54484a;
+
+    this.disintegrationTimer -= dt;
+    if (this.disintegrationTimer > 0) return;
+    this.disintegrationTimer = 0.02;
+
+    const centre = this.center;
+    const spread = this.radius * 2.2;
+
+    // Rising embers.
+    for (let i = 0; i < 3; i++) {
+      const point = centre
+        .clone()
+        .add(
+          new THREE.Vector3(
+            (Math.random() - 0.5) * spread,
+            (Math.random() - 0.5) * this.height * 0.8,
+            (Math.random() - 0.5) * spread,
+          ),
+        );
+      ctx.particles.spawn(
+        point,
+        new THREE.Vector3((Math.random() - 0.5) * 1.2, 1.4 + Math.random() * 2.2, (Math.random() - 0.5) * 1.2),
+        { color: moteColor, size: 0.07 + Math.random() * 0.05, life: 0.7, gravity: -3.5, drag: 1.4 },
+      );
+    }
+
+    // Dust cloud, thickest early and drifting outward.
+    if (progress < 0.7) {
+      for (let i = 0; i < 2; i++) {
+        const point = centre
+          .clone()
+          .add(new THREE.Vector3((Math.random() - 0.5) * spread, (Math.random() - 0.5) * 0.6, (Math.random() - 0.5) * spread));
+        ctx.particles.spawn(
+          point,
+          new THREE.Vector3((Math.random() - 0.5) * 2.2, 0.4 + Math.random() * 0.7, (Math.random() - 0.5) * 2.2),
+          { color: dustColor, size: 0.26 + Math.random() * 0.18, life: 1.5, gravity: -0.7, drag: 2.4 },
+        );
+      }
+    }
+  }
 
   /** Wakes the enemy — used by loud noises like gunfire and explosions. */
   alert(): void {
@@ -323,8 +393,37 @@ export class Enemy {
     if (this.state === 'idle') this.state = 'chase';
   }
 
+  /** Drops pursuit and goes back to wandering. */
+  private loseInterest(): void {
+    this.aggro = false;
+    this.lostInterestTimer = 0;
+    this.state = 'idle';
+    this.wanderTarget = null;
+    this.wanderTimer = 0;
+    this.healthBar.visible = false;
+  }
+
   applySlow(seconds: number): void {
     this.slowTimer = Math.max(this.slowTimer, seconds);
+  }
+
+  /** Sets the target alight. Refreshing extends rather than stacking. */
+  applyBurn(damagePerSecond: number, seconds: number): void {
+    this.burnRate = Math.max(this.burnRate, damagePerSecond);
+    this.burnTimer = Math.max(this.burnTimer, seconds);
+  }
+
+  applyStun(seconds: number): void {
+    this.stunTimer = Math.max(this.stunTimer, seconds);
+    // Interrupt whatever was being wound up.
+    if (this.state === 'windup') {
+      this.state = 'recover';
+      this.stateTimer = seconds;
+    }
+  }
+
+  get stunned(): boolean {
+    return this.stunTimer > 0;
   }
 
   /** Effective movement speed, after chilling effects. */
@@ -334,6 +433,7 @@ export class Enemy {
 
   update(dt: number, ctx: GameContext): void {
     if (this.slowTimer > 0) this.slowTimer -= dt;
+    this.updateStatusEffects(dt, ctx);
 
     if (this.hitFlash > 0) {
       this.hitFlash -= dt;
@@ -343,15 +443,34 @@ export class Enemy {
 
     if (this.state === 'dying') {
       this.dyingTimer -= dt;
-      const t = Math.max(0, this.dyingTimer / 0.35);
-      // Collapse the body, not the whole group — the group is the billboard anchor.
-      this.body.scale.setScalar(this.archetype.look.scale * t);
-      this.body.rotation.z = (1 - t) * 1.4;
+      const remaining = Math.max(0, this.dyingTimer / DEATH_DURATION);
+      const progress = 1 - remaining;
+
+      // Come apart rather than simply shrink: the body sags, thins out, and fades
+      // while motes and a cloud of dust lift away from it.
+      this.body.scale.set(
+        this.archetype.look.scale * (1 + progress * 0.25),
+        this.archetype.look.scale * Math.max(0.05, remaining),
+        this.archetype.look.scale * (1 + progress * 0.25),
+      );
+      this.body.rotation.z = progress * 0.5;
+      this.body.rotation.y = this.yaw + progress * 1.2;
+      for (const m of this.materials) m.opacity = Math.max(0, remaining * remaining);
+
+      this.emitDisintegration(dt, ctx, progress);
       if (this.dyingTimer <= 0) this.removable = true;
       return;
     }
 
     this.attackCooldown = Math.max(0, this.attackCooldown - dt);
+
+    // Stunned: held rigid, still falls, but takes no action.
+    if (this.stunTimer > 0) {
+      this.velocity.x *= 0.7;
+      this.velocity.z *= 0.7;
+      this.integrate(dt, ctx);
+      return;
+    }
 
     const toPlayer = ctx.player.center.clone().sub(this.center);
     const distance = toPlayer.length();
@@ -372,6 +491,21 @@ export class Enemy {
     // reads as broken.
     if (this.aggro) this.yaw = Math.atan2(-toPlayer.x, -toPlayer.z);
 
+    // Give up eventually. Chasing forever means outrunning a fight is impossible
+    // and every enemy you ever met is still following you.
+    if (this.aggro) {
+      const sight = this.effectiveAggroRange(ctx);
+      if (distance > sight * 3.2) {
+        // Well out of range: lose the trail immediately.
+        this.loseInterest();
+      } else if (distance > sight * 1.7) {
+        this.lostInterestTimer += dt;
+        if (this.lostInterestTimer > 7) this.loseInterest();
+      } else {
+        this.lostInterestTimer = 0;
+      }
+    }
+
     switch (this.state) {
       case 'idle':
         this.doIdle(dt);
@@ -389,8 +523,26 @@ export class Enemy {
         this.velocity.x *= 0.85;
         this.velocity.z *= 0.85;
         this.stateTimer -= dt;
-        if (this.stateTimer <= 0) this.state = this.aggro ? 'chase' : 'idle';
+        if (this.stateTimer <= 0) {
+          if (!this.aggro) this.state = 'idle';
+          else if (this.archetype.melee) {
+            // Disengage briefly so the player gets a window to answer.
+            this.state = 'backoff';
+            this.stateTimer = 0.35 + this.jitter * 0.4;
+          } else {
+            this.state = 'chase';
+          }
+        }
         break;
+
+      case 'backoff': {
+        this.stateTimer -= dt;
+        const away = this.position.clone().sub(ctx.player.position).setY(0);
+        if (away.lengthSq() < 1e-4) away.set(1, 0, 0);
+        this.steerTowards(this.position.clone().addScaledVector(away.normalize(), 4), this.currentSpeed * 0.8);
+        if (this.stateTimer <= 0) this.state = 'chase';
+        break;
+      }
       default:
         break;
     }
@@ -505,6 +657,39 @@ export class Enemy {
     this.body.rotation.z = Math.sin(this.walkPhase * 0.5) * 0.08;
   }
 
+  /** Ticks burning and stun, including the damage burning deals. */
+  private updateStatusEffects(dt: number, ctx: GameContext): void {
+    if (this.stunTimer > 0) {
+      this.stunTimer -= dt;
+      // A ring of sparks so a stunned enemy is obviously out of the fight.
+      if (Math.random() < dt * 14) {
+        ctx.particles.burst(this.center, 2, 1.6, { color: 0xbfe4ff, size: 0.06, life: 0.25, gravity: -2 });
+      }
+    }
+
+    if (this.burnTimer <= 0) return;
+    this.burnTimer -= dt;
+    this.burnTick -= dt;
+
+    // Applied in half-second ticks so floating numbers stay readable.
+    if (this.burnTick <= 0) {
+      this.burnTick = 0.5;
+      ctx.enemies.damageEnemy(
+        this,
+        { amount: this.burnRate * 0.5, type: 'fire', armorPierce: 0.6, canCrit: false },
+        this.center.clone().add(new THREE.Vector3(0, 1, 0)),
+        0,
+      );
+    }
+    if (Math.random() < dt * 26) {
+      ctx.particles.spawn(
+        this.center.clone().add(new THREE.Vector3((Math.random() - 0.5) * 0.6, Math.random() * 0.6, (Math.random() - 0.5) * 0.6)),
+        new THREE.Vector3((Math.random() - 0.5) * 0.5, 1.4 + Math.random(), (Math.random() - 0.5) * 0.5),
+        { color: Math.random() < 0.4 ? 0xffd070 : 0xff6a20, size: 0.08, life: 0.45, gravity: -3, drag: 1.6 },
+      );
+    }
+  }
+
   private hasLineOfSight(ctx: GameContext, distance: number): boolean {
     const from = this.eye;
     const dir = ctx.player.center.clone().sub(from).normalize();
@@ -558,6 +743,22 @@ export class Enemy {
       return;
     }
 
+    // Already in range but still on cooldown: hold the line and circle instead of
+    // walking into the player. Shoving the player around while flailing made
+    // fights unwinnable except by retreating in a straight line.
+    if (melee && distance <= melee.reach * 1.05) {
+      const strafe = new THREE.Vector3(-Math.cos(this.yaw), 0, Math.sin(this.yaw));
+      const sign = this.jitter > 0.5 ? 1 : -1;
+      const target = this.position.clone().addScaledVector(strafe, sign * 3);
+      // Ease outwards if we have crowded inside our own reach.
+      if (distance < melee.reach * 0.7) {
+        const away = this.position.clone().sub(ctx.player.position).setY(0);
+        if (away.lengthSq() > 1e-4) target.addScaledVector(away.normalize(), 2);
+      }
+      this.steerTowards(target, this.currentSpeed * 0.5);
+      return;
+    }
+
     const desiredSpeed = this.currentSpeed;
     if (ranged && distance <= ranged.standoff) {
       // In position and waiting on the cooldown: sidestep instead of standing.
@@ -600,6 +801,9 @@ export class Enemy {
       this.attackCooldown = melee.cooldown;
       this.state = 'recover';
       this.stateTimer = melee.recovery;
+      // Drive the visible forward strike, which is what the damage should look
+      // like landing. Without it the arm was still wound back at impact.
+      this.strikeTimer = this.strikeDuration;
 
       // The player can still escape during the telegraph — check reach again.
       if (distance <= melee.reach * 1.15) {
@@ -638,9 +842,15 @@ export class Enemy {
     dir.normalize();
 
     // Compensate for projectile drop so archers actually hit at range.
-    if (ranged.gravity > 0) {
-      const drop = (GRAVITY * ranged.gravity * flatDistance) / (2 * ranged.speed * ranged.speed);
-      dir.y += drop * flatDistance;
+    //
+    // Over a flight of t = distance / speed the arrow falls 0.5*g*t^2. Converting
+    // that fall into an aim offset on a normalised direction means dividing by the
+    // distance. The original expression multiplied by distance instead, which
+    // scaled the correction quadratically and sent every arrow sailing overhead.
+    if (ranged.gravity > 0 && flatDistance > 0.01) {
+      const flightTime = flatDistance / ranged.speed;
+      const fall = 0.5 * GRAVITY * ranged.gravity * flightTime * flightTime;
+      dir.y += fall / flatDistance;
       dir.normalize();
     }
 
@@ -751,13 +961,24 @@ export class Enemy {
     this.rightLeg.rotation.x = -Math.sin(this.walkPhase) * stride;
     this.leftArm.rotation.x = -Math.sin(this.walkPhase) * stride * 0.6;
 
-    // The attacking arm rises through the wind-up and snaps down on release.
-    if (this.state === 'windup') {
+    // The attacking arm rises through the wind-up and snaps forward on release.
+    //
+    // The arm mesh hangs below its shoulder pivot, so rotating about +X swings it
+    // towards -Z, which is the direction the body faces. A negative angle raises
+    // it behind the shoulder. Winding back is right; the bug was that the strike
+    // itself was a slow lerp that had barely started by the time the damage
+    // landed, so the blow was never seen going forward.
+    if (this.strikeTimer > 0) {
+      this.strikeTimer -= dt;
+      const t = 1 - Math.max(0, this.strikeTimer) / this.strikeDuration;
+      // Whip from wound-back through to a committed forward swing.
+      this.rightArm.rotation.x = THREE.MathUtils.lerp(-1.35, 1.15, easeOutCubic(t));
+    } else if (this.state === 'windup') {
       const windup = this.pendingAttack === 'melee' ? this.archetype.melee!.windup : this.archetype.ranged!.windup;
       const progress = 1 - Math.max(0, this.stateTimer) / windup;
-      this.rightArm.rotation.x = -progress * 2.3;
+      this.rightArm.rotation.x = -1.35 * easeOutCubic(progress);
     } else if (this.state === 'recover') {
-      this.rightArm.rotation.x = THREE.MathUtils.lerp(this.rightArm.rotation.x, 0.7, dt * 14);
+      this.rightArm.rotation.x = THREE.MathUtils.lerp(this.rightArm.rotation.x, 0.35, dt * 10);
     } else {
       this.rightArm.rotation.x = THREE.MathUtils.lerp(this.rightArm.rotation.x, Math.sin(this.walkPhase) * stride * 0.6, dt * 8);
     }
@@ -769,4 +990,10 @@ export class Enemy {
       if (o instanceof THREE.Mesh) (o.material as THREE.Material).dispose();
     });
   }
+}
+
+/** Fast out of the gate, settling at the end: reads as a committed blow. */
+function easeOutCubic(t: number): number {
+  const c = Math.max(0, Math.min(1, t));
+  return 1 - (1 - c) ** 3;
 }

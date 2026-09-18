@@ -12,15 +12,15 @@ import * as THREE from 'three';
 /** Seconds for a complete day. Long enough to build in, short enough to see both. */
 export const DEFAULT_DAY_LENGTH = 1080;
 
-const NIGHT_SKY = new THREE.Color(0x080d1a);
+const NIGHT_SKY = new THREE.Color(0x03050c);
 const DAWN_SKY = new THREE.Color(0xd98a5a);
 const DAY_SKY = new THREE.Color(0x8fb6d8);
 
-const NIGHT_FOG = new THREE.Color(0x0a0f1c);
+const NIGHT_FOG = new THREE.Color(0x04060e);
 const DAWN_FOG = new THREE.Color(0xc98a6a);
 const DAY_FOG = new THREE.Color(0x9dc0dc);
 
-const NIGHT_LIGHT = new THREE.Color(0x6d84c0);
+const NIGHT_LIGHT = new THREE.Color(0x4a5c96);
 const DAWN_LIGHT = new THREE.Color(0xffb070);
 const DAY_LIGHT = new THREE.Color(0xfff2d8);
 
@@ -124,16 +124,17 @@ export class TimeOfDay {
 
   /** Directional light strength. Moonlight is dim but not zero. */
   get sunIntensity(): number {
-    return 0.22 + this.daylight * 1.0;
+    return 0.1 + this.daylight * 1.12;
   }
 
   get ambientIntensity(): number {
-    // A floor of 0.18 keeps caves and night navigable without a lighting engine.
-    return 0.18 + this.daylight * 0.42;
+    // A low floor keeps night genuinely dark — dark enough that a torch matters —
+    // while still leaving shapes readable enough to navigate.
+    return 0.07 + this.daylight * 0.53;
   }
 
   get hemisphereIntensity(): number {
-    return 0.14 + this.daylight * 0.56;
+    return 0.06 + this.daylight * 0.64;
   }
 
   /** Star opacity: fully visible at night, gone by mid-morning. */

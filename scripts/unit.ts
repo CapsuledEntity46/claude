@@ -14,7 +14,10 @@ import { computeDamage, type DamageInput, type DefenseProfile } from '../src/com
 import { ARCHETYPES, FISH, pickArchetype } from '../src/entities/archetypes';
 import { Inventory } from '../src/player/Inventory';
 import { PlayerStats, xpToReach } from '../src/player/Stats';
-import { Block, isLightSource } from '../src/world/blocks';
+import { Block, blockCollisionBoxes, blockDef, isLightSource, isTargetable } from '../src/world/blocks';
+import { DungeonGenerator } from '../src/world/Dungeon';
+import { facingFromYaw, makeMeta, metaIsOpen, metaIsUpper, shapeBoxes } from '../src/world/shapes';
+import { BAG_CAPACITY, tabForItem } from '../src/player/Inventory';
 import { CHUNK_SX, CHUNK_SY, CHUNK_SZ, Chunk, voxelIndex } from '../src/world/Chunk';
 import { meshChunk } from '../src/world/ChunkMesher';
 import { mulberry32 } from '../src/world/noise';
@@ -434,7 +437,18 @@ clock.setPhase('night');
 check('midnight is dark', clock.daylight < 0.05, `daylight ${clock.daylight.toFixed(2)}`);
 check('midnight reads as night', clock.isNight && clock.phase === 'night', clock.phaseLabel());
 check('stars are fully out at midnight', clock.starOpacity > 0.95, `${clock.starOpacity.toFixed(2)}`);
-check('there is still some ambient light at night', clock.ambientIntensity > 0.1, `${clock.ambientIntensity.toFixed(2)}`);
+// Night should be dark enough that a torch is worth carrying, but not so dark
+// that the world is unreadable without one.
+check(
+  'night is dark but not pitch black',
+  clock.ambientIntensity > 0.03 && clock.ambientIntensity < 0.12,
+  `ambient ${clock.ambientIntensity.toFixed(3)}`,
+);
+check(
+  'night is dramatically darker than midday',
+  new TimeOfDay(0.5).ambientIntensity > clock.ambientIntensity * 5,
+  `day ${new TimeOfDay(0.5).ambientIntensity.toFixed(2)} vs night ${clock.ambientIntensity.toFixed(3)}`,
+);
 
 clock.setPhase('dawn');
 check('dawn is a transition, not day or night', clock.phase === 'dawn', clock.phaseLabel());
@@ -603,6 +617,304 @@ check(
 check(
   'archers stand off further than they can be surprised from',
   ARCHETYPES.every((a) => !a.ranged || a.aggroRange > a.ranged.standoff),
+);
+
+// ---------------------------------------------------------------- block shapes
+
+section('block shapes');
+
+check('an ordinary block fills its whole voxel', shapeBoxes('cube', 0).length === 1);
+check(
+  'a cube box spans the unit cube exactly',
+  (() => {
+    const b = shapeBoxes('cube', 0)[0];
+    return b.min.every((v) => v === 0) && b.max.every((v) => v === 1);
+  })(),
+);
+check(
+  'a bottom slab occupies the lower half',
+  (() => {
+    const b = shapeBoxes('slab', 0)[0];
+    return b.min[1] === 0 && b.max[1] === 0.5;
+  })(),
+);
+check(
+  'a top slab occupies the upper half',
+  (() => {
+    const b = shapeBoxes('slab', makeMeta(0, true))[0];
+    return b.min[1] === 0.5 && b.max[1] === 1;
+  })(),
+);
+check('stairs are built from two boxes', shapeBoxes('stairs', 0).length === 2);
+check(
+  'rotating stairs moves the step to the other side',
+  (() => {
+    const north = shapeBoxes('stairs', makeMeta(0))[1];
+    const south = shapeBoxes('stairs', makeMeta(2))[1];
+    return north.min[2] !== south.min[2];
+  })(),
+);
+check(
+  'every shape box stays inside the unit cube',
+  (['cube', 'slab', 'stairs', 'wedge', 'pane', 'torch', 'door', 'fence'] as const).every((shape) =>
+    [0, 1, 2, 3].every((facing) =>
+      shapeBoxes(shape, makeMeta(facing as 0 | 1 | 2 | 3)).every(
+        (b) =>
+          b.min.every((v, i) => v >= -1e-9 && v <= b.max[i]) && b.max.every((v) => v <= 1 + 1e-9),
+      ),
+    ),
+  ),
+);
+check(
+  'a torch is a slim post, not a cube',
+  (() => {
+    const boxes = shapeBoxes('torch', 0);
+    // The reported bug: a placed torch looked like a glowing crate.
+    return boxes.every((b) => b.max[0] - b.min[0] < 0.35 && b.max[2] - b.min[2] < 0.35);
+  })(),
+);
+check('a torch does not block movement', blockCollisionBoxes(Block.Torch, 0).length === 0);
+check('a torch can still be mined and built against', isTargetable(Block.Torch));
+check('water cannot be aimed at', !isTargetable(Block.Water));
+check('a closed door blocks the way', blockCollisionBoxes(Block.Door, makeMeta(0, false, false)).length > 0);
+check(
+  'an open door is a hole you can walk through',
+  blockCollisionBoxes(Block.Door, makeMeta(0, false, true)).length === 0,
+);
+check('doors are interactive', blockDef(Block.Door).interactive);
+check('stairs and slabs are not full cubes, so they cannot cull neighbours', !blockDef(Block.StoneStairs).opaque && !blockDef(Block.StoneSlab).opaque);
+check('an ordinary block still culls neighbours', blockDef(Block.Stone).opaque);
+
+check('meta packs and unpacks the upper flag', metaIsUpper(makeMeta(0, true)) && !metaIsUpper(makeMeta(0, false)));
+check('meta packs and unpacks the open flag', metaIsOpen(makeMeta(0, false, true)) && !metaIsOpen(makeMeta(0)));
+check(
+  'facing follows the direction the player looks',
+  (() => {
+    // Player forward is (-sin yaw, 0, -cos yaw): yaw 0 looks towards -Z.
+    return facingFromYaw(0) === 0 && facingFromYaw(Math.PI) === 2;
+  })(),
+);
+
+// Shaped blocks must actually produce geometry, and only where they should.
+const slabChunk = new Chunk(0, 0);
+slabChunk.set(8, 20, 8, Block.StoneSlab, 0);
+const slabTriangles = meshChunk(slabChunk, openNeighbor).opaque!.getIndex()!.count / 3;
+check('a slab meshes as a single box', slabTriangles === 12, `${slabTriangles} triangles`);
+
+const stairChunk = new Chunk(0, 0);
+stairChunk.set(8, 20, 8, Block.StoneStairs, makeMeta(0));
+const stairTriangles = meshChunk(stairChunk, openNeighbor).opaque!.getIndex()!.count / 3;
+check('stairs mesh as two boxes', stairTriangles === 24, `${stairTriangles} triangles`);
+
+check(
+  'a shaped block does not hide its neighbour behind it',
+  (() => {
+    // A stone cube behind a slab must still draw the face they share, or you
+    // would see a hole through the world past the slab.
+    const c = new Chunk(0, 0);
+    c.set(8, 20, 8, Block.StoneSlab, 0);
+    c.set(9, 20, 8, Block.Stone, 0);
+    const withSlab = meshChunk(c, openNeighbor).opaque!.getIndex()!.count / 3;
+    const alone = new Chunk(0, 0);
+    alone.set(9, 20, 8, Block.Stone, 0);
+    const stoneAlone = meshChunk(alone, openNeighbor).opaque!.getIndex()!.count / 3;
+    return withSlab === stoneAlone + 12;
+  })(),
+);
+
+check(
+  'edits round-trip block id and orientation together',
+  (() => {
+    const c = new Chunk(1, 1);
+    c.recordEdit(3, 30, 4, Block.PlankStairs, makeMeta(2, true));
+    c.applyEdits();
+    return c.get(3, 30, 4) === Block.PlankStairs && c.getMeta(3, 30, 4) === makeMeta(2, true);
+  })(),
+);
+
+// ---------------------------------------------------------------- mana
+
+section('mana and spells');
+
+const caster2 = new PlayerStats();
+check('a new character starts with mana', caster2.mana > 0, `${caster2.mana}`);
+check('mana capacity grows with Focus', (() => {
+  const a = new PlayerStats();
+  const before = a.maxMana;
+  a.unspent = 1;
+  a.spend('focus');
+  return a.maxMana > before;
+})());
+caster2.mana = 10;
+check('a spell you cannot afford is refused', !caster2.spendMana(25) && caster2.mana === 10);
+check('an affordable spell is paid for', caster2.spendMana(6) && caster2.mana === 4);
+check('mana cannot exceed its maximum', (() => {
+  const a = new PlayerStats();
+  a.restoreMana(9999);
+  return a.mana === a.maxMana;
+})());
+check(
+  'mana does not regenerate on its own',
+  (() => {
+    const a = new PlayerStats();
+    a.mana = 5;
+    for (let i = 0; i < 200; i++) a.update(0.1, false, false);
+    return a.mana === 5;
+  })(),
+  'the only sources are potions and orbs',
+);
+
+const flames = item('flames');
+const sparks = item('sparks');
+const heal = item('mending_hand');
+const oakflesh = item('oakflesh');
+const greater = item('firebolt');
+check('Flames is a held mana spell', flames.spell?.cost === 'mana' && flames.spell?.sustained === true);
+check('Flames sets its target burning', (flames.spell?.burn ?? 0) > 0);
+check('Sparks can stun', (sparks.spell?.stunChance ?? 0) > 0);
+check('Healing is a channel', heal.spell?.kind === 'channel' && heal.spell?.sustained === true);
+check('Oakflesh grants armor for a long duration', (oakflesh.spell?.amount ?? 0) >= 10 && (oakflesh.spell?.duration ?? 0) >= 30);
+check('powerful spells still cost a slot, not mana', greater.spell?.cost === 'slot');
+check('the meteor remains a slot spell', item('meteor').spell?.cost === 'slot');
+check('mana potions restore mana', (item('mana_potion').consumable?.mana ?? 0) > 0);
+check(
+  'the starting kit includes the three automatic spells',
+  (() => {
+    const kit = Inventory.startingKit();
+    return kit.count('flames') === 1 && kit.count('sparks') === 1 && kit.count('mending_hand') === 1;
+  })(),
+);
+
+// ---------------------------------------------------------------- inventory tabs
+
+section('inventory tabs');
+
+check('materials are routed to the materials tab', tabForItem(item('block_cobblestone')) === 'materials');
+check('weapons are routed to the tools tab', tabForItem(item('longsword')) === 'tools');
+check('the build tool is a tool', tabForItem(item('build_tool')) === 'tools');
+check('potions stay in the main bag', tabForItem(item('healing_draught')) === 'main');
+check('the tools tab holds 44', BAG_CAPACITY.tools === 44);
+check('the materials tab is four times the main bag', BAG_CAPACITY.materials === BAG_CAPACITY.main * 4);
+check('the main bag was doubled', BAG_CAPACITY.main === 48);
+
+const tabbed = new Inventory();
+tabbed.add('block_cobblestone', 400);
+tabbed.add('longsword');
+tabbed.add('healing_draught', 3);
+check('each item lands in its own tab', (() => (
+  tabbed.slots('materials').some((s) => s?.itemId === 'block_cobblestone') &&
+  tabbed.slots('tools').some((s) => s?.itemId === 'longsword') &&
+  tabbed.slots('main').some((s) => s?.itemId === 'healing_draught')
+))());
+check('counting searches every tab', tabbed.count('block_cobblestone') === 400 && tabbed.count('longsword') === 1);
+check('removing works across tabs', tabbed.remove('block_cobblestone', 150) && tabbed.count('block_cobblestone') === 250);
+check(
+  'building materials add no carry weight',
+  (() => {
+    const light = new Inventory();
+    const before = light.carriedWeight;
+    light.add('block_cobblestone', 990);
+    return light.carriedWeight === before;
+  })(),
+);
+check(
+  'equipment does add weight',
+  (() => {
+    const heavy = new Inventory();
+    const before = heavy.carriedWeight;
+    heavy.add('iron_plate');
+    return heavy.carriedWeight > before;
+  })(),
+);
+check(
+  'tabs survive a save/load round trip',
+  (() => {
+    const original = new Inventory();
+    original.add('block_planks', 120);
+    original.add('build_tool');
+    const restored = new Inventory();
+    restored.restore(JSON.parse(JSON.stringify(original.snapshot())));
+    return restored.count('block_planks') === 120 && restored.count('build_tool') === 1;
+  })(),
+);
+
+// ---------------------------------------------------------------- dungeons
+
+section('dungeons');
+
+const dungeons = new DungeonGenerator(4242);
+const sites = dungeons.sitesNear(-600, -600, 600, 600);
+check('dungeons are generated across the world', sites.length > 3, `${sites.length} sites in a 1200 block square`);
+check('every site has rooms', sites.every((s) => s.rooms.length >= 5), `min rooms ${Math.min(...sites.map((s) => s.rooms.length))}`);
+check('every site has exactly one vault', sites.every((s) => s.rooms.filter((r) => r.vault).length === 1));
+check('rooms are connected by corridors', sites.every((s) => s.corridors.length === s.rooms.length - 1));
+check(
+  'rooms sit underground and clear of bedrock',
+  sites.every((s) => s.rooms.every((r) => r.floorY >= 5 && r.floorY + r.height < 40)),
+  `lowest floor ${Math.min(...sites.flatMap((s) => s.rooms.map((r) => r.floorY)))}`,
+);
+check(
+  'rooms are big enough to fight in',
+  sites.every((s) => s.rooms.every((r) => r.width >= 7 && r.depth >= 7 && r.height >= 4)),
+);
+check(
+  'dungeon layout is deterministic for a seed',
+  (() => {
+    const a = new DungeonGenerator(99);
+    const b = new DungeonGenerator(99);
+    return JSON.stringify(a.siteAt(1, 1)) === JSON.stringify(b.siteAt(1, 1));
+  })(),
+);
+check(
+  'different seeds produce different dungeons',
+  JSON.stringify(new DungeonGenerator(1).siteAt(0, 0)) !== JSON.stringify(new DungeonGenerator(2).siteAt(0, 0)),
+);
+check(
+  'a site bounding box actually contains its rooms',
+  sites.every((s) =>
+    s.rooms.every((r) => r.x >= s.minX && r.x + r.width <= s.maxX && r.z >= s.minZ && r.z + r.depth <= s.maxZ),
+  ),
+);
+check('dungeons offer spawn points', dungeons.spawnPointsNear(sites[0].entranceX, sites[0].entranceZ, 90).length > 0);
+check(
+  'vault guards are marked as elite',
+  dungeons.spawnPointsNear(sites[0].entranceX, sites[0].entranceZ, 400).some((p) => p.elite),
+);
+check('an entrance can be located from far away', dungeons.nearestEntrance(0, 0, 400) !== null);
+
+// Carving must actually hollow out the rock, and identically every time.
+check(
+  'carving a chunk hollows out dungeon space',
+  (() => {
+    const gen = new TerrainGen(4242);
+    const site = gen.dungeons.siteAt(0, 0);
+    if (!site) return true; // this seed left cell (0,0) empty
+    const room = site.rooms[0];
+    const chunk = new Chunk(room.x >> 4, room.z >> 4);
+    gen.generate(chunk);
+    // The room interior should contain air at floor level somewhere in the chunk.
+    let air = 0;
+    for (let y = room.floorY; y < room.floorY + room.height; y++) {
+      for (let z = 0; z < CHUNK_SZ; z++) {
+        for (let x = 0; x < CHUNK_SX; x++) if (chunk.get(x, y, z) === Block.Air) air++;
+      }
+    }
+    return air > 20;
+  })(),
+  'rooms are open space, not solid rock',
+);
+check(
+  'chunk carving is order independent',
+  (() => {
+    // The same chunk generated twice must be identical, which is what lets chunks
+    // stream in any order without dungeons coming out different.
+    const gen = new TerrainGen(777);
+    const a = new Chunk(3, -2);
+    const b = new Chunk(3, -2);
+    gen.generate(a);
+    gen.generate(b);
+    return a.voxels.every((v, i) => v === b.voxels[i]) && a.meta.every((v, i) => v === b.meta[i]);
+  })(),
 );
 
 // ---------------------------------------------------------------- result

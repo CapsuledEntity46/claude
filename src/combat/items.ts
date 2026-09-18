@@ -12,7 +12,7 @@ import type {
   WeaponDef,
 } from './types';
 
-export type ItemKind = 'weapon' | 'armor' | 'shield' | 'spell' | 'block' | 'consumable' | 'ammo' | 'torch';
+export type ItemKind = 'weapon' | 'armor' | 'shield' | 'spell' | 'block' | 'consumable' | 'ammo' | 'torch' | 'tool';
 
 export interface ItemDef {
   id: string;
@@ -86,7 +86,7 @@ function thrust(damage: number, reach: number, o: MeleeOpts = {}): MeleeAttack {
     damage,
     type: o.type ?? 'pierce',
     reach,
-    arcDeg: o.arcDeg ?? 13,
+    arcDeg: o.arcDeg ?? 19,
     windup: o.windup ?? 0.16,
     recovery: o.recovery ?? 0.24,
     stamina: o.stamina ?? 6,
@@ -373,16 +373,25 @@ function spellItem(
   blurb: string,
   spell: Partial<SpellDef> & { tier: 1 | 2 | 3; kind: SpellDef['kind'] },
 ): ItemDef {
+  const cost = spell.cost ?? 'slot';
   return {
     id,
     name,
     kind: 'spell',
     glyph,
-    tier: spell.tier * 2,
+    // Mana spells are common tools; slot spells are rationed and rarer.
+    tier: cost === 'mana' ? 1 : spell.tier * 2,
     stackable: false,
     maxStack: 1,
     blurb,
     spell: {
+      cost,
+      mana: spell.mana ?? 0,
+      sustained: spell.sustained ?? false,
+      burn: spell.burn ?? 0,
+      burnDuration: spell.burnDuration ?? 0,
+      stunChance: spell.stunChance ?? 0,
+      stunDuration: spell.stunDuration ?? 0,
       tier: spell.tier,
       kind: spell.kind,
       damage: spell.damage ?? 0,
@@ -401,8 +410,39 @@ function spellItem(
   };
 }
 
+// --- Mana spells: the everyday tools ----------------------------------------
+//
+// Weaker than slot spells but limited only by the mana pool, which refills from
+// potions and from orbs enemies drop. These are what you actually fight with.
 defs.push(
-  spellItem('firebolt', 'Firebolt', '🔥', 'A dart of flame. Cheap, fast, reliable.', {
+  spellItem('flames', 'Flames', '🔥', 'A held jet of fire. Sets whatever it touches burning.', {
+    cost: 'mana', mana: 14, sustained: true, tier: 1, kind: 'stream',
+    damage: 7, type: 'fire', radius: 6.5, range: 6.5,
+    burn: 6, burnDuration: 4, castTime: 0, cooldown: 0.08, armorPierce: 0.35,
+  }),
+  spellItem('sparks', 'Sparks', '⚡', 'A held arc of lightning. Sometimes locks a foe rigid.', {
+    cost: 'mana', mana: 16, sustained: true, tier: 1, kind: 'stream',
+    damage: 9, type: 'magic', radius: 8, range: 8,
+    stunChance: 0.12, stunDuration: 1.1, castTime: 0, cooldown: 0.1, armorPierce: 0.5,
+  }),
+  spellItem('mending_hand', 'Healing', '✚', 'Knits your wounds while you hold it. Slow, but cheap.', {
+    cost: 'mana', mana: 11, sustained: true, tier: 1, kind: 'channel',
+    amount: 9, castTime: 0, cooldown: 0.1,
+  }),
+  spellItem('fire_dart', 'Fire Dart', '☄️', 'A fast bolt of flame. Hits harder than Flames and keeps its distance.', {
+    cost: 'mana', mana: 20, tier: 1, kind: 'projectile',
+    damage: 19, type: 'fire', speed: 38, castTime: 0.2, cooldown: 0.45,
+    burn: 4, burnDuration: 3, armorPierce: 0.4,
+  }),
+  spellItem('oakflesh', 'Oakflesh', '🌳', 'Hardens your skin: +14 armor for a minute. Vital if you travel light.', {
+    cost: 'mana', mana: 32, tier: 1, kind: 'ward',
+    amount: 14, duration: 60, castTime: 0.5, cooldown: 1.2,
+  }),
+);
+
+// --- Slot spells: rationed and powerful -------------------------------------
+defs.push(
+  spellItem('firebolt', 'Greater Firebolt', '🔥', 'A dart of flame. Cheap, fast, reliable.', {
     tier: 1, kind: 'projectile', damage: 14, type: 'fire', speed: 34, castTime: 0.25, cooldown: 0.5, armorPierce: 0.4,
   }),
   spellItem('frost_shard', 'Frost Shard', '❄️', 'Piercing ice that leaves the target sluggish.', {
@@ -440,6 +480,17 @@ defs.push(
     consumable: { heal: 25, restoreTier: 0, stamina: 0 },
   },
   {
+    id: 'mana_potion',
+    name: 'Mana Potion',
+    kind: 'consumable',
+    glyph: '🫙',
+    tier: 2,
+    stackable: true,
+    maxStack: 8,
+    blurb: 'Restores 60 mana. The only way to refill it besides orbs.',
+    consumable: { heal: 0, restoreTier: 0, stamina: 0, mana: 60 },
+  },
+  {
     id: 'mana_tonic',
     name: 'Mana Tonic',
     kind: 'consumable',
@@ -462,6 +513,19 @@ defs.push(
     consumable: { heal: 6, restoreTier: 0, stamina: 60 },
   },
 );
+
+// --- Tools ------------------------------------------------------------------
+
+defs.push({
+  id: 'build_tool',
+  name: 'Mason\u2019s Gun',
+  kind: 'tool',
+  glyph: '\ud83d\udd28',
+  tier: 2,
+  stackable: false,
+  maxStack: 1,
+  blurb: 'Builds and clears in bulk. Left-click carves, right-click fills, X cycles the shape, R samples the block you are looking at.',
+});
 
 // --- Light sources ----------------------------------------------------------
 

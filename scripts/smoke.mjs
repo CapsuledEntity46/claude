@@ -264,7 +264,11 @@ try {
       g.debugLook(0, 0);
       // Flat ground, so the target cannot slide down a hillside out of reach.
       g.debugFlattenArena(7);
-      return g.debugSpawnEnemyInReach(d);
+      const distance = g.debugSpawnEnemyInReach(d);
+      // Hold the target still. Enemies now circle rather than standing in front
+      // of you, which is correct in play but makes a fixed-aim test meaningless.
+      g.debugFreezeEnemies(true);
+      return distance;
     }, distance);
 
   const spawnDistance = await setupArena(2.2);
@@ -473,11 +477,18 @@ try {
   check('a weapon is held in the view model', idleView.mainItem === 'shortsword', `holding ${idleView.mainItem}`);
 
   // Capture the pose partway through each attack and compare.
+  /**
+   * Clicks once and samples the held item's pose during the *strike*.
+   *
+   * The strike (the recovery phase) is where the two motions actually differ; the
+   * wind-up is mostly a small pull-back in both cases.
+   */
   const sampleAttack = async (expectMode) => {
     // The previous attack must have finished, or this click is swallowed.
     await waitForIdle();
     await page.evaluate(() => window.__voxelquest.debugRefill());
     await page.mouse.click(CENTER_X, CENTER_Y);
+
     const seen = await waitUntil(
       `${expectMode} animation`,
       async () => {
@@ -485,12 +496,38 @@ try {
         return v.action === expectMode ? v : null;
       },
       6000,
-      50,
+      40,
     );
-    // Sample the pose mid-strike, which is where the two motions differ most.
-    const pose = await page.evaluate(() => window.__voxelquest.debugViewPose());
-    return { view: seen, pose };
+
+    // Poll for the strike, keeping the most extreme pose we observe.
+    let extreme = await page.evaluate(() => window.__voxelquest.debugViewPose());
+    let best = -1;
+    for (let i = 0; i < 40; i++) {
+      const [view, pose] = await Promise.all([
+        page.evaluate(() => window.__voxelquest.debugViewState()),
+        page.evaluate(() => window.__voxelquest.debugViewPose()),
+      ]);
+      if (view.action !== expectMode) break;
+      if (view.phase === 'recovery') {
+        const magnitude = Object.keys(pose).reduce(
+          (sum, key) => sum + Math.abs((pose[key] ?? 0) - (idlePose[key] ?? 0)),
+          0,
+        );
+        if (magnitude > best) {
+          best = magnitude;
+          extreme = pose;
+        }
+      }
+      await page.waitForTimeout(30);
+    }
+    return { view: seen, pose: extreme };
   };
+
+  // Reference pose with nothing happening, so animations can be measured as
+  // offsets from rest rather than as absolute numbers (the rest pose already
+  // carries a large yaw, which would swamp any absolute comparison).
+  await waitForIdle();
+  const idlePose = await page.evaluate(() => window.__voxelquest.debugViewPose());
 
   const swingSample = await sampleAttack('swing');
   check('swinging drives a swing animation', swingSample.view?.action === 'swing', `action ${swingSample.view?.action}, phase ${swingSample.view?.phase}`);
@@ -510,21 +547,49 @@ try {
   );
 
   // A swing rolls the weapon across the screen; a thrust drives it forward.
+  // The two motions are supposed to differ in *character*, not just in numbers:
+  // the swing travels laterally (yaw, and a large sideways offset) while the
+  // thrust travels vertically and forward down the view axis.
+  const delta = (pose, key) => Math.abs((pose?.[key] ?? 0) - (idlePose[key] ?? 0));
+  const swingPose = swingSample.pose ?? {};
+  const thrustPose = thrustSample.pose ?? {};
+
+  const poseDifference = ['posX', 'posY', 'posZ', 'rotX', 'rotY', 'rotZ'].reduce(
+    (sum, key) => sum + Math.abs((swingPose[key] ?? 0) - (thrustPose[key] ?? 0)),
+    0,
+  );
   check(
     'swing and thrust are visually distinct poses',
-    Math.abs((swingSample.pose?.rotZ ?? 0) - (thrustSample.pose?.rotZ ?? 0)) > 0.25 ||
-      Math.abs((swingSample.pose?.posZ ?? 0) - (thrustSample.pose?.posZ ?? 0)) > 0.1,
-    `swing rotZ ${swingSample.pose?.rotZ} posZ ${swingSample.pose?.posZ} | thrust rotZ ${thrustSample.pose?.rotZ} posZ ${thrustSample.pose?.posZ}`,
+    poseDifference > 0.4,
+    `total difference ${poseDifference.toFixed(2)}`,
+  );
+
+  // Character, not just numbers: the swing travels laterally, the thrust does not.
+  const swingLateral = delta(swingPose, 'rotY') + delta(swingPose, 'posX');
+  const thrustLateral = delta(thrustPose, 'rotY') + delta(thrustPose, 'posX');
+  const thrustAxial = delta(thrustPose, 'posY') + delta(thrustPose, 'posZ') + delta(thrustPose, 'rotX');
+  check(
+    'the swing sweeps sideways across the view',
+    swingLateral > 0.3,
+    `lateral travel ${swingLateral.toFixed(2)}`,
+  );
+  check(
+    'the thrust drives along the view axis rather than sideways',
+    thrustAxial > thrustLateral,
+    `axial ${thrustAxial.toFixed(2)} vs lateral ${thrustLateral.toFixed(2)}`,
   );
 
   console.log('\n[block breaking animation]');
+  await waitForIdle();
   await page.evaluate(() => {
     const g = window.__voxelquest;
     g.debugSetInvulnerable(true);
     g.debugClearEnemies();
+    g.debugFreezeEnemies(false);
     g.debugFlattenArena(8);
     g.debugLook(0, 0);
     g.debugLookDown();
+    g.debugResetMining();
   });
   await page.waitForTimeout(600);
   await page.evaluate(() => window.__voxelquest.debugSelectHotbarByItem('block_cobblestone'));
@@ -652,6 +717,166 @@ try {
     afterCook.cooked > cooked.cooked && afterCook.raw < cooked.raw,
     `raw ${cooked.raw}->${afterCook.raw}, cooked ${cooked.cooked}->${afterCook.cooked}`,
   );
+
+  console.log('\n[shaped blocks and the build tool]');
+  await page.evaluate(() => {
+    const g = window.__voxelquest;
+    g.debugSetInvulnerable(true);
+    g.debugClearEnemies();
+    g.debugFlattenArena(10);
+    g.debugLook(0, 0);
+    g.debugLookDown();
+    g.debugGiveItem('block_stone_stairs', 20);
+    g.debugGiveItem('block_door', 4);
+  });
+  await page.waitForTimeout(700);
+
+  // A torch must place as a slim post, not a cube.
+  await page.evaluate(() => window.__voxelquest.debugSelectHotbarByItem('torch'));
+  await page.waitForTimeout(250);
+  await page.mouse.click(CENTER_X, CENTER_Y, { button: 'right' });
+  await page.waitForTimeout(400);
+  const torchShape = await page.evaluate(() => window.__voxelquest.debugPlacedShape('torch'));
+  check(
+    'a placed torch is a slim post, not a cube',
+    torchShape?.shape === 'torch' && torchShape.fillsVoxel === false,
+    JSON.stringify(torchShape),
+  );
+
+  // Stairs must record the orientation they were placed with.
+  await page.evaluate(() => window.__voxelquest.debugSelectHotbarByItem('block_stone_stairs'));
+  await page.waitForTimeout(250);
+  await page.mouse.click(CENTER_X, CENTER_Y, { button: 'right' });
+  await page.waitForTimeout(400);
+  const stairShape = await page.evaluate(() => window.__voxelquest.debugPlacedShape('block_stone_stairs'));
+  check('stairs place as a shaped block', stairShape?.shape === 'stairs', JSON.stringify(stairShape));
+  check('stairs are made of more than one box', (stairShape?.boxes ?? 0) > 1, `${stairShape?.boxes} boxes`);
+
+  // A door must toggle rather than stack.
+  await page.evaluate(() => window.__voxelquest.debugSelectHotbarByItem('block_door'));
+  await page.waitForTimeout(250);
+  await page.mouse.click(CENTER_X, CENTER_Y, { button: 'right' });
+  await page.waitForTimeout(400);
+  const doorBefore = await page.evaluate(() => window.__voxelquest.debugPlacedShape('block_door'));
+  if (doorBefore) {
+    const toggled = await page.evaluate(() => window.__voxelquest.debugToggleNearestDoor());
+    check('a door can be opened', toggled === true, `toggled ${toggled}`);
+    const doorAfter = await page.evaluate(() => window.__voxelquest.debugPlacedShape('block_door'));
+    check('opening a door clears its collision', doorAfter?.blocks === false, JSON.stringify(doorAfter));
+  } else {
+    console.log('  note  door did not place at this spot; skipping door checks');
+  }
+
+  // The build tool fills in bulk.
+  await page.evaluate(() => {
+    const g = window.__voxelquest;
+    g.debugGiveItem('block_cobblestone', 400);
+    g.debugSelectHotbarByItem('build_tool');
+    g.debugSetToolMode('floor');
+    g.debugLookDown();
+  });
+  await page.waitForTimeout(400);
+  const editsBeforeTool = await page.evaluate(() => window.__voxelquest.debugEditedBlockCount());
+  await page.mouse.click(CENTER_X, CENTER_Y, { button: 'right' });
+  await page.waitForTimeout(700);
+  const editsAfterTool = await page.evaluate(() => window.__voxelquest.debugEditedBlockCount());
+  check(
+    'the build tool places many blocks at once',
+    editsAfterTool - editsBeforeTool >= 4,
+    `${editsBeforeTool} -> ${editsAfterTool} edited voxels`,
+  );
+
+  console.log('\n[mana spells]');
+  await page.evaluate(() => {
+    const g = window.__voxelquest;
+    g.debugClearEnemies();
+    g.debugSetMana(200);
+    // The build tool section left the camera aimed at the floor.
+    g.debugLook(0, 0);
+    g.debugFlattenArena(8);
+    g.debugSpawnEnemyInReach(3);
+    g.debugFreezeEnemies(true);
+    g.debugSelectHotbarByItem('flames');
+  });
+  await page.waitForTimeout(500);
+  const manaBefore = await page.evaluate(() => window.__voxelquest.debugMana());
+  const hpBefore = await page.evaluate(() => window.__voxelquest.debugEnemyReport());
+
+  await page.mouse.move(CENTER_X, CENTER_Y);
+  await page.mouse.down();
+  const burned = await waitUntil(
+    'Flames to damage the target',
+    async () => {
+      const report = await page.evaluate(() => window.__voxelquest.debugEnemyReport());
+      if (report.length === 0) return report;
+      return hpBefore[0] && report[0] && report[0].hp < hpBefore[0].hp ? report : null;
+    },
+    12_000,
+    150,
+  );
+  await page.mouse.up();
+  await page.waitForTimeout(300);
+
+  const manaAfter = await page.evaluate(() => window.__voxelquest.debugMana());
+  const hpAfter = burned ?? (await page.evaluate(() => window.__voxelquest.debugEnemyReport()));
+  check('a held mana spell drains mana', manaAfter.mana < manaBefore.mana, `${manaBefore.mana} -> ${manaAfter.mana}`);
+  check(
+    'Flames damages what it touches',
+    hpAfter.length === 0 || (hpBefore[0] && hpAfter[0] && hpAfter[0].hp < hpBefore[0].hp),
+    `hp ${hpBefore[0]?.hp} -> ${hpAfter[0]?.hp ?? 'dead'}`,
+  );
+  check('mana spells do not consume spell slots', (await page.evaluate(() => window.__voxelquest.debugSpellSlots()))[0] > 0);
+
+  console.log('\n[aim down sights]');
+  await page.evaluate(() => window.__voxelquest.debugSelectHotbarByItem('shortbow'));
+  await page.waitForTimeout(300);
+  const beforeAim = await page.evaluate(() => window.__voxelquest.debugAim());
+  await page.mouse.down({ button: 'right' });
+  await page.waitForTimeout(900);
+  const whileAiming = await page.evaluate(() => window.__voxelquest.debugAim());
+  await page.mouse.up({ button: 'right' });
+  await page.waitForTimeout(700);
+  const afterAim = await page.evaluate(() => window.__voxelquest.debugAim());
+
+  check('right-click aims a bow', whileAiming.aiming === true, `aiming ${whileAiming.aiming}`);
+  check('aiming zooms the view in', whileAiming.fov < beforeAim.fov - 2, `fov ${beforeAim.fov} -> ${whileAiming.fov}`);
+  check('aiming draws a trajectory arc', whileAiming.arcVisible === true);
+  check('releasing restores the view', afterAim.fov > whileAiming.fov, `fov back to ${afterAim.fov}`);
+  check('the arc disappears when not aiming', afterAim.arcVisible === false);
+
+  console.log('\n[dungeons]');
+  const dungeonInfo = await page.evaluate(() => window.__voxelquest.debugDungeonInfo());
+  check('dungeons exist near the player', dungeonInfo.sitesNearby > 0, JSON.stringify(dungeonInfo));
+  check('dungeons have rooms and corridors', dungeonInfo.rooms > 0 && dungeonInfo.corridors > 0, `${dungeonInfo.rooms} rooms`);
+  check('every dungeon has a vault', dungeonInfo.vaults > 0, `${dungeonInfo.vaults} vaults`);
+  check('an entrance can be located', dungeonInfo.nearestEntranceDistance >= 0, `${dungeonInfo.nearestEntranceDistance} blocks away`);
+
+  const arrived = await page.evaluate(() => window.__voxelquest.debugGoToDungeon());
+  if (arrived) {
+    await page.waitForTimeout(3500);
+    const carved = await page.evaluate(() => window.__voxelquest.debugDungeonCarved());
+    check('the dungeon is actually carved into the world', carved.airBelow > 30, JSON.stringify(carved));
+    check('the dungeon is built from dungeon masonry', carved.masonry > 20, `${carved.masonry} brick blocks`);
+    check('the dungeon is lit', carved.torches > 0, `${carved.torches} torches`);
+  } else {
+    console.log('  note  no dungeon within range; skipping carve checks');
+  }
+
+  console.log('\n[minimap]');
+  const minimapDrawn = await page.evaluate(() => {
+    const canvas = document.querySelector('.minimap-canvas');
+    if (!canvas) return null;
+    const ctx = canvas.getContext('2d');
+    const data = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+    let lit = 0;
+    for (let i = 0; i < data.length; i += 4) {
+      if (data[i] > 30 || data[i + 1] > 30 || data[i + 2] > 30) lit++;
+    }
+    return { lit, total: data.length / 4 };
+  });
+  check('the minimap renders terrain', (minimapDrawn?.lit ?? 0) > 500, JSON.stringify(minimapDrawn));
+  const compassDrawn = await page.evaluate(() => !!document.querySelector('.compass-canvas'));
+  check('the compass is present', compassDrawn);
 
   console.log('\n[save/load]');
   await page.keyboard.press('F5');

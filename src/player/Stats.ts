@@ -41,6 +41,7 @@ export interface StatsSnapshot {
   attributes: AttributeSet;
   unspent: number;
   slotsUsed: number[];
+  mana?: number;
 }
 
 export class PlayerStats {
@@ -54,12 +55,21 @@ export class PlayerStats {
 
   stamina = 100;
   guard = 0;
+  /**
+   * Mana for everyday spells.
+   *
+   * Deliberately does *not* regenerate on its own: the only sources are potions
+   * and the orbs enemies drop, which keeps casting a resource you manage rather
+   * than a cooldown you wait out. Spell slots remain separate, for the rare
+   * powerful spells.
+   */
+  mana = 60;
 
   /** Spell slots consumed, per tier (index 0 = tier 1). */
   slotsUsed = [0, 0, 0];
   private slotRegenTimer = 0;
 
-  /** Temporary bonus armour from Stoneskin. */
+  /** Temporary bonus armour from Stoneskin or Oakflesh. */
   wardArmor = 0;
   wardTimer = 0;
 
@@ -82,6 +92,24 @@ export class PlayerStats {
 
   get maxStamina(): number {
     return 100 + this.attributes.agility * 4;
+  }
+
+  get maxMana(): number {
+    return 60 + (this.level - 1) * 6 + this.attributes.focus * 8;
+  }
+
+  /** Spends mana if there is enough. Returns false when there is not. */
+  spendMana(amount: number): boolean {
+    if (this.mana < amount) return false;
+    this.mana -= amount;
+    return true;
+  }
+
+  /** Restores mana, capped at the maximum. Returns how much was actually added. */
+  restoreMana(amount: number): number {
+    const before = this.mana;
+    this.mana = Math.min(this.maxMana, this.mana + amount);
+    return this.mana - before;
   }
 
   get maxGuard(): number {
@@ -153,6 +181,7 @@ export class PlayerStats {
       // Levelling up is the reward: full heal and all slots back.
       this.hp = this.maxHp;
       this.stamina = this.maxStamina;
+      this.mana = this.maxMana;
       this.slotsUsed = [0, 0, 0];
     }
     return gained;
@@ -168,8 +197,9 @@ export class PlayerStats {
     if (this.unspent <= 0) return false;
     this.unspent--;
     this.attributes[attr]++;
-    // Investing in Might should feel immediate.
+    // Investing should feel immediate.
     if (attr === 'might') this.hp += 3;
+    if (attr === 'focus') this.mana = Math.min(this.maxMana, this.mana + 8);
     return true;
   }
 
@@ -235,6 +265,7 @@ export class PlayerStats {
 
   resetForRespawn(): void {
     this.hp = this.maxHp;
+    this.mana = this.maxMana;
     this.stamina = this.maxStamina;
     this.guard = this.maxGuard;
     this.slotsUsed = [0, 0, 0];
@@ -251,6 +282,7 @@ export class PlayerStats {
       attributes: { ...this.attributes },
       unspent: this.unspent,
       slotsUsed: [...this.slotsUsed],
+      mana: this.mana,
     };
   }
 
@@ -264,6 +296,7 @@ export class PlayerStats {
     // otherwise load a player who cannot be healed and cannot die again.
     this.hp = Math.max(1, Math.min(s.hp, this.maxHp));
     this.stamina = this.maxStamina;
+    this.mana = Math.min(s.mana ?? this.maxMana, this.maxMana);
     this.timeSinceDamage = REGEN_DELAY;
   }
 }

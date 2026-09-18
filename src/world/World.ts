@@ -1,8 +1,9 @@
 import * as THREE from 'three';
-import { Block, isLightSource, isSolid } from './blocks';
+import { Block, blockCollisionBoxes, blockDef, isLightSource, isSolid, isTargetable } from './blocks';
 import { CHUNK_SX, CHUNK_SY, CHUNK_SZ, Chunk, MeshState, chunkKey, voxelIndex } from './Chunk';
 import { meshChunk } from './ChunkMesher';
 import { TerrainGen } from './TerrainGen';
+import { META_OPEN, metaIsOpen } from './shapes';
 
 export interface RaycastHit {
   /** Integer coordinates of the block that was hit. */
@@ -98,6 +99,16 @@ export class World {
     return chunk.voxels[voxelIndex(wx - cx * CHUNK_SX, wy, wz - cz * CHUNK_SZ)];
   }
 
+  /** Orientation and state byte for a voxel. */
+  getMeta(wx: number, wy: number, wz: number): number {
+    if (wy < 0 || wy >= CHUNK_SY) return 0;
+    const cx = wx >> 4;
+    const cz = wz >> 4;
+    const chunk = this.chunks.get(chunkKey(cx, cz));
+    if (!chunk || chunk.state === MeshState.Empty) return 0;
+    return chunk.meta[voxelIndex(wx - cx * CHUNK_SX, wy, wz - cz * CHUNK_SZ)];
+  }
+
   /**
    * Voxel lookup used by the mesher. Unloaded neighbours report as solid rock so
    * we do not emit a wall of faces at the loading frontier; those chunks are
@@ -127,7 +138,7 @@ export class World {
    * Writes a block, records it as a player edit, and marks affected chunks dirty.
    * Returns false if the target chunk is not loaded.
    */
-  setBlock(wx: number, wy: number, wz: number, id: number, record = true): boolean {
+  setBlock(wx: number, wy: number, wz: number, id: number, record = true, meta = 0): boolean {
     if (wy < 1 || wy >= CHUNK_SY) return false;
     const cx = wx >> 4;
     const cz = wz >> 4;
@@ -137,11 +148,12 @@ export class World {
     const lx = wx - cx * CHUNK_SX;
     const lz = wz - cz * CHUNK_SZ;
     const idx = voxelIndex(lx, wy, lz);
-    if (chunk.voxels[idx] === id) return false;
+    if (chunk.voxels[idx] === id && chunk.meta[idx] === meta) return false;
 
     const previous = chunk.voxels[idx];
     chunk.voxels[idx] = id;
-    if (record) chunk.recordEdit(lx, wy, lz, id);
+    chunk.meta[idx] = meta;
+    if (record) chunk.recordEdit(lx, wy, lz, id, meta);
 
     // Keep the light index in step with the world.
     if (isLightSource(previous) !== isLightSource(id)) {
@@ -169,6 +181,19 @@ export class World {
     if (onMaxX && onMinZ) this.markDirty(cx + 1, cz - 1);
     if (onMaxX && onMaxZ) this.markDirty(cx + 1, cz + 1);
     return true;
+  }
+
+  /**
+   * Toggles an interactive block's open bit, e.g. a door.
+   * Returns false when the target is not something that opens.
+   */
+  toggleBlock(wx: number, wy: number, wz: number): boolean {
+    const id = this.getBlock(wx, wy, wz);
+    if (!blockDef(id).interactive) return false;
+    const meta = this.getMeta(wx, wy, wz);
+    const next = metaIsOpen(meta) ? meta & ~META_OPEN : meta | META_OPEN;
+    // Force the write through: the id is unchanged, so pass the new meta.
+    return this.setBlock(wx, wy, wz, id, true, next);
   }
 
   private markDirty(cx: number, cz: number): void {
@@ -436,7 +461,7 @@ export class World {
     origin: THREE.Vector3,
     direction: THREE.Vector3,
     maxDistance: number,
-    hittable: (id: number) => boolean = isSolid,
+    hittable: (id: number) => boolean = isTargetable,
   ): RaycastHit | null {
     const dir = direction.clone().normalize();
     let x = Math.floor(origin.x);
@@ -511,7 +536,13 @@ export class World {
     return null;
   }
 
-  /** True when any solid voxel overlaps the given world-space box. */
+  /**
+   * True when any solid block geometry overlaps the given world-space box.
+   *
+   * Tests the block's actual shape boxes rather than assuming a full cube, which
+   * is what lets a slab be a half step, stairs be walkable, and an open door be a
+   * hole you can pass through.
+   */
   boxIntersectsSolid(
     minX: number,
     minY: number,
@@ -526,10 +557,30 @@ export class World {
     const y1 = Math.floor(maxY);
     const z0 = Math.floor(minZ);
     const z1 = Math.floor(maxZ);
+
     for (let y = y0; y <= y1; y++) {
       for (let z = z0; z <= z1; z++) {
         for (let x = x0; x <= x1; x++) {
-          if (isSolid(this.getBlock(x, y, z))) return true;
+          const id = this.getBlock(x, y, z);
+          if (!isSolid(id)) continue;
+
+          const def = blockDef(id);
+          // Fast path: ordinary cubes fill their voxel, so the voxel overlap we
+          // already established is the answer.
+          if (def.shape === 'cube') return true;
+
+          for (const shapeBox of blockCollisionBoxes(id, this.getMeta(x, y, z))) {
+            if (
+              maxX > x + shapeBox.min[0] &&
+              minX < x + shapeBox.max[0] &&
+              maxY > y + shapeBox.min[1] &&
+              minY < y + shapeBox.max[1] &&
+              maxZ > z + shapeBox.min[2] &&
+              minZ < z + shapeBox.max[2]
+            ) {
+              return true;
+            }
+          }
         }
       }
     }
@@ -544,7 +595,8 @@ export class World {
     for (const chunk of this.chunks.values()) {
       if (chunk.edits.size === 0) continue;
       const flat: number[] = [];
-      for (const [idx, id] of chunk.edits) flat.push(idx, id);
+      // Packed as (blockId | meta << 8) so the format stays two numbers per edit.
+      for (const [idx, packed] of chunk.edits) flat.push(idx, packed);
       out.push({ cx: chunk.cx, cz: chunk.cz, edits: flat });
     }
     return out;

@@ -196,12 +196,68 @@ await g(() => {
 await page.waitForTimeout(4000);
 await shot('dusk-vista');
 
+// ---------------------------------------------------------------- building
+
+await stage();
+await g(() => {
+  const game = window.__voxelquest;
+  game.debugSetTime('day');
+  game.debugSetWeather('clear');
+  game.debugGiveItem('block_stone_stairs', 60);
+  game.debugGiveItem('block_door', 8);
+  game.debugGiveItem('block_window', 20);
+  game.debugGiveItem('block_fence', 30);
+  game.debugGiveItem('block_shingles', 40);
+  game.debugGiveItem('block_plank_slab', 40);
+  game.debugBuildShowcase();
+});
+await page.waitForTimeout(3500);
+await shot('building-materials');
+
+// The build tool in hand, with its readout.
+await g(() => {
+  const game = window.__voxelquest;
+  game.debugSelectHotbarByItem('build_tool');
+  game.debugSetToolMode('wall');
+});
+await page.waitForTimeout(1200);
+await shot('build-tool');
+
+// ---------------------------------------------------------------- dungeon
+
+const wentUnderground = await g(() => window.__voxelquest.debugGoToDungeon());
+if (wentUnderground) {
+  await g(() => {
+    const game = window.__voxelquest;
+    game.debugSetTime('day');
+    game.debugEquip('longsword');
+    game.debugSelectHotbarByItem('longsword');
+    game.debugEquip('torch');
+  });
+  await page.waitForTimeout(5000);
+  await shot('dungeon-entrance');
+
+  // Drop into the first room.
+  await g(() => window.__voxelquest.debugDescendDungeon());
+  await page.waitForTimeout(4500);
+  await shot('dungeon-interior');
+}
+
 // ---------------------------------------------------------------- sheet
 
 await g(() => window.__voxelquest.debugSetTime('day'));
 await page.keyboard.press('Tab');
 await page.waitForTimeout(900);
 await shot('character-sheet');
+
+// The materials tab, which is where building actually happens from.
+await page.evaluate(() => {
+  const tabs = [...document.querySelectorAll('.bag-tab')];
+  const materials = tabs.find((t) => t.textContent.startsWith('Materials'));
+  materials?.click();
+});
+await page.waitForTimeout(600);
+await shot('character-sheet-materials');
 
 console.log('\nenvironment:', JSON.stringify(await g(() => window.__voxelquest.debugEnvironment())));
 await browser.close();

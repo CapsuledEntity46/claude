@@ -127,10 +127,38 @@ export interface ShieldDef {
   weight: number;
 }
 
-export type SpellKind = 'projectile' | 'nova' | 'chain' | 'heal' | 'ward' | 'meteor';
+export type SpellKind =
+  | 'projectile'
+  | 'nova'
+  | 'chain'
+  | 'heal'
+  | 'ward'
+  | 'meteor'
+  /** A held cone of flame that burns whatever it touches. */
+  | 'stream'
+  /** A continuous heal while the button is held. */
+  | 'channel';
 
 export interface SpellDef {
-  /** Spell slot tier consumed on cast. */
+  /**
+   * How the spell is paid for.
+   *
+   * Slot spells are the powerful, rationed ones. Mana spells are the everyday
+   * tools: weaker, but limited only by a pool you can refill from potions and
+   * from orbs that enemies drop.
+   */
+  cost: 'slot' | 'mana';
+  /** Mana consumed per cast, or per second for held spells. */
+  mana: number;
+  /** True for spells that are held down rather than cast once. */
+  sustained: boolean;
+  /** Damage over time applied on hit, per second. */
+  burn: number;
+  burnDuration: number;
+  /** Chance to stun on hit, 0..1. */
+  stunChance: number;
+  stunDuration: number;
+  /** Spell slot tier consumed on cast. Ignored by mana spells. */
   tier: 1 | 2 | 3;
   kind: SpellKind;
   damage: number;
@@ -156,6 +184,8 @@ export interface ConsumableDef {
   /** Restores one spell slot of this tier, if non-zero. */
   restoreTier: 0 | 1 | 2 | 3;
   stamina: number;
+  /** Mana restored. Mana has no passive regeneration, so this matters. */
+  mana?: number;
 }
 
 // ------------------------------------------------------------------ damage math

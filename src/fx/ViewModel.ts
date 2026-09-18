@@ -282,6 +282,8 @@ const REST_MAIN = new THREE.Vector3(0.29, -0.24, -0.6);
 const REST_OFFHAND = new THREE.Vector3(-0.36, -0.32, -0.56);
 /** Shrinks the whole rig without changing any individual mesh. */
 const HAND_SCALE = 0.82;
+/** Roughly where a blade's point sits, in the hand's local space. */
+const TIP_LOCAL = new THREE.Vector3(0, 0, -0.78);
 
 export class ViewModel {
   /** Rendered separately, after the world, with depth cleared. */
@@ -306,6 +308,13 @@ export class ViewModel {
   private walkClock = 0;
   private mineClock = 0;
   private idleClock = 0;
+  /**
+   * Which way the next horizontal swing travels: +1 for right-to-left, -1 for
+   * left-to-right. Alternating (with a random start) stops repeated attacks from
+   * looking like the same looping clip.
+   */
+  private swingDirection = 1;
+  private lastSwingPhase: ViewPhase = 'none';
   private recoil = 0;
   private lastShotCounter = 0;
   private readonly sway = new THREE.Vector2();
@@ -334,15 +343,25 @@ export class ViewModel {
 
   // ---------------------------------------------------------------- building
 
-  private visualFor(itemId: string | null): HeldVisual | null {
+  /**
+   * A built visual for an item, cached per *slot*.
+   *
+   * The cache key includes the slot because a THREE.Object3D can only have one
+   * parent. Sharing one cached group between the main hand and the off hand made
+   * each frame's `add()` silently detach it from the other hand, so an item that
+   * was both held and equipped — a torch, most obviously — flickered in and out
+   * and looked like it kept unequipping itself.
+   */
+  private visualFor(slot: 'main' | 'shield' | 'torch', itemId: string | null): HeldVisual | null {
     if (!itemId) return null;
-    const cached = this.cache.get(itemId);
+    const key = `${slot}:${itemId}`;
+    const cached = this.cache.get(key);
     if (cached) return cached;
 
     const def = tryItem(itemId);
     if (!def) return null;
     const visual = this.build(def);
-    this.cache.set(itemId, visual);
+    this.cache.set(key, visual);
     return visual;
   }
 
@@ -376,6 +395,15 @@ export class ViewModel {
       const size = def.id === 'tower_shield' ? 1.45 : def.id === 'iron_kite_shield' ? 1.18 : 1;
       group = shieldMesh(size);
       rest.rotation.set(0.05, 0.42, 0.08);
+    } else if (def.kind === 'tool') {
+      // A boxy sidearm silhouette, so it reads as a device rather than a weapon.
+      group = new THREE.Group();
+      group.add(box(0.07, 0.09, 0.26, MAT.darkIron, 0, 0.01, -0.06));
+      group.add(box(0.05, 0.05, 0.16, MAT.steel, 0, 0.05, -0.2));
+      group.add(box(0.05, 0.1, 0.06, MAT.gold, 0, 0.09, -0.02));
+      group.add(box(0.05, 0.12, 0.06, MAT.darkWood, 0, -0.07, 0.05));
+      group.add(hand(0, -0.05, 0.05));
+      rest.rotation.set(-0.05, 0.2, 0.05);
     } else if (def.kind === 'consumable' || def.kind === 'ammo' || def.kind === 'armor') {
       group = blockMesh(0xa08050);
       rest.rotation.set(-0.2, 0.4, 0);
@@ -450,6 +478,13 @@ export class ViewModel {
     );
     this.sway.lerp(this.swayTarget, Math.min(1, dt * 9));
 
+    // A new wind-up means a new attack: pick the other side, with a coin flip so
+    // it never settles into a strict left-right-left rhythm.
+    if (input.phase === 'windup' && this.lastSwingPhase !== 'windup') {
+      this.swingDirection = Math.random() < 0.62 ? -this.swingDirection : this.swingDirection;
+    }
+    this.lastSwingPhase = input.phase;
+
     if (input.shotCounter !== this.lastShotCounter) {
       this.lastShotCounter = input.shotCounter;
       this.recoil = 1;
@@ -471,24 +506,29 @@ export class ViewModel {
   }
 
   private swapHeld(input: ViewModelInput): void {
+    // When the torch is the item in your hand, do not also draw one in the off
+    // hand — you are holding the same torch.
+    const torchId = input.torchItemId === input.mainItemId ? null : input.torchItemId;
+    const shieldId = input.shieldItemId === input.mainItemId ? null : input.shieldItemId;
+
     if (input.mainItemId !== this.currentMainId) {
       if (this.currentMain) this.mainHand.remove(this.currentMain.group);
       this.currentMainId = input.mainItemId;
-      this.currentMain = this.visualFor(input.mainItemId);
+      this.currentMain = this.visualFor('main', input.mainItemId);
       if (this.currentMain) this.mainHand.add(this.currentMain.group);
     }
 
-    if (input.shieldItemId !== this.currentShieldId) {
+    if (shieldId !== this.currentShieldId) {
       if (this.currentShield) this.offHand.remove(this.currentShield.group);
-      this.currentShieldId = input.shieldItemId;
-      this.currentShield = this.visualFor(input.shieldItemId);
+      this.currentShieldId = shieldId;
+      this.currentShield = this.visualFor('shield', shieldId);
       if (this.currentShield) this.offHand.add(this.currentShield.group);
     }
 
-    if (input.torchItemId !== this.currentTorchId) {
+    if (torchId !== this.currentTorchId) {
       if (this.currentTorch) this.torchHand.remove(this.currentTorch.group);
-      this.currentTorchId = input.torchItemId;
-      this.currentTorch = this.visualFor(input.torchItemId);
+      this.currentTorchId = torchId;
+      this.currentTorch = this.visualFor('torch', torchId);
       if (this.currentTorch) this.torchHand.add(this.currentTorch.group);
     }
   }
@@ -519,43 +559,50 @@ export class ViewModel {
 
     switch (input.action) {
       case 'swing': {
-        // Wind up over the shoulder, then sweep down and across. The arc is the
-        // whole point: it should look like it could catch several enemies.
+        // A horizontal cut: the weapon is cocked back to one side, then sweeps
+        // across the screen through the target. Yaw carries the motion, so the
+        // arc is wide and lateral rather than a vertical chop — which is what
+        // makes it look capable of catching several enemies at once.
+        const side = this.swingDirection;
         if (input.phase === 'windup') {
           const t = easeOut(input.progress);
-          rz += t * 1.0;
-          rx += t * -0.85;
-          ox += t * 0.13;
-          oy += t * 0.16;
-          ry += t * -0.3;
+          ry += t * 1.05 * side;
+          ox += t * 0.16 * side;
+          rz += t * 0.42 * side;
+          rx += t * -0.22;
+          oy += t * 0.07;
         } else {
           const t = easeOut(input.progress);
-          rz += 1.0 - t * 2.35;
-          rx += -0.85 + t * 1.45;
-          ox += 0.13 - t * 0.42;
-          oy += 0.16 - t * 0.3;
-          ry += -0.3 + t * 0.5;
+          // Travel a long way past centre so the follow-through is visible.
+          ry += (1.05 - t * 2.15) * side;
+          ox += (0.16 - t * 0.42) * side;
+          rz += (0.42 - t * 0.95) * side;
+          rx += -0.22 + t * 0.3;
+          oy += 0.07 - t * 0.12;
         }
         break;
       }
 
       case 'thrust': {
-        // Draw back along the line of attack, then drive straight forward.
-        // Almost no roll, so it never reads as a swing.
+        // A vertical thrust: raise the point overhead, then drive it straight
+        // down the centre of the screen. Staying on the view axis is what keeps
+        // it visually distinct from the lateral swing.
         if (input.phase === 'windup') {
           const t = easeOut(input.progress);
-          oz += t * 0.2;
-          ox += t * -0.05;
-          rx += t * 0.12;
-          ry += t * 0.16;
+          oy += t * 0.2;
+          oz += t * 0.14;
+          ox += t * -0.12;
+          rx += t * -0.75;
+          ry += t * -0.34;
         } else {
-          // Fast extension in the first third, then a slower recovery.
+          // Snap out in the first third, then draw back more slowly.
           const t = input.progress;
-          const extend = t < 0.34 ? easeOut(t / 0.34) : 1 - easeInOut((t - 0.34) / 0.66);
-          oz += 0.2 - extend * 0.78;
-          ox += -0.05 - extend * 0.05;
-          rx += 0.12 - extend * 0.16;
-          ry += 0.16 - extend * 0.2;
+          const extend = t < 0.32 ? easeOut(t / 0.32) : 1 - easeInOut((t - 0.32) / 0.68);
+          oy += 0.2 - extend * 0.36;
+          oz += 0.14 - extend * 0.82;
+          ox += -0.12 + extend * 0.06;
+          rx += -0.75 + extend * 0.92;
+          ry += -0.34 + extend * 0.28;
         }
         break;
       }
@@ -723,6 +770,25 @@ export class ViewModel {
 
   get hasTorch(): boolean {
     return !!this.currentTorch;
+  }
+
+  /**
+   * World-space position of the held weapon's tip.
+   *
+   * The view model lives in camera space, so this transforms the tip out through
+   * the camera matrix. Used to trace the swing trail along the path the weapon
+   * visibly takes, instead of along a separately invented arc that would not
+   * match the animation.
+   */
+  weaponTipWorldPosition(cameraMatrix: THREE.Matrix4): THREE.Vector3 | null {
+    if (!this.currentMain) return null;
+    // The blade runs along -Z from the grip; a metre out covers every weapon here.
+    return TIP_LOCAL.clone().applyMatrix4(this.mainHand.matrixWorld).applyMatrix4(cameraMatrix);
+  }
+
+  /** Recomputes hand transforms so the tip position is current this frame. */
+  refreshMatrices(): void {
+    this.mainHand.updateMatrixWorld(true);
   }
 
   /**

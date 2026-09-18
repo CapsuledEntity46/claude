@@ -6,7 +6,7 @@ import type { Player } from '../player/Player';
 import type { World } from '../world/World';
 
 export type LogClass = 'hit' | 'crit' | 'hurt' | 'good' | 'info' | 'magic';
-export type FloaterClass = 'dmg' | 'crit' | 'hurt' | 'block' | 'xp' | 'heal';
+export type FloaterClass = 'dmg' | 'crit' | 'hurt' | 'block' | 'xp' | 'heal' | 'mana';
 
 export interface ProjectileRequest {
   origin: THREE.Vector3;
@@ -27,6 +27,9 @@ export interface ProjectileRequest {
   color?: number;
   /** Applies the frost slow on hit. */
   slow?: number;
+  /** Sets the target burning on hit: damage per second, and duration. */
+  burn?: number;
+  burnDuration?: number;
   sourceName: string;
 }
 

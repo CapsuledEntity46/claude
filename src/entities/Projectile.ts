@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import type { GameContext, ProjectileRequest } from '../core/Context';
 import { isSolid } from '../world/blocks';
 import type { Enemy } from './Enemy';
+import type { Trail } from '../fx/Trail';
 
 const WORLD_GRAVITY = 26;
 const MAX_LIFETIME = 8;
@@ -28,6 +29,9 @@ class Projectile {
 
   private trailTimer = 0;
   private readonly bouncy: boolean;
+  /** Ribbon trail handle, or -1 when this projectile has none. */
+  private trailHandle = -1;
+  private trails: Trail | null = null;
 
   constructor(req: ProjectileRequest, material: THREE.Material, geometry: THREE.BufferGeometry) {
     this.req = req;
@@ -40,10 +44,26 @@ class Projectile {
     this.mesh.position.copy(this.position);
   }
 
+  /** Attaches a ribbon trail, so fast projectiles are visible in flight. */
+  attachTrail(trails: Trail): void {
+    const look = this.req.look ?? 'arrow';
+    const style = TRAIL_STYLE[look];
+    if (!style) return;
+    this.trails = trails;
+    this.trailHandle = trails.spawn(this.req.color ?? style.color, style.width, 6);
+    if (this.trailHandle >= 0) trails.push(this.trailHandle, this.position);
+  }
+
+  private endTrail(): void {
+    if (this.trailHandle >= 0) this.trails?.release(this.trailHandle);
+    this.trailHandle = -1;
+  }
+
   update(dt: number, ctx: GameContext): void {
     this.life -= dt;
     if (this.life <= 0) {
       this.dead = true;
+      this.endTrail();
       return;
     }
 
@@ -66,7 +86,12 @@ class Projectile {
       this.step(stepDt, ctx);
     }
 
-    if (this.dead) return;
+    if (this.trailHandle >= 0) this.trails?.push(this.trailHandle, this.position);
+
+    if (this.dead) {
+      this.endTrail();
+      return;
+    }
 
     this.mesh.position.copy(this.position);
     // Point physical projectiles along their flight path; spin the magical ones.
@@ -179,6 +204,7 @@ class Projectile {
       this.req.knockback,
     );
     if (this.req.slow) enemy.applySlow(this.req.slow);
+    if (this.req.burn) enemy.applyBurn(this.req.burn, this.req.burnDuration ?? 3);
     this.dead = true;
   }
 
@@ -247,11 +273,12 @@ export class ProjectileManager {
     return this.spawned;
   }
 
-  spawn(req: ProjectileRequest): void {
+  spawn(req: ProjectileRequest, trails?: Trail): void {
     const look = req.look ?? 'arrow';
     const geometry = GEO[look];
     const material = this.material(look, req.color ?? defaultColor(look));
     const p = new Projectile(req, material, geometry);
+    if (trails) p.attachTrail(trails);
     this.spawned++;
     this.live.push(p);
     this.group.add(p.mesh);
@@ -286,6 +313,18 @@ export class ProjectileManager {
     this.live.length = 0;
   }
 }
+
+/**
+ * Trail appearance per projectile type. Arrows and bolts get a thin bright
+ * streak so you can read their flight; grenades get a fatter smoky one.
+ */
+const TRAIL_STYLE: Record<string, { color: number; width: number } | undefined> = {
+  arrow: { color: 0xf0e0b0, width: 0.1 },
+  bolt: { color: 0xd8dce4, width: 0.1 },
+  bullet: { color: 0xfff0c0, width: 0.07 },
+  grenade: { color: 0x9a8a78, width: 0.22 },
+  magic: { color: 0xc090ff, width: 0.26 },
+};
 
 function defaultColor(look: string): number {
   switch (look) {

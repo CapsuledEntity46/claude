@@ -1,0 +1,8 @@
+node_modules/
+dist/
+.vite/
+*.local
+.DS_Store
+
+# Screenshots produced by scripts/shots.mjs and scripts/ao-probe.mjs
+.kiro/artifacts/

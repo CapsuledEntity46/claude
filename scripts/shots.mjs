@@ -296,6 +296,17 @@ if (wentUnderground) {
   });
   await page.waitForTimeout(4500);
   await shot('dungeon-interior');
+
+  // And a wide view across the largest room, where the prop kit reads: columns,
+  // braziers, banners, sarcophagi. Standing in the middle of the room puts your face
+  // against the nearest piece of furniture instead.
+  await g(() => {
+    window.__voxelquest.debugSurveyDungeonRoom();
+    window.__voxelquest.debugRevive();
+  });
+  await page.waitForTimeout(4000);
+  await shot('dungeon-props');
+  console.log(`  props ${JSON.stringify(await g(() => window.__voxelquest.debugProps()))}`);
 }
 
 // ---------------------------------------------------------------- death burst

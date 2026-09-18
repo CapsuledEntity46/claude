@@ -1,5 +1,6 @@
 import { Block } from './blocks';
 import { CHUNK_SX, CHUNK_SY, CHUNK_SZ, type Chunk, voxelIndex } from './Chunk';
+import { dungeonPropVoxels } from './DungeonProps';
 import { hash2i, mulberry32 } from './noise';
 import { makeMeta } from './shapes';
 
@@ -89,7 +90,8 @@ export interface DungeonSpawn {
 }
 
 export class DungeonGenerator {
-  private readonly seed: number;
+  /** Exposed so prop placement can derive from the same seed the layout does. */
+  readonly seed: number;
   private cache = new Map<string, DungeonSite | null>();
   /**
    * Terrain height lookup.
@@ -282,7 +284,26 @@ export class DungeonGenerator {
     for (const site of sites) {
       for (const corridor of site.corridors) this.carveCorridor(chunk, baseX, baseZ, corridor);
       for (const room of site.rooms) this.carveRoom(chunk, baseX, baseZ, room, site);
+      // After the rooms, so these overwrite the air a room just opened rather than
+      // being erased by it.
+      this.placePropVoxels(chunk, baseX, baseZ, site);
       this.carveEntrance(chunk, baseX, baseZ, site);
+    }
+  }
+
+  /**
+   * Writes the voxels that props stand on.
+   *
+   * Props are drawn by fx/PropManager and carry no collision of their own, because
+   * physics only knows the voxel grid. So a column is decoration over a real brick
+   * column and a brazier is decoration over a real Glowstone block — solid, so you
+   * cannot walk through it, and emissive, so the world's light-source scan finds it
+   * without any further wiring. Both sides read the same placement code, so the
+   * decoration and the solid world cannot drift apart.
+   */
+  private placePropVoxels(chunk: Chunk, baseX: number, baseZ: number, site: DungeonSite): void {
+    for (const voxel of dungeonPropVoxels(site, this.seed)) {
+      this.setLocal(chunk, voxel.x - baseX, voxel.y, voxel.z - baseZ, voxel.block);
     }
   }
 

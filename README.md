@@ -165,6 +165,46 @@ Stair treads face *uphill*, so descending steps you down onto the low half of ea
 one. Facing them the other way — which is how they first shipped — puts a riser in
 front of every step and reads as a staircase built backwards.
 
+### The prop kit
+
+Rooms are furnished from a modular low-poly kit: standing braziers, fluted columns,
+voussoir archways over the corridors, stone sarcophagi in the vaults, hanging
+banners, barrels, rubble and bone piles. Columns come as a base, a stack of shafts
+and a capital so they reach any ceiling — a single fixed-height column scaled to fit
+drags its capital out of proportion with its shaft.
+
+**Props never carry collision.** Physics only knows the voxel grid, and teaching it
+about arbitrary prop geometry would be a large change for a decorative win. So props
+are decoration layered over voxels that already exist: a column is drawn over a real
+brick column, and a brazier over a real Glowstone block — solid, so you cannot walk
+through it, and emissive, so the world's existing light-source scan lights the room
+with no further wiring. Anything with no voxel behind it (rubble, bones, banners) is
+deliberately something you would expect to walk through or over.
+
+`world/DungeonProps.ts` is the single source of truth, read by both the renderer and
+the generator, so the decoration and the solid world cannot drift apart. Placement is
+a pure function of the site and the seed — the same rule the layout follows, for the
+same reason.
+
+They are drawn as one `InstancedMesh` per kind, rebuilt only when the set of nearby
+sites changes: 335 props in 10 draw calls in the smoke test. Self-lit pieces (flame,
+embers) are split into a separate unlit pass, because merging fire into the Lambert
+material makes it respond to light, which is backwards.
+
+Three mistakes in this, all found by looking at renders rather than test output:
+
+- **A clear-centre rule wider than the room.** Props avoid the middle of a room so
+  corridors can enter, but the exclusion was five tiles across and the *minimum* room
+  is 7×7, whose entire interior is that five-tile square. The commonest rooms in the
+  game came out completely bare. It is three tiles now, matching the corridor width.
+- **Decoration smaller than the block it decorates.** The column shaft had radius
+  0.38 and sat entirely inside the 1×1 voxel it was meant to dress, so it was
+  invisible. Anything decorating a full block has to be wider than 0.707 — the
+  distance to the block's corners — or bare brick shows through.
+- **Banners hung inside the wall.** A prop on a wall belongs on the wall's inner
+  *face*, not at the centre of the tile beside it; half a block of difference buried
+  the cloth in masonry.
+
 Layouts are generated per *site* from the world seed and the site's grid position,
 never from neighbouring chunks. That matters because chunks stream in an
 unpredictable order — a dungeon that depended on its neighbours already existing
@@ -313,8 +353,8 @@ src/
   player/      Physics and collision, stats and levelling, tabbed inventory
   combat/      Damage model, item registry, player actions, the build tool
   entities/    Enemy AI, fish, projectiles, orbs, loot tables
-  fx/          Low-poly item models, particles, view model, trails, rain, stars,
-               lights, cracks, arc
+  fx/          Low-poly item, creature and dungeon-prop models, particles,
+               view model, trails, rain, stars, sun and moon, lights, cracks, arc
   ui/          HUD, minimap and compass, character sheet, icon fallback
   save/        IndexedDB persistence
 scripts/       Tests: unit checks, headless smoke test, screenshots, diagnostics
@@ -445,7 +485,7 @@ Some notes on the parts that are less obvious than they look:
 ## Tests
 
 ```bash
-npm test            # typecheck + 208 unit checks
+npm test            # typecheck + 221 unit checks
 npm run test:unit   # damage model, mesher, terrain determinism, inventory
 npm run test:smoke  # boots the real build in headless Chromium and plays it
 ```

@@ -19,6 +19,7 @@ import {
   torchModel,
 } from '../src/fx/models';
 import { buildCreature } from '../src/fx/creatures';
+import { clearPropCache, dungeonPropVoxels, propsForSite } from '../src/world/DungeonProps';
 import { computeDamage, type DamageInput, type DefenseProfile } from '../src/combat/types';
 import { ARCHETYPES, FISH, pickArchetype } from '../src/entities/archetypes';
 import { Inventory } from '../src/player/Inventory';
@@ -1346,6 +1347,166 @@ section('enemy creature models');
     );
   }
 }
+
+
+
+section('dungeon prop kit');
+
+{
+  const gen = new TerrainGen(77123);
+  const site = gen.dungeons.sitesNear(-500, -500, 500, 500)[0];
+
+  if (!site) {
+    check('a dungeon site exists to furnish', false, 'no site in range');
+  } else {
+    clearPropCache();
+    const props = propsForSite(site, gen.dungeons.seed);
+    check('a dungeon gets furnished', props.length > 10, `${props.length} props`);
+
+    const kinds = new Set(props.map((p) => p.kind));
+    check('the kit uses most of its pieces', kinds.size >= 6, `${kinds.size} distinct kinds: ${[...kinds].join(', ')}`);
+
+    // Determinism, the same rule the layout follows. The cache is cleared first
+    // because otherwise the second call is answered from the first and this passes
+    // however non-deterministic the placement is.
+    clearPropCache();
+    const again = propsForSite(site, gen.dungeons.seed);
+    check(
+      'furnishing is deterministic for a seed',
+      JSON.stringify(again) === JSON.stringify(props),
+      `${again.length} props, identical`,
+    );
+
+    clearPropCache();
+    const otherSeed = propsForSite(site, gen.dungeons.seed ^ 0x5eed);
+    check(
+      'a different seed furnishes differently',
+      JSON.stringify(otherSeed) !== JSON.stringify(props),
+      'layouts differ',
+    );
+
+    // Nothing may sit inside masonry. A prop buried in a wall is invisible, which is
+    // exactly how the banners first shipped — placed half a block into the stonework
+    // instead of on its inner face.
+    const inRoomOrCorridor = (bx: number, bz: number): boolean => {
+      for (const room of site.rooms) {
+        if (bx >= room.x && bx <= room.x + room.width - 1 && bz >= room.z && bz <= room.z + room.depth - 1) return true;
+      }
+      for (const c of site.corridors) {
+        const alongX = c.x0 !== c.x1;
+        const lo = alongX ? Math.min(c.x0, c.x1) : Math.min(c.z0, c.z1);
+        const hi = alongX ? Math.max(c.x0, c.x1) : Math.max(c.z0, c.z1);
+        const fixed = alongX ? c.z0 : c.x0;
+        const along = alongX ? bx : bz;
+        const across = alongX ? bz : bx;
+        if (along >= lo && along <= hi && Math.abs(across - fixed) <= 1) return true;
+      }
+      return false;
+    };
+    const strays = props.filter((p) => !inRoomOrCorridor(Math.floor(p.x), Math.floor(p.z)));
+    check(
+      'no prop is buried in masonry',
+      strays.length === 0,
+      strays.length === 0 ? 'all inside rooms or corridors' : `${strays.length} stray, first ${JSON.stringify(strays[0])}`,
+    );
+
+    // Props stand on the floor, never sunk into it or floating above it.
+    const floors = new Set(site.rooms.map((r) => r.floorY).concat(site.corridors.map((c) => c.floorY)));
+    const offFloor = props.filter((p) => p.kind !== 'columnShaft' && p.kind !== 'columnCapital' && !floors.has(p.y));
+    check('props stand on a floor', offFloor.length === 0, `${offFloor.length} off-floor`);
+
+    // Columns are modular: a base, a continuous run of shafts, and a capital. A gap
+    // in the stack shows as a floating capital with daylight under it.
+    const columnStacks = new Map<string, number[]>();
+    for (const p of props) {
+      if (!p.kind.startsWith('column')) continue;
+      const key = `${Math.floor(p.x)},${Math.floor(p.z)}`;
+      const list = columnStacks.get(key) ?? [];
+      list.push(p.y);
+      columnStacks.set(key, list);
+    }
+    let contiguous = true;
+    for (const heights of columnStacks.values()) {
+      heights.sort((a, b) => a - b);
+      for (let i = 1; i < heights.length; i++) if (heights[i] !== heights[i - 1] + 1) contiguous = false;
+      if (heights.length < 3) contiguous = false;
+    }
+    check(
+      'columns stack without gaps',
+      columnStacks.size > 0 && contiguous,
+      `${columnStacks.size} columns, tallest ${Math.max(0, ...[...columnStacks.values()].map((h) => h.length))} blocks`,
+    );
+
+    // Every room worth fighting in gets its own light. A dungeon room with no light
+    // source is a black box, and the first threshold excluded the commonest rooms.
+    const braziers = props.filter((p) => p.kind === 'brazier');
+    const roomsWithBrazier = site.rooms.filter((room) =>
+      braziers.some(
+        (b) =>
+          Math.floor(b.x) >= room.x &&
+          Math.floor(b.x) <= room.x + room.width - 1 &&
+          Math.floor(b.z) >= room.z &&
+          Math.floor(b.z) <= room.z + room.depth - 1,
+      ),
+    );
+    const bigRooms = site.rooms.filter((r) => r.width * r.depth >= 40);
+    check(
+      'every room big enough to fight in has a brazier',
+      roomsWithBrazier.length >= bigRooms.length,
+      `${roomsWithBrazier.length} lit of ${site.rooms.length} rooms (${bigRooms.length} qualify)`,
+    );
+
+    // Props carry no collision of their own, so the ones you should not walk through
+    // must have a solid block written under them.
+    clearPropCache();
+    const voxels = dungeonPropVoxels(site, gen.dungeons.seed);
+    const brazierVoxels = voxels.filter((v) => v.block === Block.Torchstone);
+    check(
+      'every brazier has a block under it',
+      brazierVoxels.length === braziers.length,
+      `${brazierVoxels.length} blocks for ${braziers.length} braziers`,
+    );
+    check(
+      'a brazier block is solid, so you cannot walk through the brazier',
+      blockCollisionBoxes(Block.Torchstone, 0).length > 0,
+      'Glowstone collides',
+    );
+    check(
+      'a brazier block lights the room by itself',
+      isLightSource(Block.Torchstone),
+      'Glowstone is a light source, so no extra lighting wiring is needed',
+    );
+    const columnVoxels = voxels.filter((v) => v.block === Block.DungeonBrick);
+    check(
+      'every column block is solid',
+      columnVoxels.length > 0 && blockCollisionBoxes(Block.DungeonBrick, 0).length > 0,
+      `${columnVoxels.length} column blocks`,
+    );
+  }
+}
+
+// The generator must actually write those blocks into the chunk, or props stand on
+// nothing and braziers light nothing.
+check(
+  'prop blocks are carved into the world',
+  (() => {
+    const gen = new TerrainGen(77123);
+    const site = gen.dungeons.sitesNear(-500, -500, 500, 500)[0];
+    if (!site) return true;
+    clearPropCache();
+    const voxels = dungeonPropVoxels(site, gen.dungeons.seed);
+    if (voxels.length === 0) return false;
+
+    // Carve the chunk containing the first prop block and look for it.
+    const target = voxels[0];
+    const cx = target.x >> 4;
+    const cz = target.z >> 4;
+    const chunk = new Chunk(cx, cz);
+    gen.generate(chunk);
+    return chunk.get(target.x - cx * CHUNK_SX, target.y, target.z - cz * CHUNK_SZ) === target.block;
+  })(),
+  'the block a prop stands on is really there',
+);
 
 
 console.log(`\n${passed} passed, ${failures.length} failed`);

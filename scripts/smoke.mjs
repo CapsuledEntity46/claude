@@ -1095,6 +1095,26 @@ try {
     check('the dungeon is actually carved into the world', carved.airBelow > 30, JSON.stringify(carved));
     check('the dungeon is built from dungeon masonry', carved.masonry > 20, `${carved.masonry} brick blocks`);
     check('the dungeon is lit', carved.torches > 0, `${carved.torches} torches`);
+
+    // The prop kit: furniture has to be in the room you are standing in, not merely
+    // somewhere in the site. The first version placed hundreds of props across a
+    // dungeon and none in any room the player could reach, because the clear-centre
+    // rule was wider than the commonest room.
+    await page.evaluate(() => window.__voxelquest.debugSurveyDungeonRoom());
+    await page.waitForTimeout(1500);
+    const props = await page.evaluate(() => window.__voxelquest.debugProps());
+    check('the dungeon is furnished', props.total > 20, `${props.total} props across ${props.kinds} kinds`);
+    check(
+      'furniture is in the room the player is in',
+      props.nearPlayer > 0,
+      `${props.nearPlayer} props within 24 blocks`,
+    );
+    check(
+      'props are instanced rather than drawn one by one',
+      props.drawCalls <= 24 && props.total > props.drawCalls,
+      `${props.total} props in ${props.drawCalls} draw calls`,
+    );
+    check('no prop kind overflowed its instance budget', props.overflowed === false, `overflowed ${props.overflowed}`);
   } else {
     console.log('  note  no dungeon within range; skipping carve checks');
   }

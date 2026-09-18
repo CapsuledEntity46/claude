@@ -11,13 +11,13 @@ const GRAVITY = 22;
 
 const GEO = {
   /** The bright core, suspended inside the bubble. */
-  orb: new THREE.OctahedronGeometry(0.075, 0),
+  orb: new THREE.OctahedronGeometry(0.088, 0),
   /** The surrounding bubble shell. */
   bubble: new THREE.IcosahedronGeometry(0.17, 1),
   loot: new THREE.BoxGeometry(0.26, 0.26, 0.26),
 };
 
-const ORB_MATERIAL = new THREE.MeshBasicMaterial({ color: 0xf0dcff });
+const ORB_MATERIAL = new THREE.MeshBasicMaterial({ color: 0xb463ff });
 
 /**
  * The bubble shell around an orb.
@@ -25,22 +25,27 @@ const ORB_MATERIAL = new THREE.MeshBasicMaterial({ color: 0xf0dcff });
  * Additive and back-face rendered so it reads as a thin film of light with the
  * core showing through, rather than an opaque ball hiding it.
  */
+/**
+ * The bubble shell.
+ *
+ * Normal blending at low opacity, not additive: an additive shell plus an
+ * additive halo saturated to white and the core inside became invisible. Drawing
+ * only the far side gives a rim of film you read through.
+ */
 const BUBBLE_MATERIAL = new THREE.MeshBasicMaterial({
-  color: 0x9a68e0,
+  color: 0x8f5fd8,
   transparent: true,
-  opacity: 0.42,
-  blending: THREE.AdditiveBlending,
+  opacity: 0.3,
   depthWrite: false,
   side: THREE.BackSide,
 });
 
 /** Mana orbs are blue, so the two currencies are never confused mid-fight. */
-const MANA_CORE_MATERIAL = new THREE.MeshBasicMaterial({ color: 0xd8f0ff });
+const MANA_CORE_MATERIAL = new THREE.MeshBasicMaterial({ color: 0x49b0ff });
 const MANA_BUBBLE_MATERIAL = new THREE.MeshBasicMaterial({
   color: 0x3f8fe0,
   transparent: true,
-  opacity: 0.42,
-  blending: THREE.AdditiveBlending,
+  opacity: 0.3,
   depthWrite: false,
   side: THREE.BackSide,
 });
@@ -58,11 +63,13 @@ function makeGlowTexture(): THREE.Texture {
   canvas.width = size;
   canvas.height = size;
   const ctx = canvas.getContext('2d')!;
+  // Hollow in the middle on purpose: the halo is an outer glow, so it must not
+  // paint over the core and shell it is supposed to be surrounding.
   const gradient = ctx.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2);
-  gradient.addColorStop(0, 'rgba(255, 255, 255, 1)');
-  gradient.addColorStop(0.25, 'rgba(220, 170, 255, 0.75)');
-  gradient.addColorStop(0.6, 'rgba(160, 90, 240, 0.22)');
-  gradient.addColorStop(1, 'rgba(120, 60, 200, 0)');
+  gradient.addColorStop(0, 'rgba(190, 140, 255, 0.16)');
+  gradient.addColorStop(0.42, 'rgba(170, 110, 245, 0.2)');
+  gradient.addColorStop(0.7, 'rgba(140, 80, 225, 0.1)');
+  gradient.addColorStop(1, 'rgba(110, 55, 190, 0)');
   ctx.fillStyle = gradient;
   ctx.fillRect(0, 0, size, size);
   const texture = new THREE.CanvasTexture(canvas);
@@ -146,7 +153,7 @@ class ExpOrb extends Pickup {
     this.mesh.add(this.bubble);
 
     this.halo = new THREE.Mesh(GLOW_GEOMETRY, GLOW_MATERIAL);
-    this.halo.scale.setScalar(0.95);
+    this.halo.scale.setScalar(0.62);
     this.halo.position.copy(position);
 
     // Pop upward and outward so a kill sprays orbs rather than dropping a pile.
@@ -187,7 +194,7 @@ class ExpOrb extends Pickup {
 
     this.halo.position.copy(this.mesh.position);
     const pulse = 0.85 + Math.sin(this.bob * 1.7) * 0.18;
-    this.halo.scale.setScalar(0.95 * pulse);
+    this.halo.scale.setScalar(0.62 * pulse);
 
     // The bubble wobbles independently of the core spinning inside it.
     this.bubble.scale.setScalar(0.92 + Math.sin(this.bob * 2.3) * 0.1);
@@ -196,14 +203,14 @@ class ExpOrb extends Pickup {
     // A slow drizzle of motes, so orbs are visible in peripheral vision.
     this.trailTimer -= dt;
     if (this.trailTimer <= 0) {
-      this.trailTimer = 0.09 + Math.random() * 0.08;
+      this.trailTimer = 0.16 + Math.random() * 0.12;
       ctx.particles.spawn(
         this.mesh.position.clone(),
         new THREE.Vector3((Math.random() - 0.5) * 0.5, 0.3 + Math.random() * 0.4, (Math.random() - 0.5) * 0.5),
         {
           color: this.kind === 'mana' ? 0x8fd0ff : 0xc79cff,
-          size: 0.05,
-          life: 0.5,
+          size: 0.035,
+          life: 0.45,
           gravity: -1.6,
           drag: 1.8,
         },

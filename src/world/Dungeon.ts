@@ -1,7 +1,7 @@
 import { Block } from './blocks';
 import { CHUNK_SX, CHUNK_SY, CHUNK_SZ, type Chunk, voxelIndex } from './Chunk';
 import { hash2i, mulberry32 } from './noise';
-import { facingFromYaw, makeMeta } from './shapes';
+import { makeMeta } from './shapes';
 
 /**
  * Procedural dungeons, carved underground.
@@ -60,9 +60,14 @@ export interface DungeonSite {
   /** Grid coordinates of the site. */
   gx: number;
   gz: number;
-  /** Centre of the entrance shaft, in world blocks. */
+  /** Mouth of the entrance stairway, at ground level. */
   entranceX: number;
   entranceZ: number;
+  /** Ground height at the mouth. */
+  entranceY: number;
+  /** Direction the stairway runs as it descends, as a unit cardinal. */
+  entranceDirX: number;
+  entranceDirZ: number;
   /** Floor level of the top layer of rooms. */
   topY: number;
   rooms: DungeonRoom[];
@@ -86,9 +91,20 @@ export interface DungeonSpawn {
 export class DungeonGenerator {
   private readonly seed: number;
   private cache = new Map<string, DungeonSite | null>();
+  /**
+   * Terrain height lookup.
+   *
+   * Dungeon depth has to be measured from the actual ground, not from a fixed
+   * altitude. The first version placed rooms at y 16-23 and ran the entrance a
+   * fixed 34 blocks upward, so wherever the terrain happened to sit lower than
+   * that, the entrance walls stood above the landscape as a hollow tower with no
+   * way in — which is exactly what turned up in play.
+   */
+  private readonly surfaceAt: (x: number, z: number) => number;
 
-  constructor(seed: number) {
+  constructor(seed: number, surfaceAt: (x: number, z: number) => number) {
     this.seed = seed | 0;
+    this.surfaceAt = surfaceAt;
   }
 
   /** The site occupying a grid cell, or null if that cell is empty. */
@@ -144,7 +160,21 @@ export class DungeonGenerator {
 
     const originX = gx * SITE_SPACING + Math.floor(rand() * 40) - 20;
     const originZ = gz * SITE_SPACING + Math.floor(rand() * 40) - 20;
-    const topY = 16 + Math.floor(rand() * 8);
+
+    // Sit the top room a sensible distance below whatever ground is actually
+    // there, and never so shallow that carving it would breach the surface.
+    const groundY = this.surfaceAt(originX, originZ);
+    const desiredDepth = 12 + Math.floor(rand() * 8);
+    const topY = Math.max(MIN_FLOOR_Y, Math.min(groundY - 9, groundY - desiredDepth));
+
+    // The stairway runs in from one cardinal direction, descending as it goes.
+    const directions = [
+      [1, 0],
+      [-1, 0],
+      [0, 1],
+      [0, -1],
+    ] as const;
+    const [dirX, dirZ] = directions[Math.floor(rand() * 4)];
 
     const rooms: DungeonRoom[] = [];
     const corridors: DungeonCorridor[] = [];
@@ -208,11 +238,25 @@ export class DungeonGenerator {
       maxZ = Math.max(maxZ, Math.max(c.z0, c.z1) + CORRIDOR_WIDTH);
     }
 
+    // The mouth sits far enough out that a one-block-per-block descent reaches
+    // the room floor exactly, plus a little clearance through the room wall.
+    const descent = Math.max(4, groundY - topY);
+    const mouthX = originX + dirX * (descent + 5);
+    const mouthZ = originZ + dirZ * (descent + 5);
+
+    minX = Math.min(minX, Math.min(originX, mouthX) - 3);
+    maxX = Math.max(maxX, Math.max(originX, mouthX) + 3);
+    minZ = Math.min(minZ, Math.min(originZ, mouthZ) - 3);
+    maxZ = Math.max(maxZ, Math.max(originZ, mouthZ) + 3);
+
     return {
       gx,
       gz,
-      entranceX: originX,
-      entranceZ: originZ,
+      entranceX: mouthX,
+      entranceZ: mouthZ,
+      entranceY: this.surfaceAt(mouthX, mouthZ),
+      entranceDirX: dirX,
+      entranceDirZ: dirZ,
       topY,
       rooms,
       corridors,
@@ -370,41 +414,100 @@ export class DungeonGenerator {
   }
 
   /**
-   * A stair shaft from the surface down to the top room.
+   * A stairway cut down from the surface to the top room.
    *
-   * Without a visible way in, a dungeon is something you only ever find by
-   * accident while mining, which wastes the whole feature.
+   * A descending tunnel rather than a vertical shaft. The previous version ran a
+   * fixed height straight up from the rooms, which meant it either stopped short
+   * of the surface or — far more often — stood proud of it as a hollow tower, and
+   * its one-stair-per-level spiral was not walkable in either direction.
+   *
+   * Here the floor drops exactly one block per block travelled, which the player's
+   * step assist handles in both directions, and the whole thing terminates at the
+   * ground with a raised frame so it is findable from a distance.
    */
   private carveEntrance(chunk: Chunk, baseX: number, baseZ: number, site: DungeonSite): void {
-    const cx = site.entranceX;
-    const cz = site.entranceZ;
-    const lx = cx - baseX;
-    const lz = cz - baseZ;
-    // The shaft is 4x4 including walls, so reject early if it cannot touch us.
-    if (lx < -3 || lx > CHUNK_SX + 3 || lz < -3 || lz > CHUNK_SZ + 3) return;
+    const dirX = site.entranceDirX;
+    const dirZ = site.entranceDirZ;
+    // Perpendicular, for the tunnel's width.
+    const sideX = dirZ;
+    const sideZ = -dirX;
 
-    const topOfShaft = Math.min(CHUNK_SY - 4, site.topY + 34);
+    const halfWidth = 1; // 3 wide inside
+    const headroom = 4;
+    const steps = site.entranceY - site.topY;
 
-    for (let y = site.topY; y <= topOfShaft; y++) {
-      for (let dz = -2; dz <= 2; dz++) {
-        for (let dx = -2; dx <= 2; dx++) {
-          const wallRing = Math.abs(dx) === 2 || Math.abs(dz) === 2;
-          const target = wallRing ? this.wallBlock(cx + dx, y, cz + dz) : Block.Air;
-          this.setLocal(chunk, lx + dx, y, lz + dz, target);
+    for (let i = 0; i <= steps + 5; i++) {
+      const floorY = site.entranceY - i;
+      if (floorY < site.topY) break;
+
+      // Walk inwards from the mouth towards the rooms.
+      const cx = site.entranceX - dirX * i;
+      const cz = site.entranceZ - dirZ * i;
+
+      // Reject early if this slice cannot touch the chunk at all.
+      const lxc = cx - baseX;
+      const lzc = cz - baseZ;
+      if (lxc < -3 || lxc > CHUNK_SX + 3 || lzc < -3 || lzc > CHUNK_SZ + 3) continue;
+
+      for (let across = -halfWidth - 1; across <= halfWidth + 1; across++) {
+        const wx = cx + sideX * across;
+        const wz = cz + sideZ * across;
+        const lx = wx - baseX;
+        const lz = wz - baseZ;
+        const isWall = Math.abs(across) > halfWidth;
+
+        // Floor beneath, and a lid overhead once we are underground.
+        this.setLocal(chunk, lx, floorY - 1, lz, this.wallBlock(wx, floorY - 1, wz));
+        if (i > 0) {
+          this.setLocal(chunk, lx, floorY + headroom, lz, this.wallBlock(wx, floorY + headroom, wz));
+        }
+
+        for (let y = floorY; y < floorY + headroom; y++) {
+          if (isWall) this.setLocal(chunk, lx, y, lz, this.wallBlock(wx, y, wz));
+          else this.setLocal(chunk, lx, y, lz, Block.Air);
+        }
+
+        // Clear anything left standing above the mouth, so no tower remains.
+        if (i === 0) {
+          for (let y = floorY + headroom; y < Math.min(CHUNK_SY, floorY + headroom + 8); y++) {
+            this.setLocal(chunk, lx, y, lz, Block.Air);
+          }
         }
       }
 
-      // A spiral of steps hugging the shaft wall.
-      const step = (y - site.topY) % 4;
-      const [sx, sz] = [
-        [1, 0],
-        [0, 1],
-        [-1, 0],
-        [0, -1],
-      ][step] as [number, number];
-      this.setLocal(chunk, lx + sx, y, lz + sz, Block.StoneStairs, makeMeta(facingFromYaw(step * (Math.PI / 2))));
+      // A stair block on the descent, so the slope reads as steps.
+      if (i > 0 && floorY > site.topY) {
+        const stairFacing = facingFromDelta(-dirX, -dirZ);
+        for (let across = -halfWidth; across <= halfWidth; across++) {
+          const wx = cx + sideX * across;
+          const wz = cz + sideZ * across;
+          this.setLocal(chunk, wx - baseX, floorY, wz - baseZ, Block.StoneStairs, makeMeta(stairFacing));
+        }
+      }
 
-      if (y % 6 === 0) this.setLocal(chunk, lx, y + 2, lz, Block.Torch);
+      // Lit every few steps so the way back out is obvious.
+      if (i % 5 === 2) {
+        this.setLocal(chunk, cx - baseX + sideX * halfWidth, floorY + 2, cz - baseZ + sideZ * halfWidth, Block.Torch);
+      }
+    }
+
+    // A raised frame around the mouth: this is the landmark players look for.
+    for (let across = -halfWidth - 1; across <= halfWidth + 1; across++) {
+      for (let along = -1; along <= 1; along++) {
+        const wx = site.entranceX + sideX * across + dirX * along;
+        const wz = site.entranceZ + sideZ * across + dirZ * along;
+        const onRim = Math.abs(across) > halfWidth || along === -1;
+        if (!onRim) continue;
+        for (let y = site.entranceY; y < site.entranceY + 2; y++) {
+          this.setLocal(chunk, wx - baseX, y, wz - baseZ, this.wallBlock(wx, y, wz));
+        }
+      }
+    }
+    // Two torches on the rim, visible from the surface at night.
+    for (const side of [-halfWidth - 1, halfWidth + 1]) {
+      const wx = site.entranceX + sideX * side;
+      const wz = site.entranceZ + sideZ * side;
+      this.setLocal(chunk, wx - baseX, site.entranceY + 2, wz - baseZ, Block.Torch);
     }
   }
 
@@ -449,6 +552,12 @@ export class DungeonGenerator {
     }
     return false;
   }
+}
+
+/** Facing value for a cardinal delta, matching the shapes module's convention. */
+function facingFromDelta(dx: number, dz: number): 0 | 1 | 2 | 3 {
+  if (Math.abs(dx) > Math.abs(dz)) return dx > 0 ? 1 : 3;
+  return dz > 0 ? 2 : 0;
 }
 
 export { SITE_SPACING };

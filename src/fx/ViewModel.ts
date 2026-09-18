@@ -284,6 +284,12 @@ const REST_OFFHAND = new THREE.Vector3(-0.36, -0.32, -0.56);
 const HAND_SCALE = 0.82;
 /** Roughly where a blade's point sits, in the hand's local space. */
 const TIP_LOCAL = new THREE.Vector3(0, 0, -0.78);
+/** Half-angle of the swing arc, in radians. Wide enough to cross the whole view. */
+const SWING_ARC = 1.9;
+const SWING_RADIUS_X = 0.4;
+const SWING_RADIUS_Y = 0.3;
+/** How far the arc's anchor is pulled towards screen centre while swinging. */
+const SWING_RECENTRE = 0.62;
 
 export class ViewModel {
   /** Rendered separately, after the world, with depth cleared. */
@@ -315,6 +321,8 @@ export class ViewModel {
    */
   private swingDirection = 1;
   private lastSwingPhase: ViewPhase = 'none';
+  /** Distance the weapon is driven along its own axis, for thrusts. */
+  private thrustExtension = 0;
   private recoil = 0;
   private lastShotCounter = 0;
   private readonly sway = new THREE.Vector2();
@@ -495,6 +503,7 @@ export class ViewModel {
     const blockTarget = input.blocking ? 1 : 0;
     this.blockAmount += (blockTarget - this.blockAmount) * Math.min(1, dt * 12);
 
+    this.thrustExtension = 0;
     this.poseMainHand(input);
     this.poseOffHand();
     this.poseTorchHand(input);
@@ -559,50 +568,59 @@ export class ViewModel {
 
     switch (input.action) {
       case 'swing': {
-        // A horizontal cut: the weapon is cocked back to one side, then sweeps
-        // across the screen through the target. Yaw carries the motion, so the
-        // arc is wide and lateral rather than a vertical chop — which is what
-        // makes it look capable of catching several enemies at once.
+        // An over-the-top arc. The hand travels a circular path in screen space:
+        // low on one side, up across the top of the view, and down the other. The
+        // blade rolls with the arc so the edge always leads.
+        //
+        // Driving position along a circle (rather than nudging a few offsets)
+        // is what makes it read as a sweep instead of the weapon jittering — the
+        // earlier version moved so little, so fast, that it looked like the camera
+        // was glitching rather than the sword travelling anywhere.
         const side = this.swingDirection;
-        if (input.phase === 'windup') {
-          const t = easeOut(input.progress);
-          ry += t * 1.05 * side;
-          ox += t * 0.16 * side;
-          rz += t * 0.42 * side;
-          rx += t * -0.22;
-          oy += t * 0.07;
-        } else {
-          const t = easeOut(input.progress);
-          // Travel a long way past centre so the follow-through is visible.
-          ry += (1.05 - t * 2.15) * side;
-          ox += (0.16 - t * 0.42) * side;
-          rz += (0.42 - t * 0.95) * side;
-          rx += -0.22 + t * 0.3;
-          oy += 0.07 - t * 0.12;
+        const swinging = input.phase !== 'windup';
+        const t = swinging ? easeInOut(input.progress) : 0;
+        // Sweep the arc angle from one extreme to the other.
+        const angle = (-SWING_ARC + 2 * SWING_ARC * t) * side;
+
+        // Recentre while swinging. The hand rests well off to the right, so an arc
+        // drawn around that rest point runs the blade off the edge of the screen at
+        // one extreme and barely leaves centre at the other. Easing the anchor
+        // towards the middle keeps the whole sweep visible and symmetric.
+        const centring = swinging ? 1 : easeOut(input.progress);
+        ox -= px * SWING_RECENTRE * centring;
+
+        ox += Math.sin(angle) * SWING_RADIUS_X;
+        oy += Math.cos(angle) * SWING_RADIUS_Y - SWING_RADIUS_Y * 0.3;
+        oz += Math.sin(Math.abs(angle)) * -0.05;
+        rz += -angle * 0.85;
+        ry += -Math.sin(angle) * 0.5;
+        rx += Math.cos(angle) * 0.5;
+
+        if (!swinging) {
+          // Cock back towards the start of the arc and load up.
+          const w = easeOut(input.progress);
+          oz += w * 0.12;
+          oy += w * -0.03;
         }
         break;
       }
 
       case 'thrust': {
-        // A vertical thrust: raise the point overhead, then drive it straight
-        // down the centre of the screen. Staying on the view axis is what keeps
-        // it visually distinct from the lateral swing.
+        // Straight along the blade. The extension is applied after the rotation,
+        // as a translation down the hand's own -Z axis, so the sword slides along
+        // its length exactly as it points rather than drifting off at an angle.
         if (input.phase === 'windup') {
-          const t = easeOut(input.progress);
-          oy += t * 0.2;
-          oz += t * 0.14;
-          ox += t * -0.12;
-          rx += t * -0.75;
-          ry += t * -0.34;
+          const w = easeOut(input.progress);
+          this.thrustExtension = -w * 0.16;
+          rx += w * -0.1;
+          oy += w * 0.03;
         } else {
-          // Snap out in the first third, then draw back more slowly.
           const t = input.progress;
-          const extend = t < 0.32 ? easeOut(t / 0.32) : 1 - easeInOut((t - 0.32) / 0.68);
-          oy += 0.2 - extend * 0.36;
-          oz += 0.14 - extend * 0.82;
-          ox += -0.12 + extend * 0.06;
-          rx += -0.75 + extend * 0.92;
-          ry += -0.34 + extend * 0.28;
+          // Snap out fast, draw back slower.
+          const extend = t < 0.3 ? easeOut(t / 0.3) : 1 - easeInOut((t - 0.3) / 0.7);
+          this.thrustExtension = -0.16 + extend * 0.72;
+          rx += -0.1 + extend * 0.14;
+          oy += 0.03 - extend * 0.05;
         }
         break;
       }
@@ -689,6 +707,10 @@ export class ViewModel {
 
     this.mainHand.position.set(px + ox + this.sway.x, py + oy + this.sway.y, pz + oz);
     this.mainHand.rotation.set(rest.rotation.x + rx, rest.rotation.y + ry, rest.rotation.z + rz);
+
+    // Translate along the weapon's own forward axis. Done here, after the rotation
+    // is final, so a thrust follows wherever the blade is actually pointing.
+    if (this.thrustExtension !== 0) this.mainHand.translateZ(-this.thrustExtension);
 
     // In thrust mode the weapon is levelled along the line of attack; in swing
     // mode it is carried angled, so the stance reads before you even attack.

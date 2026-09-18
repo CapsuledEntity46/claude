@@ -576,8 +576,10 @@ export class CombatSystem {
     this.stateDuration = attack.windup;
     this.timer = attack.windup;
 
-    // Pull the view back slightly during the wind-up, then snap forward on hit.
-    ctx.player.viewKick.y += attack.mode === 'swing' ? 0.035 : 0.012;
+    // Deliberately no camera kick here. Moving the camera during a melee attack
+    // reads as the view glitching or clipping rather than as the weapon swinging;
+    // all of the motion belongs to the weapon itself. Recoil remains on firearms,
+    // where a shove is exactly what the player expects.
   }
 
   private resolveMelee(ctx: GameContext): void {
@@ -635,8 +637,6 @@ export class CombatSystem {
     }
 
     if (hits.length > 0) {
-      ctx.player.viewKick.y -= 0.05;
-      ctx.player.viewKick.x += (this.rng() - 0.5) * 0.04;
       ctx.particles.cone(
         eye.clone().addScaledVector(look, 1.2),
         look,

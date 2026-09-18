@@ -48,13 +48,24 @@ const CORNERS: readonly (readonly [number, number])[] = [
 /**
  * Brightness for AO levels 0..3 (0 = most enclosed).
  *
- * Kept deliberately gentle. A steeper ramp (0.42 at the darkest) looks correct on
- * a single test cube but is far too strong on real terrain: voxel landscapes are
- * full of one-block steps, every inside corner drives a vertex to the darkest
- * level, and the value then interpolates across the whole quad — producing hard
- * dark wedges across open ground instead of soft contact shading.
+ * A balance found by trial: a very steep ramp (0.42 at the darkest) produces hard
+ * dark wedges across open ground, because voxel terrain is full of one-block steps
+ * whose inside corners drive a vertex to the darkest level and then interpolate it
+ * across a whole quad. Too gentle a ramp and corners stop reading at all. This
+ * sits between the two.
  */
-const AO_SHADE = [0.62, 0.78, 0.9, 1.0];
+const AO_SHADE = [0.5, 0.7, 0.87, 1.0];
+
+/**
+ * Baked per-face brightness, indexed to match FACES: +X, -X, +Y, -Y, +Z, -Z.
+ *
+ * Cube faces used to be differentiated only by the dynamic directional light,
+ * which meant that once the sun went down every face of every block received
+ * almost the same value and the world flattened into silhouettes. Baking a fixed
+ * light direction into the vertex colours keeps top, side, and underside legible
+ * at any hour, independent of the lighting.
+ */
+const CUBE_FACE_SHADE = [0.78, 0.7, 1.0, 0.45, 0.88, 0.82];
 
 /** Blocks drawn in the translucent pass instead of the opaque one. */
 function isTranslucent(id: number): boolean {
@@ -91,9 +102,6 @@ export interface MeshResult {
   translucent: THREE.BufferGeometry | null;
 }
 
-/** Flat brightness per face direction, used for non-cube shapes. */
-const FACE_SHADE = [0.86, 0.86, 1.0, 0.62, 0.93, 0.93];
-
 /**
  * Emits every box of a shaped block.
  *
@@ -120,7 +128,7 @@ function emitShape(buf: Buffers, x: number, y: number, z: number, def: BlockDef,
       const [ux, uy, uz] = face.u;
       const [vx, vy, vz] = face.v;
       const tint = def[face.tint];
-      const shade = FACE_SHADE[f];
+      const shade = CUBE_FACE_SHADE[f];
       const start = buf.pos.length / 3;
 
       for (const [a, b] of CORNERS) {
@@ -189,7 +197,8 @@ export function meshChunk(chunk: Chunk, neighbor: NeighborLookup): MeshResult {
           continue;
         }
 
-        for (const face of FACES) {
+        for (let faceIndex = 0; faceIndex < FACES.length; faceIndex++) {
+          const face = FACES[faceIndex];
           const [nx, ny, nz] = face.n;
           const ax = x + nx;
           const ay = y + ny;
@@ -202,6 +211,7 @@ export function meshChunk(chunk: Chunk, neighbor: NeighborLookup): MeshResult {
 
           const tint = def[face.tint];
           const emissive = def.emissive ?? 0;
+          const faceShade = CUBE_FACE_SHADE[faceIndex];
 
           const [ox, oy, oz] = face.o;
           const [ux, uy, uz] = face.u;
@@ -223,7 +233,8 @@ export function meshChunk(chunk: Chunk, neighbor: NeighborLookup): MeshResult {
             const ao = s1 === 1 && s2 === 1 ? 0 : 3 - (s1 + s2 + cn);
             aoLevels[c] = ao;
 
-            const shade = AO_SHADE[ao];
+            // Ambient occlusion at the corner, times the face's baked brightness.
+            const shade = AO_SHADE[ao] * faceShade;
             buf.pos.push(x + ox + ux * a + vx * b, y + oy + uy * a + vy * b, z + oz + uz * a + vz * b);
             buf.norm.push(nx, ny, nz);
             buf.col.push(

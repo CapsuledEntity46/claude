@@ -147,13 +147,21 @@ into your own build.
 
 Stone complexes are cut into the rock across the world: connected rooms, corridors,
 wall torches, rubble, and a vault at the end holding the best loot and a guard
-several levels above you. A spiral stair shaft leads down from the surface, and the
-compass carries a pip for the nearest entrance.
+several levels above you.
+
+Look for a **lit stone frame at ground level** — two torches on the rim make it
+visible at night. Inside, a stairway descends one block per step down to the first
+room. The compass carries a pip for the nearest entrance.
 
 Layouts are generated per *site* from the world seed and the site's grid position,
 never from neighbouring chunks. That matters because chunks stream in an
 unpredictable order — a dungeon that depended on its neighbours already existing
 would come out differently every time you approached it from a new direction.
+
+Depth is measured from the terrain above, not from a fixed altitude. An earlier
+version put rooms at a fixed y and ran the entrance a fixed height upward, so
+wherever the ground happened to sit lower it stood proud of the landscape as a
+hollow tower with no way in.
 
 ## Day, night, and weather
 
@@ -220,6 +228,28 @@ src/
 scripts/       Tests: unit checks, headless smoke test, screenshots, diagnostics
 ```
 
+### How the world is shaded
+
+There is no texture atlas and no shadow map. The look comes from three things
+working together, and it is worth knowing which does what:
+
+1. **Baked per-face brightness.** Every face gets a fixed multiplier by direction
+   — tops brightest, undersides darkest, sides between — written straight into the
+   vertex colours. This is what keeps a cube legible as a cube. Relying on the
+   dynamic light for it does not work: once the sun sets, every face receives
+   almost the same value and the world flattens into silhouettes.
+2. **Per-vertex ambient occlusion** at corners and edges, sampled from the eight
+   voxels around each vertex. This is what gives contact shading where blocks
+   meet. The ramp depth is a genuine trade-off — too steep and one-block terrain
+   steps produce hard dark wedges across open ground, too shallow and corners stop
+   reading at all.
+3. **Distance fog**, tinted and pulled in by the time of day and the weather. It
+   hides the chunk-streaming frontier and does most of the work of making the world
+   feel large.
+
+On top of that sits ordinary directional and hemisphere lighting for the
+time-of-day colour shift, and a small pool of point lights for torches.
+
 Some notes on the parts that are less obvious than they look:
 
 - **The mesher** emits one quad per exposed face and bakes per-vertex ambient
@@ -259,6 +289,14 @@ Some notes on the parts that are less obvious than they look:
   hiding the faces behind it would let you see through the gaps around it.
 - **Melee attacks deliberately do not damage terrain.** They used to, which meant a
   run of missed swings could quietly break the floor out from under you.
+- **Melee does not move the camera.** Kicking the view during a swing reads as the
+  camera glitching or clipping rather than as a weapon being swung, so all of the
+  motion belongs to the weapon. Firearms still recoil, where a shove is expected.
+- **A swing is driven along a circular path** in screen space rather than by
+  nudging a few offsets, and its anchor eases towards screen centre so the whole
+  sweep stays visible. A thrust is a translation along the weapon's *own* forward
+  axis, applied after its rotation, so the blade slides along its length exactly
+  as it points.
 - **Enemies hold their distance and circle** rather than walking into you. They
   also lose interest if you get far enough away, so a fight is escapable.
 

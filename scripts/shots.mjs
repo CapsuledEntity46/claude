@@ -104,16 +104,21 @@ await g(() => {
   window.__voxelquest.debugSpawnEnemyInReach(2.6);
   window.__voxelquest.debugSetAttackMode('swing');
 });
+// Sample several points through the swing, so the arc can be judged as a motion.
 await waitForIdle();
 await page.mouse.click(CENTER_X, CENTER_Y);
-await page.waitForTimeout(180);
-await shot('attack-swing');
+for (const [i, delay] of [140, 90, 90, 110].entries()) {
+  await page.waitForTimeout(delay);
+  await shot(`attack-swing-${i + 1}`);
+}
 
 await waitForIdle();
 await g(() => window.__voxelquest.debugSetAttackMode('thrust'));
 await page.mouse.click(CENTER_X, CENTER_Y);
-await page.waitForTimeout(230);
-await shot('attack-thrust');
+for (const [i, delay] of [150, 110, 120].entries()) {
+  await page.waitForTimeout(delay);
+  await shot(`attack-thrust-${i + 1}`);
+}
 
 // ---------------------------------------------------------------- mining
 
@@ -150,6 +155,16 @@ await g(() => {
 });
 await page.waitForTimeout(2000);
 await shot('night-torchlight');
+
+// Natural night terrain, away from the flattened arena: this is the view that
+// looked flat before per-face shading was baked in.
+await g(() => {
+  const game = window.__voxelquest;
+  game.debugTeleportUp(12);
+  game.debugLook(0.7, -0.22);
+});
+await page.waitForTimeout(3000);
+await shot('night-terrain-shading');
 
 // Plant a few torches and stand back, to show world lighting.
 await g(() => {

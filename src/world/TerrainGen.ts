@@ -45,7 +45,10 @@ export class TerrainGen {
     this.caveA = new Noise(seed + 5);
     this.caveB = new Noise(seed + 6);
     this.oreNoise = new Noise(seed + 7);
-    this.dungeons = new DungeonGenerator(seed);
+    // The dungeon generator needs terrain heights to place itself relative to the
+    // ground. surfaceHeight is a pure function of seed and coordinates, so this
+    // stays deterministic and independent of chunk order.
+    this.dungeons = new DungeonGenerator(seed, (x, z) => this.surfaceHeight(x, z));
   }
 
   /** Highest terrain block (pre-cave, pre-tree) for a world column. */

@@ -124,17 +124,17 @@ export class TimeOfDay {
 
   /** Directional light strength. Moonlight is dim but not zero. */
   get sunIntensity(): number {
-    return 0.1 + this.daylight * 1.12;
+    return 0.12 + this.daylight * 0.92;
   }
 
   get ambientIntensity(): number {
     // A low floor keeps night genuinely dark — dark enough that a torch matters —
     // while still leaving shapes readable enough to navigate.
-    return 0.07 + this.daylight * 0.53;
+    return 0.1 + this.daylight * 0.6;
   }
 
   get hemisphereIntensity(): number {
-    return 0.06 + this.daylight * 0.64;
+    return 0.09 + this.daylight * 0.66;
   }
 
   /** Star opacity: fully visible at night, gone by mid-morning. */

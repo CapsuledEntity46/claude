@@ -209,15 +209,37 @@ check(
   `${distinctShades.size} distinct shades`,
 );
 
+check(
+  'a lone cube has visibly different brightness on top, side, and underside',
+  (() => {
+    // Baked per-face shading, so faces stay legible when the dynamic light is
+    // almost gone at night.
+    const cube1 = new Chunk(0, 0);
+    cube1.voxels[voxelIndex(8, 20, 8)] = Block.Stone;
+    const colours = meshChunk(cube1, openNeighbor).opaque!.getAttribute('color').array as Float32Array;
+    const distinct = new Set<string>();
+    for (let i = 0; i < colours.length; i += 3) distinct.add(colours[i].toFixed(3));
+    return distinct.size >= 4;
+  })(),
+);
+
 const flat = new Chunk(0, 0);
 for (let z = 2; z < 14; z++) for (let x = 2; x < 14; x++) flat.voxels[voxelIndex(x, 20, z)] = Block.Stone;
-const flatColors = meshChunk(flat, openNeighbor).opaque!.getAttribute('color').array as Float32Array;
+// Only the upward faces: with per-face shading baked in, the sides and underside
+// of the slab are legitimately different brightnesses, and including them would
+// stop this from measuring ambient occlusion at all.
+const flatMesh = meshChunk(flat, openNeighbor).opaque!;
+const flatColors = flatMesh.getAttribute('color').array as Float32Array;
+const flatNormals = flatMesh.getAttribute('normal').array as Float32Array;
 const flatTopShades = new Set<string>();
-for (let i = 0; i < flatColors.length; i += 3) flatTopShades.add(flatColors[i].toFixed(4));
+for (let i = 0; i < flatColors.length; i += 3) {
+  if (flatNormals[i + 1] < 0.99) continue; // keep only +Y faces
+  flatTopShades.add(flatColors[i].toFixed(4));
+}
 check(
   'an unoccluded flat surface is uniformly lit (no spurious AO)',
-  flatTopShades.size <= 3,
-  `${flatTopShades.size} distinct shades on a flat slab`,
+  flatTopShades.size === 1,
+  `${flatTopShades.size} distinct shades across the slab's top faces`,
 );
 
 // Water and glass belong to the translucent pass, not the opaque one.
@@ -441,12 +463,12 @@ check('stars are fully out at midnight', clock.starOpacity > 0.95, `${clock.star
 // that the world is unreadable without one.
 check(
   'night is dark but not pitch black',
-  clock.ambientIntensity > 0.03 && clock.ambientIntensity < 0.12,
+  clock.ambientIntensity > 0.05 && clock.ambientIntensity < 0.16,
   `ambient ${clock.ambientIntensity.toFixed(3)}`,
 );
 check(
   'night is dramatically darker than midday',
-  new TimeOfDay(0.5).ambientIntensity > clock.ambientIntensity * 5,
+  new TimeOfDay(0.5).ambientIntensity > clock.ambientIntensity * 4,
   `day ${new TimeOfDay(0.5).ambientIntensity.toFixed(2)} vs night ${clock.ambientIntensity.toFixed(3)}`,
 );
 
@@ -842,7 +864,9 @@ check(
 
 section('dungeons');
 
-const dungeons = new DungeonGenerator(4242);
+// A stand-in surface, so the generator can be exercised without full terrain.
+const flatSurface = (x: number, z: number) => 38 + ((Math.abs(x + z) % 7) - 3);
+const dungeons = new DungeonGenerator(4242, flatSurface);
 const sites = dungeons.sitesNear(-600, -600, 600, 600);
 check('dungeons are generated across the world', sites.length > 3, `${sites.length} sites in a 1200 block square`);
 check('every site has rooms', sites.every((s) => s.rooms.length >= 5), `min rooms ${Math.min(...sites.map((s) => s.rooms.length))}`);
@@ -860,14 +884,15 @@ check(
 check(
   'dungeon layout is deterministic for a seed',
   (() => {
-    const a = new DungeonGenerator(99);
-    const b = new DungeonGenerator(99);
+    const a = new DungeonGenerator(99, flatSurface);
+    const b = new DungeonGenerator(99, flatSurface);
     return JSON.stringify(a.siteAt(1, 1)) === JSON.stringify(b.siteAt(1, 1));
   })(),
 );
 check(
   'different seeds produce different dungeons',
-  JSON.stringify(new DungeonGenerator(1).siteAt(0, 0)) !== JSON.stringify(new DungeonGenerator(2).siteAt(0, 0)),
+  JSON.stringify(new DungeonGenerator(1, flatSurface).siteAt(0, 0)) !==
+    JSON.stringify(new DungeonGenerator(2, flatSurface).siteAt(0, 0)),
 );
 check(
   'a site bounding box actually contains its rooms',
@@ -881,6 +906,28 @@ check(
   dungeons.spawnPointsNear(sites[0].entranceX, sites[0].entranceZ, 400).some((p) => p.elite),
 );
 check('an entrance can be located from far away', dungeons.nearestEntrance(0, 0, 400) !== null);
+
+// The reported bug: the entrance stood above the landscape as a hollow tower.
+check(
+  'the entrance mouth sits at ground level, not above it',
+  sites.every((s) => Math.abs(s.entranceY - flatSurface(s.entranceX, s.entranceZ)) < 0.001),
+);
+check(
+  'rooms sit well below the surface',
+  sites.every((s) => s.topY <= flatSurface(s.entranceX, s.entranceZ) - 8),
+  `shallowest gap ${Math.min(...sites.map((s) => flatSurface(s.entranceX, s.entranceZ) - s.topY))} blocks`,
+);
+check(
+  'the stairway is long enough to descend the whole way',
+  sites.every((s) => {
+    const run = Math.hypot(s.entranceX - s.rooms[0].x - s.rooms[0].width / 2, s.entranceZ - s.rooms[0].z - s.rooms[0].depth / 2);
+    return run >= s.entranceY - s.topY;
+  }),
+);
+check(
+  'the stairway runs along a single cardinal direction',
+  sites.every((s) => Math.abs(s.entranceDirX) + Math.abs(s.entranceDirZ) === 1),
+);
 
 // Carving must actually hollow out the rock, and identically every time.
 check(

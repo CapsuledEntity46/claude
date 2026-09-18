@@ -21,6 +21,9 @@ export class Input {
   sensitivity = 0.0022;
   locked = false;
 
+  /** Raw event tallies, for diagnosing "did the click even arrive?". */
+  readonly counters = { mouseDowns: 0, mouseUps: 0, keyDowns: 0 };
+
   private readonly canvas: HTMLCanvasElement;
   private enabled = true;
 
@@ -32,6 +35,7 @@ export class Input {
       if (e.ctrlKey || e.metaKey || e.altKey) return;
       if (e.code === 'Tab' || e.code === 'F5' || e.code === 'F9') e.preventDefault();
       if (this.held.has(e.code)) return;
+      this.counters.keyDowns++;
       this.held.add(e.code);
       this.pressedThisFrame.add(e.code);
     });
@@ -52,11 +56,13 @@ export class Input {
     // rather than merely awkward. The Game decides whether input applies.
     canvas.addEventListener('mousedown', (e) => {
       e.preventDefault();
+      this.counters.mouseDowns++;
       if (!this.buttons.has(e.button)) this.buttonsPressed.add(e.button);
       this.buttons.add(e.button);
     });
 
     window.addEventListener('mouseup', (e) => {
+      this.counters.mouseUps++;
       if (this.buttons.has(e.button)) this.buttonsReleased.add(e.button);
       this.buttons.delete(e.button);
     });

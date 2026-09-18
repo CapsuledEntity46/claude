@@ -147,6 +147,8 @@ export class Screens {
     const slots: [EquipSlot, string][] = [
       ['weapon', 'Weapon'],
       ['shield', 'Off-hand'],
+      // A torch has its own slot so it can be carried alongside a shield.
+      ['torch', 'Light'],
       ['armor', 'Armor'],
     ];
 
@@ -164,7 +166,7 @@ export class Screens {
       const value = document.createElement('div');
       value.className = 'eq-val';
       if (!def) {
-        value.textContent = slot === 'weapon' ? 'Bare hands' : 'None';
+        value.textContent = slot === 'weapon' ? 'Bare hands' : slot === 'torch' ? 'Unlit' : 'None';
       } else {
         value.textContent = `${itemGlyph(def)} ${def.name}`;
         const sub = document.createElement('span');
@@ -220,6 +222,9 @@ export class Screens {
     }
     if (slot === 'shield' && def.shield) {
       return `Blocks ${Math.round(def.shield.absorb * 100)}% in a ${def.shield.coneDeg}° cone · guard ${def.shield.guard}`;
+    }
+    if (slot === 'torch' && def.torch) {
+      return `Lights ${def.torch.radius} blocks · works with a shield`;
     }
     if (slot === 'weapon' && def.weapon) {
       const ranged = def.weapon.ranged;

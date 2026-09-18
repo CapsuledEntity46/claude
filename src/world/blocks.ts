@@ -25,6 +25,7 @@ export const enum Block {
   Brick = 14,
   Glass = 15,
   Torchstone = 16,
+  Torch = 17,
 }
 
 export type RGB = readonly [number, number, number];
@@ -99,6 +100,8 @@ export const BLOCKS: readonly BlockDef[] = (() => {
   put(def(Block.Brick, 'Brick', '🟥', 1.8, [0.55, 0.27, 0.22]));
   put(def(Block.Glass, 'Glass', '🪟', 0.3, [0.72, 0.85, 0.9], [0.72, 0.85, 0.9], [0.72, 0.85, 0.9], { opaque: false }));
   put(def(Block.Torchstone, 'Glowstone', '💡', 0.6, [0.95, 0.8, 0.42], [1.0, 0.88, 0.5], [0.9, 0.74, 0.38], { emissive: 0.55 }));
+  // A cheap, warm light source you can spam while building at night.
+  put(def(Block.Torch, 'Torch', '🕯️', 0.15, [0.5, 0.34, 0.18], [1.0, 0.72, 0.3], [0.4, 0.28, 0.15], { emissive: 0.42 }));
 
   // Fill any accidental gaps so lookups never return undefined.
   for (let i = 0; i < list.length; i++) if (!list[i]) list[i] = AIR;
@@ -119,6 +122,16 @@ export function isOpaque(id: number): boolean {
 
 export function isAir(id: number): boolean {
   return id === Block.Air;
+}
+
+/** True for blocks that should cast a dynamic point light nearby. */
+export function isLightSource(id: number): boolean {
+  return ((BLOCKS[id] ?? AIR).emissive ?? 0) > 0.2;
+}
+
+/** Warm tint of the light a block emits. */
+export function lightColorOf(id: number): RGB {
+  return (BLOCKS[id] ?? AIR).top;
 }
 
 /** What a block yields when mined. Stone drops cobble, like you'd expect. */
@@ -149,4 +162,5 @@ export const PLACEABLE: readonly Block[] = [
   Block.Brick,
   Block.Glass,
   Block.Torchstone,
+  Block.Torch,
 ];

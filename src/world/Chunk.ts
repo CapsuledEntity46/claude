@@ -73,19 +73,30 @@ export class Chunk {
     for (const [idx, id] of this.edits) this.voxels[idx] = id;
   }
 
+  /** Full rebuild. Only needed after generating or bulk-loading a chunk. */
   recomputeHeightMap(): void {
     for (let z = 0; z < CHUNK_SZ; z++) {
-      for (let x = 0; x < CHUNK_SX; x++) {
-        let h = 0;
-        for (let y = CHUNK_SY - 1; y >= 0; y--) {
-          if (this.voxels[voxelIndex(x, y, z)] !== Block.Air) {
-            h = y;
-            break;
-          }
-        }
-        this.heightMap[z * CHUNK_SX + x] = h;
+      for (let x = 0; x < CHUNK_SX; x++) this.recomputeColumn(x, z);
+    }
+  }
+
+  /**
+   * Rebuilds one column's height entry.
+   *
+   * Single block edits must use this rather than recomputeHeightMap: the full
+   * rebuild scans all 18k voxels in the chunk, so calling it per edit made
+   * placing a block ~256x more expensive than it needed to be, and turned an
+   * explosion clearing several hundred blocks into a visible frame stall.
+   */
+  recomputeColumn(x: number, z: number): void {
+    let h = 0;
+    for (let y = CHUNK_SY - 1; y >= 0; y--) {
+      if (this.voxels[voxelIndex(x, y, z)] !== Block.Air) {
+        h = y;
+        break;
       }
     }
+    this.heightMap[z * CHUNK_SX + x] = h;
   }
 
   heightAt(x: number, z: number): number {

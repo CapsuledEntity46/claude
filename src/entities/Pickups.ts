@@ -14,7 +14,39 @@ const GEO = {
   loot: new THREE.BoxGeometry(0.26, 0.26, 0.26),
 };
 
-const ORB_MATERIAL = new THREE.MeshBasicMaterial({ color: 0xc06cff });
+const ORB_MATERIAL = new THREE.MeshBasicMaterial({ color: 0xd0a0ff });
+
+/**
+ * A soft radial gradient, drawn on a canvas so the project needs no textures.
+ * Used as an additive billboard halo around EXP orbs — without it the orbs are
+ * nearly invisible at night, which is exactly when the player is fighting.
+ */
+function makeGlowTexture(): THREE.Texture {
+  const size = 64;
+  const canvas = document.createElement('canvas');
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext('2d')!;
+  const gradient = ctx.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2);
+  gradient.addColorStop(0, 'rgba(255, 255, 255, 1)');
+  gradient.addColorStop(0.25, 'rgba(220, 170, 255, 0.75)');
+  gradient.addColorStop(0.6, 'rgba(160, 90, 240, 0.22)');
+  gradient.addColorStop(1, 'rgba(120, 60, 200, 0)');
+  ctx.fillStyle = gradient;
+  ctx.fillRect(0, 0, size, size);
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.needsUpdate = true;
+  return texture;
+}
+
+const GLOW_GEOMETRY = new THREE.PlaneGeometry(1, 1);
+const GLOW_MATERIAL = new THREE.MeshBasicMaterial({
+  map: makeGlowTexture(),
+  transparent: true,
+  // Additive so orbs brighten whatever is behind them and read against dark ground.
+  blending: THREE.AdditiveBlending,
+  depthWrite: false,
+});
 
 /** Loot cubes are tinted by category so you can tell at a glance what dropped. */
 const LOOT_COLORS: Record<string, number> = {
@@ -62,10 +94,21 @@ abstract class Pickup {
 class ExpOrb extends Pickup {
   value: number;
   private grounded = false;
+  /**
+   * The glow is a sibling of the orb rather than a child. Parenting it to the
+   * spinning orb would mean undoing the parent's rotation every frame just to
+   * keep the billboard facing the camera.
+   */
+  readonly halo: THREE.Mesh;
 
   constructor(position: THREE.Vector3, value: number) {
     super(new THREE.Mesh(GEO.orb, ORB_MATERIAL), position);
     this.value = value;
+
+    this.halo = new THREE.Mesh(GLOW_GEOMETRY, GLOW_MATERIAL);
+    this.halo.scale.setScalar(0.95);
+    this.halo.position.copy(position);
+
     // Pop upward and outward so a kill sprays orbs rather than dropping a pile.
     this.velocity.set((Math.random() - 0.5) * 3.4, 3.2 + Math.random() * 1.6, (Math.random() - 0.5) * 3.4);
   }
@@ -101,6 +144,14 @@ class ExpOrb extends Pickup {
     this.mesh.position.y += Math.sin(this.bob) * 0.06;
     this.mesh.rotation.y += dt * 3;
     this.mesh.rotation.x += dt * 2;
+
+    this.halo.position.copy(this.mesh.position);
+    const pulse = 0.85 + Math.sin(this.bob * 1.7) * 0.18;
+    this.halo.scale.setScalar(0.95 * pulse);
+  }
+
+  faceCamera(cameraQuaternion: THREE.Quaternion): void {
+    this.halo.quaternion.copy(cameraQuaternion);
   }
 }
 
@@ -165,7 +216,7 @@ export class PickupManager {
     for (let i = 0; i < count; i++) {
       const orb = new ExpOrb(position, i === count - 1 ? totalXp - Math.floor(per) * (count - 1) : Math.floor(per));
       this.orbs.push(orb);
-      this.group.add(orb.mesh);
+      this.group.add(orb.mesh, orb.halo);
     }
   }
 
@@ -184,13 +235,18 @@ export class PickupManager {
     }
   }
 
+  /** Billboards every orb halo towards the camera. */
+  faceCamera(cameraQuaternion: THREE.Quaternion): void {
+    for (const orb of this.orbs) orb.faceCamera(cameraQuaternion);
+  }
+
   update(dt: number, ctx: GameContext): void {
     for (let i = this.orbs.length - 1; i >= 0; i--) {
       const orb = this.orbs[i];
       orb.update(dt, ctx);
       if (orb.dead) {
         if (orb.life > 0) this.pendingXp += orb.value;
-        this.group.remove(orb.mesh);
+        this.group.remove(orb.mesh, orb.halo);
         this.orbs.splice(i, 1);
       }
     }
@@ -219,7 +275,7 @@ export class PickupManager {
   }
 
   clear(): void {
-    for (const o of this.orbs) this.group.remove(o.mesh);
+    for (const o of this.orbs) this.group.remove(o.mesh, o.halo);
     for (const d of this.drops) this.group.remove(d.mesh);
     this.orbs.length = 0;
     this.drops.length = 0;

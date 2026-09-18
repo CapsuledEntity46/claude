@@ -1,7 +1,7 @@
 /**
  * Visual capture pass. Automated checks confirm the game *runs*; only looking at
- * it confirms it looks right. Grabs a few vantage points to inspect terrain
- * shape, ambient occlusion, combat feedback, and the UI.
+ * it confirms it looks right. Captures the held weapon, both attack motions,
+ * mining cracks, day and night, weather, and the character sheet.
  *
  * Usage: npm run build && node scripts/shots.mjs
  */
@@ -17,10 +17,10 @@ const SHOTS = join(ROOT, '.kiro', 'artifacts', 'screenshots');
 await mkdir(SHOTS, { recursive: true });
 
 const MIME = {
-  '.html': 'text/html; charset=utf-8',
-  '.js': 'text/javascript; charset=utf-8',
-  '.css': 'text/css; charset=utf-8',
-  '.map': 'application/json; charset=utf-8',
+  '.html': 'text/html',
+  '.js': 'text/javascript',
+  '.css': 'text/css',
+  '.map': 'application/json',
 };
 
 const server = createServer(async (req, res) => {
@@ -37,69 +37,173 @@ const port = await new Promise((r) => server.listen(0, '127.0.0.1', () => r(serv
 
 const browser = await chromium.launch({
   headless: true,
-  args: ['--no-sandbox', '--use-gl=angle', '--use-angle=swiftshader', '--enable-unsafe-swiftshader', '--disable-dev-shm-usage'],
+  args: [
+    '--no-sandbox',
+    '--use-gl=angle',
+    '--use-angle=swiftshader',
+    '--enable-unsafe-swiftshader',
+    '--disable-dev-shm-usage',
+  ],
 });
 const page = await browser.newPage({ viewport: { width: 1280, height: 720 } });
 page.on('pageerror', (e) => console.log('PAGE ERROR:', String(e)));
 
+const CENTER_X = 640;
+const CENTER_Y = 360;
 const g = (fn, ...args) => page.evaluate(fn, ...args);
 const shot = async (name) => {
   await page.screenshot({ path: join(SHOTS, `${name}.png`) });
   console.log(`  captured ${name}.png`);
 };
+const waitForIdle = async () => {
+  for (let i = 0; i < 60; i++) {
+    if ((await g(() => window.__voxelquest.debugCombatDiag())).combatState === 'idle') return;
+    await page.waitForTimeout(100);
+  }
+};
 
 await page.goto(`http://127.0.0.1:${port}/`, { waitUntil: 'load' });
 await page.waitForFunction(() => !!window.__voxelquest, null, { timeout: 20_000 });
 await page.click('#play');
-await page.mouse.move(640, 360);
-await g(() => window.__voxelquest.debugSetLookEnabled(false));
-await g(() => window.__voxelquest.debugSetInvulnerable(true));
-
-// Let terrain stream in and the mesher drain.
+await page.mouse.move(CENTER_X, CENTER_Y);
+await g(() => {
+  const game = window.__voxelquest;
+  game.debugSetLookEnabled(false);
+  game.debugSetInvulnerable(true);
+  game.debugFreezeTime(true);
+});
 await page.waitForTimeout(9000);
-console.log('emoji support:', await g(() => document.querySelector('#hotbar .hs span:nth-child(2)')?.className || '(none)'));
 
-// 1. Natural terrain at eye level, looking slightly down.
-await g(() => {
-  window.__voxelquest.debugClearEnemies();
-  window.__voxelquest.debugLook(0.6, -0.12);
-});
-await page.waitForTimeout(2500);
-await shot('view-terrain');
+// A flat stage with a couple of foes, so every shot is composed the same way.
+const stage = async () => {
+  await g(() => {
+    const game = window.__voxelquest;
+    game.debugClearEnemies();
+    game.debugFlattenArena(12);
+    game.debugLook(0, -0.06);
+    game.debugRefill();
+  });
+  await page.waitForTimeout(2500);
+};
 
-// 2. High vantage point to judge overall terrain shape and biomes.
-await g(() => {
-  const game = window.__voxelquest;
-  game.debugTeleportUp(34);
-  game.debugLook(0.6, -0.62);
-});
-await page.waitForTimeout(3500);
-await shot('view-from-above');
+// ---------------------------------------------------------------- daylight
 
-// 3. Ambient occlusion: stand in a built corner and look into it.
-await g(() => window.__voxelquest.debugBuildAoProbe());
-await page.waitForTimeout(3000);
-await shot('view-ambient-occlusion');
-
-// 4. Combat: a few enemies, mid-fight, with the HUD populated.
+await stage();
 await g(() => {
   const game = window.__voxelquest;
-  game.debugFlattenArena(10);
-  game.debugLook(0, -0.05);
-  game.debugSpawnEnemyInReach(3.0);
-  game.debugSpawnEnemyInReach(5.0);
-  game.debugSpawnEnemyInReach(7.5);
+  game.debugSetTime('day');
+  game.debugSetWeather('clear');
+  game.debugSelectHotbarByItem('longsword');
+  game.debugEquip('longsword');
 });
-await page.waitForTimeout(3000);
-await page.mouse.click(640, 360);
+await page.waitForTimeout(1200);
+await shot('day-weapon-held');
+
+// Mid-swing and mid-thrust, to show the two motions differ.
+await g(() => {
+  window.__voxelquest.debugSpawnEnemyInReach(2.6);
+  window.__voxelquest.debugSetAttackMode('swing');
+});
+await waitForIdle();
+await page.mouse.click(CENTER_X, CENTER_Y);
+await page.waitForTimeout(180);
+await shot('attack-swing');
+
+await waitForIdle();
+await g(() => window.__voxelquest.debugSetAttackMode('thrust'));
+await page.mouse.click(CENTER_X, CENTER_Y);
+await page.waitForTimeout(230);
+await shot('attack-thrust');
+
+// ---------------------------------------------------------------- mining
+
+await stage();
+await g(() => {
+  const game = window.__voxelquest;
+  game.debugSetTime('day');
+  game.debugSelectHotbarByItem('block_cobblestone');
+  game.debugLookDown();
+});
+await page.waitForTimeout(600);
+await page.mouse.move(CENTER_X, CENTER_Y);
+await page.mouse.down();
+// Hold until the cracks are well advanced but the block has not broken.
+for (let i = 0; i < 120; i++) {
+  const h = await g(() => window.__voxelquest.debugHighlight());
+  if (h && h.progress > 0.62) break;
+  await page.waitForTimeout(100);
+}
+await shot('mining-cracks');
+await page.mouse.up();
+
+// ---------------------------------------------------------------- night
+
+await stage();
+await g(() => {
+  const game = window.__voxelquest;
+  game.debugSetTime('night');
+  game.debugSetWeather('clear');
+  game.debugEquip('longsword');
+  game.debugEquip('torch');
+  game.debugSelectHotbarByItem('longsword');
+  game.debugSpawnEnemyInReach(4.5);
+});
+await page.waitForTimeout(2000);
+await shot('night-torchlight');
+
+// Plant a few torches and stand back, to show world lighting.
+await g(() => {
+  const game = window.__voxelquest;
+  game.debugSelectHotbarByItem('torch');
+  game.debugLookDown();
+});
 await page.waitForTimeout(400);
-await shot('view-combat');
+for (let i = 0; i < 3; i++) {
+  await page.mouse.click(CENTER_X, CENTER_Y, { button: 'right' });
+  await page.waitForTimeout(300);
+  await g(() => window.__voxelquest.debugLook(Math.random() * 2 - 1, -0.5));
+  await page.waitForTimeout(200);
+}
+await g(() => window.__voxelquest.debugLook(0, -0.25));
+await page.waitForTimeout(1200);
+await shot('night-planted-torches');
 
-// 5. Character sheet, showing attack modes and the bag.
+// ---------------------------------------------------------------- weather
+
+await stage();
+await g(() => {
+  const game = window.__voxelquest;
+  game.debugSetTime('day');
+  game.debugSetWeather('storm', 1);
+  game.debugEquip('longsword');
+});
+await page.waitForTimeout(4000);
+await shot('weather-storm');
+
+await g(() => window.__voxelquest.debugSetWeather('fog', 1));
+await page.waitForTimeout(5000);
+await shot('weather-fog');
+
+// ---------------------------------------------------------------- dusk vista
+
+await g(() => {
+  const game = window.__voxelquest;
+  game.debugSetWeather('clear');
+  game.debugSetTime('dusk');
+  game.debugTeleportUp(30);
+  game.debugLook(0.6, -0.5);
+});
+await page.waitForTimeout(4000);
+await shot('dusk-vista');
+
+// ---------------------------------------------------------------- sheet
+
+await g(() => window.__voxelquest.debugSetTime('day'));
 await page.keyboard.press('Tab');
-await page.waitForTimeout(700);
-await shot('view-character-sheet');
+await page.waitForTimeout(900);
+await shot('character-sheet');
 
+console.log('\nenvironment:', JSON.stringify(await g(() => window.__voxelquest.debugEnvironment())));
 await browser.close();
 server.close();
-console.log(`\nscreenshots in ${SHOTS}`);
+console.log(`screenshots in ${SHOTS}`);

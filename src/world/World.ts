@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { Block, isSolid } from './blocks';
+import { Block, isLightSource, isSolid } from './blocks';
 import { CHUNK_SX, CHUNK_SY, CHUNK_SZ, Chunk, MeshState, chunkKey, voxelIndex } from './Chunk';
 import { meshChunk } from './ChunkMesher';
 import { TerrainGen } from './TerrainGen';
@@ -50,6 +50,13 @@ export class World {
 
   /** Chunks awaiting terrain generation, nearest-first. */
   private genQueue: string[] = [];
+
+  /**
+   * Positions of every loaded light-emitting block, keyed by coordinate.
+   * Maintained incrementally on edits and on chunk load/unload so the dynamic
+   * light pool never has to search the voxel grid.
+   */
+  private lights = new Map<string, { x: number; y: number; z: number }>();
 
   constructor(seed: number, renderDistance = 6) {
     this.gen = new TerrainGen(seed);
@@ -132,10 +139,19 @@ export class World {
     const idx = voxelIndex(lx, wy, lz);
     if (chunk.voxels[idx] === id) return false;
 
+    const previous = chunk.voxels[idx];
     chunk.voxels[idx] = id;
     if (record) chunk.recordEdit(lx, wy, lz, id);
+
+    // Keep the light index in step with the world.
+    if (isLightSource(previous) !== isLightSource(id)) {
+      const lightKey = `${wx},${wy},${wz}`;
+      if (isLightSource(id)) this.lights.set(lightKey, { x: wx, y: wy, z: wz });
+      else this.lights.delete(lightKey);
+    }
     chunk.state = MeshState.Dirty;
-    chunk.recomputeHeightMap();
+    // Only the edited column's height can have changed.
+    chunk.recomputeColumn(lx, lz);
 
     // Border edits change the neighbour's culled faces too.
     // Border edits change a neighbour's culled faces and its corner AO, so the
@@ -196,6 +212,7 @@ export class World {
     }
     if (chunk.state === MeshState.Empty) {
       this.gen.generate(chunk);
+      this.indexLights(chunk);
       chunk.state = MeshState.Dirty;
       // Neighbours were meshed while this chunk still read as solid rock, so they
       // need rebuilding. All eight matter, not just the four orthogonal ones:
@@ -306,13 +323,107 @@ export class World {
         store.delete(key);
       }
     }
-    // Keep edited chunks in memory so player builds survive a walk-away.
     const chunk = this.chunks.get(key);
+    if (chunk) this.forgetLights(chunk);
+
+    // Keep edited chunks in memory so player builds survive a walk-away.
     if (chunk && chunk.edits.size > 0) {
       chunk.state = MeshState.Dirty;
       return;
     }
     this.chunks.delete(key);
+  }
+
+  // ---------------------------------------------------------------- lighting
+
+  /** Records every emissive block in a freshly generated chunk. */
+  private indexLights(chunk: Chunk): void {
+    const baseX = chunk.cx * CHUNK_SX;
+    const baseZ = chunk.cz * CHUNK_SZ;
+    for (let y = 0; y < CHUNK_SY; y++) {
+      for (let z = 0; z < CHUNK_SZ; z++) {
+        for (let x = 0; x < CHUNK_SX; x++) {
+          const id = chunk.voxels[voxelIndex(x, y, z)];
+          if (id === Block.Air || !isLightSource(id)) continue;
+          const wx = baseX + x;
+          const wz = baseZ + z;
+          this.lights.set(`${wx},${y},${wz}`, { x: wx, y, z: wz });
+        }
+      }
+    }
+  }
+
+  private forgetLights(chunk: Chunk): void {
+    const minX = chunk.cx * CHUNK_SX;
+    const minZ = chunk.cz * CHUNK_SZ;
+    for (const [key, light] of this.lights) {
+      if (light.x >= minX && light.x < minX + CHUNK_SX && light.z >= minZ && light.z < minZ + CHUNK_SZ) {
+        this.lights.delete(key);
+      }
+    }
+  }
+
+  get lightSourceCount(): number {
+    return this.lights.size;
+  }
+
+  /** The closest emissive blocks to a point, nearest first. */
+  nearestLightSources(
+    from: THREE.Vector3,
+    maxDistance: number,
+    limit: number,
+  ): { x: number; y: number; z: number }[] {
+    const maxSq = maxDistance * maxDistance;
+    const found: { x: number; y: number; z: number; d: number }[] = [];
+    for (const light of this.lights.values()) {
+      const dx = light.x + 0.5 - from.x;
+      const dy = light.y + 0.5 - from.y;
+      const dz = light.z + 0.5 - from.z;
+      const d = dx * dx + dy * dy + dz * dz;
+      if (d > maxSq) continue;
+      found.push({ ...light, d });
+    }
+    found.sort((a, b) => a.d - b.d);
+    return found.slice(0, limit).map(({ x, y, z }) => ({ x, y, z }));
+  }
+
+  // ---------------------------------------------------------------- water
+
+  /**
+   * Finds a point inside a body of water near a column, for spawning fish.
+   * Returns null when the column has no water deep enough to swim in.
+   */
+  findWaterSpot(wx: number, wz: number, minDepth = 2): THREE.Vector3 | null {
+    const cx = wx >> 4;
+    const cz = wz >> 4;
+    const chunk = this.chunkAt(cx, cz);
+    if (!chunk || chunk.state === MeshState.Empty) return null;
+
+    const lx = wx - cx * CHUNK_SX;
+    const lz = wz - cz * CHUNK_SZ;
+
+    // Walk down from the column top to find the water surface.
+    let top = -1;
+    for (let y = CHUNK_SY - 1; y >= 1; y--) {
+      if (chunk.voxels[voxelIndex(lx, y, lz)] === Block.Water) {
+        top = y;
+        break;
+      }
+    }
+    if (top < 0) return null;
+
+    let bottom = top;
+    while (bottom > 1 && chunk.voxels[voxelIndex(lx, bottom - 1, lz)] === Block.Water) bottom--;
+    if (top - bottom + 1 < minDepth) return null;
+
+    // Sit a little below the surface so fish are submerged.
+    const y = bottom + (top - bottom) * 0.5;
+    return new THREE.Vector3(wx + 0.5, y + 0.5, wz + 0.5);
+  }
+
+  /** True when this point is inside water. */
+  isWaterAt(x: number, y: number, z: number): boolean {
+    return this.getBlock(Math.floor(x), Math.floor(y), Math.floor(z)) === Block.Water;
   }
 
   // ---------------------------------------------------------------- raycasting
@@ -490,6 +601,7 @@ export class World {
     }
     this.chunks.clear();
     this.genQueue.length = 0;
+    this.lights.clear();
   }
 }
 

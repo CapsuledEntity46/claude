@@ -2,15 +2,22 @@ import * as THREE from 'three';
 import type { EnemyWorld, GameContext } from '../core/Context';
 import { computeDamage, type DamageInput } from '../combat/types';
 import { mulberry32 } from '../world/noise';
-import { pickArchetype } from './archetypes';
+import { FISH, pickArchetype } from './archetypes';
 import { Enemy } from './Enemy';
 import { rollLoot, xpForKill } from './loot';
 import type { PickupManager } from './Pickups';
 
-const SPAWN_INTERVAL = 2.8;
-const SPAWN_MIN_DISTANCE = 20;
-const SPAWN_MAX_DISTANCE = 38;
+/** Base seconds between spawn attempts at full night-time pressure. */
+const SPAWN_INTERVAL = 4.5;
+const SPAWN_MIN_DISTANCE = 22;
+const SPAWN_MAX_DISTANCE = 40;
 const DESPAWN_DISTANCE = 88;
+
+/** Fish are a resource, not a threat, so they get their own budget. */
+const FISH_CAP = 10;
+const FISH_INTERVAL = 6;
+const FISH_MIN_DISTANCE = 10;
+const FISH_MAX_DISTANCE = 34;
 /** Enemies push each other apart within this radius so they never fully overlap. */
 const SEPARATION_RADIUS = 1.1;
 
@@ -24,7 +31,8 @@ export class EntityManager implements EnemyWorld {
   private ctx!: GameContext;
   private pickups: PickupManager;
   private rng = mulberry32(0xbeef);
-  private spawnTimer = 2;
+  private spawnTimer = 6;
+  private fishTimer = 3;
   /** Archetypes the player has already met, so hints only fire once. */
   private seen = new Set<string>();
 
@@ -44,6 +52,23 @@ export class EntityManager implements EnemyWorld {
 
   get count(): number {
     return this.list.length;
+  }
+
+  /** Fish are never worth alerting, and never chase. */
+  private static isThreat(enemy: Enemy): boolean {
+    return !enemy.archetype.passive;
+  }
+
+  /** Test hook: the current hostile population ceiling. */
+  debugHostileCap(ctx: GameContext): number {
+    return this.hostileCap(ctx);
+  }
+
+  /** Test hook: force a fish school into nearby water. Returns how many spawned. */
+  debugSpawnFishNear(ctx: GameContext): number {
+    const before = this.fishCount;
+    for (let i = 0; i < 6 && this.fishCount === before; i++) this.trySpawnFish(ctx);
+    return this.fishCount - before;
   }
 
   // ---------------------------------------------------------------- queries
@@ -75,7 +100,7 @@ export class EntityManager implements EnemyWorld {
   alert(position: THREE.Vector3, radius: number): void {
     const r2 = radius * radius;
     for (const e of this.list) {
-      if (!e.dead && e.center.distanceToSquared(position) <= r2) e.alert();
+      if (!e.dead && EntityManager.isThreat(e) && e.center.distanceToSquared(position) <= r2) e.alert();
     }
   }
 
@@ -169,20 +194,63 @@ export class EntityManager implements EnemyWorld {
     }
   }
 
+  /** Hostiles only — fish do not count against the combat budget. */
+  get hostileCount(): number {
+    let n = 0;
+    for (const e of this.list) if (!e.archetype.passive && !e.dead) n++;
+    return n;
+  }
+
+  get fishCount(): number {
+    let n = 0;
+    for (const e of this.list) if (e.archetype.passive && !e.dead) n++;
+    return n;
+  }
+
+  /**
+   * How hard the world is pushing right now: low in daylight, full at night.
+   *
+   * Daytime needs to be genuinely quiet. Scaling the cap linearly with level
+   * (as this first did) meant a level-30 character was permanently swarmed and
+   * could never put down a wall without a fight.
+   */
+  private spawnPressure(ctx: GameContext): number {
+    return 0.3 + (1 - ctx.daylight) * 0.7;
+  }
+
+  /** Maximum simultaneous hostiles. Plateaus rather than growing without bound. */
+  private hostileCap(ctx: GameContext): number {
+    const level = ctx.player.stats.level;
+    // sqrt growth: 4 at level 1, 8 by level 9, 13 by level 34 — not 34.
+    const base = 3 + Math.floor(Math.sqrt(level) * 1.7);
+    return Math.max(2, Math.round(base * this.spawnPressure(ctx)));
+  }
+
   private trySpawn(dt: number, ctx: GameContext): void {
     this.spawnTimer -= dt;
+    this.fishTimer -= dt;
+
+    if (this.fishTimer <= 0) {
+      this.fishTimer = FISH_INTERVAL;
+      this.trySpawnFish(ctx);
+    }
+
     if (this.spawnTimer > 0) return;
-    this.spawnTimer = SPAWN_INTERVAL;
 
-    // Population scales with the player. A level-1 character facing a dozen
-    // goblins at once is not a difficulty curve, it is a wall.
-    const cap = 4 + Math.floor(ctx.player.stats.level * 0.9);
-    if (this.list.length >= cap) return;
+    const pressure = this.spawnPressure(ctx);
+    // Spawns get rarer as the area fills up, so pressure ramps instead of spiking.
+    this.spawnTimer = (SPAWN_INTERVAL / pressure) * (1 + this.hostileCount * 0.22);
 
-    // Group spawns only once the player can handle them.
+    if (this.hostileCount >= this.hostileCap(ctx)) return;
+
+    // Group spawns only once the player can handle them, and only after dark.
     const level = ctx.player.stats.level;
+    const night = 1 - ctx.daylight;
     const groupSize =
-      1 + (level >= 3 && this.rng() < 0.3 ? 1 : 0) + (level >= 6 && this.rng() < 0.15 ? 1 : 0);
+      1 +
+      (level >= 4 && this.rng() < 0.22 * night ? 1 : 0) +
+      (level >= 8 && this.rng() < 0.12 * night ? 1 : 0);
+
     const anchor = this.findSpawnPoint(ctx);
     if (!anchor) return;
 
@@ -193,6 +261,34 @@ export class EntityManager implements EnemyWorld {
       if (ground < 0) continue;
       point.y = ground + 1.05;
       this.spawnAt(point, ctx.player.stats.level);
+    }
+  }
+
+  /** Puts fish in nearby water so there is something to hunt. */
+  private trySpawnFish(ctx: GameContext): void {
+    if (this.fishCount >= FISH_CAP) return;
+
+    for (let attempt = 0; attempt < 10; attempt++) {
+      const angle = this.rng() * Math.PI * 2;
+      const distance = FISH_MIN_DISTANCE + this.rng() * (FISH_MAX_DISTANCE - FISH_MIN_DISTANCE);
+      const wx = Math.floor(ctx.player.position.x + Math.cos(angle) * distance);
+      const wz = Math.floor(ctx.player.position.z + Math.sin(angle) * distance);
+      if (!ctx.world.isLoadedAt(wx, wz)) continue;
+
+      const spot = ctx.world.findWaterSpot(wx, wz, 2);
+      if (!spot) continue;
+
+      // Small schools rather than lone fish.
+      const school = 1 + Math.floor(this.rng() * 3);
+      for (let i = 0; i < school; i++) {
+        const jitter = new THREE.Vector3((this.rng() - 0.5) * 3, (this.rng() - 0.5) * 1.2, (this.rng() - 0.5) * 3);
+        const point = spot.clone().add(jitter);
+        if (!ctx.world.isWaterAt(point.x, point.y, point.z)) continue;
+        const fish = new Enemy(FISH, Math.max(1, Math.round(ctx.player.stats.level * 0.4)), point, this.rng);
+        this.list.push(fish);
+        this.group.add(fish.group);
+      }
+      return;
     }
   }
 
@@ -244,6 +340,7 @@ export class EntityManager implements EnemyWorld {
       this.group.remove(e.group);
     }
     this.list.length = 0;
-    this.spawnTimer = 2;
+    this.spawnTimer = 6;
+    this.fishTimer = 3;
   }
 }

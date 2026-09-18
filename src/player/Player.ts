@@ -159,10 +159,16 @@ export class Player {
     if (this.inWater) speed *= 0.7;
 
     // Rotate input into world space using yaw only.
+    //
+    // The basis must match the camera: forward is (-sin yaw, 0, -cos yaw) and
+    // right is (cos yaw, 0, -sin yaw). With W giving iz = -1, the world velocity
+    // is right*ix + forward*(-iz), which expands to the two lines below. Getting
+    // the sign of the iz terms wrong inverts W and S while leaving A and D
+    // correct — which is exactly how this shipped, and why it looked plausible.
     const sin = Math.sin(this.yaw);
     const cos = Math.cos(this.yaw);
-    let wx = ix * cos - iz * sin;
-    let wz = -ix * sin - iz * cos;
+    let wx = ix * cos + iz * sin;
+    let wz = -ix * sin + iz * cos;
     const len = Math.hypot(wx, wz);
     if (len > 0) {
       wx = (wx / len) * speed;

@@ -33,6 +33,8 @@ export interface EnemyLook {
   accent: number;
   /** Overall size multiplier. */
   scale: number;
+  /** Which body to build. Fish are not humanoids with arms and legs. */
+  bodyStyle?: 'humanoid' | 'fish';
 }
 
 export interface EnemyArchetype {
@@ -56,6 +58,10 @@ export interface EnemyArchetype {
   extraLoot?: { itemId: string; chance: number; min: number; max: number }[];
   /** Shown once, the first time the player meets this enemy. */
   hint?: string;
+  /** Swims: buoyant in water, helpless out of it. */
+  aquatic?: boolean;
+  /** Never attacks; flees when approached. Prey rather than a threat. */
+  passive?: boolean;
 }
 
 export const ARCHETYPES: readonly EnemyArchetype[] = [
@@ -67,7 +73,7 @@ export const ARCHETYPES: readonly EnemyArchetype[] = [
     baseHp: 16,
     hpPerLevel: 4,
     speed: 3.4,
-    aggroRange: 18,
+    aggroRange: 11,
     xp: 12,
     look: { body: 0x4a7a3c, head: 0x6e9b52, accent: 0x8a5a2a, scale: 0.85 },
     defense: { armor: 1, resist: { slash: 0, pierce: 0, blunt: 0.05 } },
@@ -83,7 +89,7 @@ export const ARCHETYPES: readonly EnemyArchetype[] = [
     baseHp: 14,
     hpPerLevel: 3.5,
     speed: 4.1,
-    aggroRange: 20,
+    aggroRange: 12,
     xp: 15,
     look: { body: 0x3f6b46, head: 0x6e9b52, accent: 0xa8a090, scale: 0.85 },
     defense: { armor: 1, resist: { slash: 0.05 } },
@@ -100,7 +106,7 @@ export const ARCHETYPES: readonly EnemyArchetype[] = [
     baseHp: 18,
     hpPerLevel: 3.5,
     speed: 3.6,
-    aggroRange: 30,
+    aggroRange: 19,
     xp: 18,
     look: { body: 0x6a4a32, head: 0xc09a72, accent: 0x8a7a4a, scale: 1.0 },
     defense: { armor: 2, resist: { slash: 0.15 } },
@@ -123,7 +129,7 @@ export const ARCHETYPES: readonly EnemyArchetype[] = [
     baseHp: 42,
     hpPerLevel: 8,
     speed: 3.1,
-    aggroRange: 20,
+    aggroRange: 13,
     xp: 34,
     look: { body: 0x5c6b3a, head: 0x7d8a4e, accent: 0x4a3a28, scale: 1.15 },
     defense: { armor: 3, resist: { slash: 0.2, pierce: 0.1, blunt: 0.1 } },
@@ -140,7 +146,7 @@ export const ARCHETYPES: readonly EnemyArchetype[] = [
     baseHp: 38,
     hpPerLevel: 6,
     speed: 3.3,
-    aggroRange: 22,
+    aggroRange: 14,
     xp: 40,
     look: { body: 0x9aa0a8, head: 0xe0dcd0, accent: 0x6a6f78, scale: 1.05 },
     // Deliberately mirrors iron plate: swords glance off, maces shatter it.
@@ -165,7 +171,7 @@ export const ARCHETYPES: readonly EnemyArchetype[] = [
     baseHp: 26,
     hpPerLevel: 4.5,
     speed: 3.4,
-    aggroRange: 28,
+    aggroRange: 18,
     xp: 38,
     look: { body: 0x4a2a5c, head: 0xd8c8b0, accent: 0x9a5ad0, scale: 1.0 },
     defense: { armor: 1, resist: { magic: 0.4, slash: 0 } },
@@ -189,7 +195,7 @@ export const ARCHETYPES: readonly EnemyArchetype[] = [
     baseHp: 95,
     hpPerLevel: 14,
     speed: 2.9,
-    aggroRange: 24,
+    aggroRange: 15,
     xp: 90,
     look: { body: 0x7a6a4a, head: 0x9a8a62, accent: 0x3a2a1a, scale: 1.6 },
     defense: { armor: 5, resist: { slash: 0.25, pierce: 0.2, blunt: 0.15, magic: -0.1 } },
@@ -203,13 +209,34 @@ export const ARCHETYPES: readonly EnemyArchetype[] = [
   },
 ];
 
+export const FISH: EnemyArchetype = {
+  id: 'river_fish',
+  name: 'River Fish',
+  minLevel: 1,
+  weight: 0,
+  baseHp: 6,
+  hpPerLevel: 1,
+  speed: 4.2,
+  aggroRange: 9,
+  xp: 4,
+  look: { body: 0x5a8ab0, head: 0x8ab8d8, accent: 0xd8d0a8, scale: 0.45, bodyStyle: 'fish' },
+  defense: { armor: 0, resist: {} },
+  armorPerTier: 0,
+  aquatic: true,
+  passive: true,
+  extraLoot: [{ itemId: 'raw_fish', chance: 1, min: 1, max: 2 }],
+  hint: 'Fish. Spear one and cook it over a torch for a proper meal.',
+};
+
 export function archetypeById(id: string): EnemyArchetype | undefined {
+  if (id === FISH.id) return FISH;
   return ARCHETYPES.find((a) => a.id === id);
 }
 
 /** Weighted pick among archetypes legal for a given spawn level. */
 export function pickArchetype(level: number, rng: () => number): EnemyArchetype {
-  const eligible = ARCHETYPES.filter((a) => a.minLevel <= level);
+  // weight 0 entries (like fish) are spawned explicitly, not by the roll.
+  const eligible = ARCHETYPES.filter((a) => a.minLevel <= level && a.weight > 0);
   const pool = eligible.length > 0 ? eligible : [ARCHETYPES[0]];
   const total = pool.reduce((sum, a) => sum + a.weight, 0);
   let roll = rng() * total;

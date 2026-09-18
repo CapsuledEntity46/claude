@@ -18,6 +18,10 @@ const GEO = {
   leg: new THREE.BoxGeometry(0.22, 0.72, 0.22),
   weapon: new THREE.BoxGeometry(0.09, 0.95, 0.09),
   bar: new THREE.PlaneGeometry(1, 1),
+  fishBody: new THREE.BoxGeometry(0.42, 0.34, 0.9),
+  fishHead: new THREE.BoxGeometry(0.3, 0.26, 0.24),
+  fishTail: new THREE.BoxGeometry(0.06, 0.34, 0.26),
+  fishFin: new THREE.BoxGeometry(0.05, 0.2, 0.24),
 };
 
 export class Enemy {
@@ -61,6 +65,8 @@ export class Enemy {
   private dyingTimer = 0;
   /** Seconds of remaining movement slow, from Frost Shard and similar. */
   private slowTimer = 0;
+  /** Seconds spent out of water, for aquatic creatures. */
+  private suffocation = 0;
   /** Chosen at spawn so a group of enemies does not act in lockstep. */
   private readonly jitter: number;
 
@@ -108,6 +114,58 @@ export class Enemy {
   // ---------------------------------------------------------------- appearance
 
   private build(): void {
+    if (this.archetype.look.bodyStyle === 'fish') {
+      this.buildFish();
+      return;
+    }
+    this.buildHumanoid();
+  }
+
+  /** A fish: body, snout, tail, and fins. No arms to swing. */
+  private buildFish(): void {
+    const look = this.archetype.look;
+    const mat = (color: number) => {
+      const m = new THREE.MeshLambertMaterial({ color });
+      this.materials.push(m);
+      return m;
+    };
+    const bodyMat = mat(look.body);
+    const headMat = mat(look.head);
+    const finMat = mat(look.accent);
+
+    const g = new THREE.Group();
+    g.add(new THREE.Mesh(GEO.fishBody, bodyMat));
+    const head = new THREE.Mesh(GEO.fishHead, headMat);
+    head.position.z = -0.54;
+    g.add(head);
+
+    // The tail is its own pivot so it can beat while swimming.
+    this.rightArm = new THREE.Group();
+    this.rightArm.position.z = 0.44;
+    const tail = new THREE.Mesh(GEO.fishTail, finMat);
+    tail.position.z = 0.12;
+    this.rightArm.add(tail);
+    g.add(this.rightArm);
+
+    const topFin = new THREE.Mesh(GEO.fishFin, finMat);
+    topFin.position.set(0, 0.24, 0.05);
+    g.add(topFin);
+
+    // Unused for fish, but the animation code expects these to exist.
+    this.leftArm = new THREE.Group();
+    this.leftLeg = new THREE.Group();
+    this.rightLeg = new THREE.Group();
+    g.add(this.leftArm, this.leftLeg, this.rightLeg);
+
+    g.scale.setScalar(look.scale * 2.2);
+    this.body = g;
+    this.group.add(g);
+
+    this.buildHealthBar();
+    this.group.position.copy(this.position);
+  }
+
+  private buildHumanoid(): void {
     const look = this.archetype.look;
     const mat = (color: number) => {
       // Cloned per enemy so a hit can flash just this one.
@@ -234,7 +292,8 @@ export class Enemy {
     this.velocity.z += push.z;
     if (knockback > 5) this.velocity.y = Math.max(this.velocity.y, 2.6);
 
-    const bloodColor = this.archetype.id === 'skeleton_knight' ? 0xdad6c8 : 0x8a1420;
+    const bloodColor =
+      this.archetype.id === 'skeleton_knight' ? 0xdad6c8 : this.archetype.aquatic ? 0x9fd0e0 : 0x8a1420;
     ctx.particles.burst(this.center, result.crit ? 16 : 9, result.crit ? 6 : 4, {
       color: bloodColor,
       size: 0.09,
@@ -297,7 +356,13 @@ export class Enemy {
     const toPlayer = ctx.player.center.clone().sub(this.center);
     const distance = toPlayer.length();
 
-    if (!this.aggro && distance < this.archetype.aggroRange && this.hasLineOfSight(ctx, distance)) {
+    // Prey does not fight. It swims, and it runs.
+    if (this.archetype.passive) {
+      this.updatePassive(dt, ctx, distance);
+      return;
+    }
+
+    if (!this.aggro && distance < this.effectiveAggroRange(ctx) && this.hasLineOfSight(ctx, distance)) {
       this.aggro = true;
       this.state = 'chase';
       if (this.archetype.hint) ctx.log(`${this.archetype.name}: ${this.archetype.hint}`, 'info');
@@ -332,6 +397,112 @@ export class Enemy {
 
     this.integrate(dt, ctx);
     this.animate(dt);
+  }
+
+  /**
+   * How far this enemy can notice the player.
+   *
+   * Scaled by daylight: things see much less far in the dark, which turns night
+   * into a stalking hazard rather than a wall of aggro, and keeps the daytime
+   * sight range short enough to build in peace.
+   */
+  private effectiveAggroRange(ctx: GameContext): number {
+    const daylight = ctx.daylight;
+    return this.archetype.aggroRange * (0.55 + daylight * 0.45);
+  }
+
+  /** Wander, and flee anything that gets close. Used by fish. */
+  private updatePassive(dt: number, ctx: GameContext, distance: number): void {
+    const fleeRange = this.archetype.aggroRange;
+    if (distance < fleeRange) {
+      const away = this.position.clone().sub(ctx.player.position);
+      if (away.lengthSq() < 1e-4) away.set(1, 0, 0);
+      away.normalize();
+      const target = this.position.clone().addScaledVector(away, 6);
+      this.steerSwim(ctx, target, this.currentSpeed * 1.5);
+      this.yaw = Math.atan2(-away.x, -away.z);
+    } else {
+      this.wanderTimer -= dt;
+      if (this.wanderTimer <= 0 || !this.wanderTarget) {
+        this.wanderTimer = 3 + this.jitter * 4;
+        this.wanderTarget = this.pickSwimTarget(ctx);
+      }
+      if (this.wanderTarget) {
+        this.steerSwim(ctx, this.wanderTarget, this.currentSpeed * 0.5);
+        const dir = this.wanderTarget.clone().sub(this.position);
+        if (dir.lengthSq() > 0.01) this.yaw = Math.atan2(-dir.x, -dir.z);
+      }
+    }
+
+    this.integrateAquatic(dt, ctx);
+    this.animateFish(dt);
+  }
+
+  /** Picks a nearby point that is still underwater. */
+  private pickSwimTarget(ctx: GameContext): THREE.Vector3 | null {
+    for (let attempt = 0; attempt < 6; attempt++) {
+      const candidate = this.position
+        .clone()
+        .add(new THREE.Vector3((Math.random() - 0.5) * 12, (Math.random() - 0.5) * 3, (Math.random() - 0.5) * 12));
+      if (ctx.world.isWaterAt(candidate.x, candidate.y, candidate.z)) return candidate;
+    }
+    return null;
+  }
+
+  private steerSwim(ctx: GameContext, target: THREE.Vector3, speed: number): void {
+    const dir = target.clone().sub(this.position);
+    if (dir.lengthSq() < 1e-4) return;
+    dir.normalize().multiplyScalar(speed);
+
+    // Refuse to steer out of the water; beaching itself looks broken.
+    const ahead = this.position.clone().addScaledVector(dir, 0.35);
+    if (!ctx.world.isWaterAt(ahead.x, ahead.y, ahead.z)) {
+      dir.multiplyScalar(-0.5);
+    }
+
+    this.velocity.lerp(dir, 0.12);
+  }
+
+  /**
+   * Buoyant swimming. Out of water a fish falls, flops, and suffocates — which is
+   * what makes spearing one in the shallows viable.
+   */
+  private integrateAquatic(dt: number, ctx: GameContext): void {
+    const submerged = ctx.world.isWaterAt(this.position.x, this.position.y, this.position.z);
+
+    if (submerged) {
+      this.velocity.multiplyScalar(Math.max(0, 1 - 1.6 * dt));
+      this.suffocation = 0;
+    } else {
+      this.velocity.y -= GRAVITY * dt;
+      this.velocity.x *= 0.9;
+      this.velocity.z *= 0.9;
+      this.suffocation += dt;
+      if (this.suffocation > 6) {
+        this.hp = 0;
+        this.die();
+        return;
+      }
+    }
+
+    const next = this.position.clone().addScaledVector(this.velocity, dt);
+    // Simple sphere-ish collision: refuse moves into solid blocks.
+    if (!ctx.world.isSolidAt(next.x, next.y, next.z)) {
+      this.position.copy(next);
+    } else {
+      this.velocity.multiplyScalar(-0.3);
+    }
+
+    this.group.position.copy(this.position);
+    this.body.rotation.y = this.yaw;
+  }
+
+  private animateFish(dt: number): void {
+    const speed = this.velocity.length();
+    this.walkPhase += dt * (4 + speed * 3);
+    // Tail beat scales with effort.
+    this.rightArm.rotation.y = Math.sin(this.walkPhase) * (0.25 + Math.min(0.5, speed * 0.12));
+    this.body.rotation.z = Math.sin(this.walkPhase * 0.5) * 0.08;
   }
 
   private hasLineOfSight(ctx: GameContext, distance: number): boolean {

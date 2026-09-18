@@ -4,7 +4,12 @@ import { item } from '../combat/items';
 import { EntityManager } from '../entities/EntityManager';
 import { PickupManager } from '../entities/Pickups';
 import { ProjectileManager } from '../entities/Projectile';
+import { BlockHighlight } from '../fx/BlockHighlight';
+import { LightManager } from '../fx/LightManager';
 import { Particles } from '../fx/Particles';
+import { Rain } from '../fx/Rain';
+import { Starfield } from '../fx/Starfield';
+import { ViewModel } from '../fx/ViewModel';
 import { Inventory, type Stack } from '../player/Inventory';
 import { Player } from '../player/Player';
 import { readSave, writeSave, type SaveData, SAVE_VERSION } from '../save/Save';
@@ -12,6 +17,8 @@ import { Hud } from '../ui/Hud';
 import { Screens } from '../ui/Screens';
 import { Block } from '../world/blocks';
 import { SEA_LEVEL } from '../world/TerrainGen';
+import { TimeOfDay } from '../world/TimeOfDay';
+import { Weather } from '../world/Weather';
 import { World } from '../world/World';
 import type { GameContext, LogClass, FloaterClass, ProjectileRequest } from './Context';
 import { Input } from './Input';
@@ -39,6 +46,21 @@ export class Game {
   private hud = new Hud();
   private screens: Screens;
 
+  private time = new TimeOfDay();
+  private weather = new Weather();
+  private rain = new Rain();
+  private stars = new Starfield();
+  private lights = new LightManager();
+  private highlight = new BlockHighlight();
+  private viewModel: ViewModel;
+
+  /** Reused colour scratch, so the render loop allocates nothing. */
+  private readonly skyColor = new THREE.Color();
+  private readonly fogColorScratch = new THREE.Color();
+  private readonly lightColorScratch = new THREE.Color();
+  private readonly sunDirection = new THREE.Vector3();
+  private underwater = false;
+
   private ctx: GameContext;
   private mode: Mode = 'menu';
   private elapsed = 0;
@@ -46,6 +68,15 @@ export class Game {
   private frameCount = 0;
   private fpsTimer = 0;
   private fps = 0;
+
+  /**
+   * Render stats for the world pass only.
+   *
+   * three.js resets `renderer.info` at the start of every render call, so after
+   * the view model draws, `info.render` describes just the held weapon. Anything
+   * reporting world geometry has to snapshot the counters in between.
+   */
+  private worldRenderStats = { triangles: 0, calls: 0 };
 
   constructor(canvas: HTMLCanvasElement) {
     this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' });
@@ -65,7 +96,19 @@ export class Game {
     const viewDistance = RENDER_DISTANCE * 16;
     this.scene.fog = new THREE.Fog(SKY_COLOR, viewDistance * 0.45, viewDistance * 0.95);
 
+    this.viewModel = new ViewModel(78, window.innerWidth / window.innerHeight);
     this.setupLights();
+    this.scene.add(this.stars.points, this.rain.lines, this.lights.group, this.highlight.group);
+
+    // Rain kicks up a little spray where it lands.
+    this.rain.onSplash = (x, y, z) => {
+      if (Math.random() > 0.06) return;
+      this.particles.spawn(
+        new THREE.Vector3(x, y + 0.05, z),
+        new THREE.Vector3((Math.random() - 0.5) * 1.2, 1 + Math.random(), (Math.random() - 0.5) * 1.2),
+        { color: 0xa8c0d4, size: 0.05, life: 0.28, gravity: 16 },
+      );
+    };
 
     this.world = new World(randomSeed(), RENDER_DISTANCE);
     this.scene.add(this.world.group);
@@ -96,14 +139,93 @@ export class Game {
 
   // ---------------------------------------------------------------- setup
 
+  private ambient!: THREE.AmbientLight;
+  private hemisphere!: THREE.HemisphereLight;
+  private sun!: THREE.DirectionalLight;
+
   private setupLights(): void {
     // Baked AO handles contact shadows, so simple global lighting is enough.
-    this.scene.add(new THREE.AmbientLight(0xffffff, 0.55));
-    const hemi = new THREE.HemisphereLight(0xbcd8f0, 0x4a4034, 0.7);
-    this.scene.add(hemi);
-    const sun = new THREE.DirectionalLight(0xfff2d8, 1.15);
-    sun.position.set(0.45, 1, 0.28).normalize();
-    this.scene.add(sun);
+    // Intensities and colours are driven by the day/night cycle each frame.
+    this.ambient = new THREE.AmbientLight(0xffffff, 0.55);
+    this.hemisphere = new THREE.HemisphereLight(0xbcd8f0, 0x4a4034, 0.7);
+    this.sun = new THREE.DirectionalLight(0xfff2d8, 1.15);
+    this.sun.position.set(0.45, 1, 0.28);
+    this.scene.add(this.ambient, this.hemisphere, this.sun);
+  }
+
+  /**
+   * Applies the time of day and current weather to sky, fog, and lighting.
+   * Also handles the underwater case, which overrides everything else.
+   */
+  private updateEnvironment(dt: number): void {
+    this.time.update(dt);
+    this.weather.update(dt);
+
+    const daylight = this.time.daylight;
+    // Published here rather than in step() so that anything reading the context
+    // — spawn caps, enemy sight — sees the current time even when the
+    // environment is updated outside the normal simulation tick.
+    this.ctx.daylight = daylight;
+    this.ctx.raining = this.weather.isRaining;
+    const dim = this.weather.dim;
+
+    this.time.skyColor(this.skyColor).multiplyScalar(1 - dim * 0.72);
+    this.time.fogColor(this.fogColorScratch).multiplyScalar(1 - dim * 0.45);
+    this.time.lightColor(this.lightColorScratch);
+
+    this.sun.position.copy(this.time.lightDirection(this.sunDirection)).multiplyScalar(100);
+    this.sun.color.copy(this.lightColorScratch);
+    this.sun.intensity = this.time.sunIntensity * (1 - dim * 0.7);
+    this.ambient.intensity = this.time.ambientIntensity * (1 - dim * 0.3);
+    this.hemisphere.intensity = this.time.hemisphereIntensity * (1 - dim * 0.4);
+
+    const eye = this.player.eyePosition;
+    this.underwater = this.world.getBlock(
+      Math.floor(eye.x),
+      Math.floor(eye.y),
+      Math.floor(eye.z),
+    ) === Block.Water;
+
+    const fog = this.scene.fog as THREE.Fog;
+    const viewDistance = RENDER_DISTANCE * 16;
+
+    if (this.underwater) {
+      // Murky and close: being submerged should feel like a different place.
+      this.skyColor.setRGB(0.06, 0.18, 0.3);
+      fog.color.setRGB(0.05, 0.16, 0.28);
+      fog.near = 0.4;
+      fog.far = 16;
+      this.ambient.intensity = 0.32 + daylight * 0.28;
+    } else {
+      fog.color.copy(this.fogColorScratch);
+      // Weather pulls the fog plane in; fog weather does it hardest.
+      const tighten = this.weather.fogTighten;
+      fog.near = viewDistance * (0.45 - tighten * 0.42);
+      fog.far = viewDistance * (0.95 - tighten * 0.72);
+    }
+
+    (this.scene.background as THREE.Color).copy(this.skyColor);
+    this.renderer.setClearColor(this.skyColor);
+
+    this.stars.update(eye, this.underwater ? 0 : this.time.starOpacity * (1 - dim));
+
+    // Rain, and the lights that matter once it gets dark.
+    this.rain.setBrightness(0.35 + daylight * 0.65);
+    this.rain.update(dt, this.world, this.player.position, this.underwater ? 0 : this.weather.rainRate);
+    this.lights.update(this.world, eye, this.worldTorchPosition(), 1 - daylight);
+  }
+
+  /**
+   * Where the held torch's flame sits in world space.
+   *
+   * The view model lives in camera space, so its flame position has to be
+   * transformed out to the world before a light can be placed there.
+   */
+  private worldTorchPosition(): THREE.Vector3 | null {
+    if (!this.viewModel.hasTorch) return null;
+    const local = this.viewModel.torchFlameLocalPosition;
+    if (!local) return null;
+    return local.clone().applyMatrix4(this.camera.matrixWorld);
   }
 
   private buildContext(): GameContext {
@@ -113,6 +235,8 @@ export class Game {
       particles: this.particles,
       enemies: this.entities,
       time: 0,
+      daylight: 1,
+      raining: false,
       damagePlayer: (input, from, sourceName) => {
         if (this.invulnerable) return;
         this.combat.damagePlayer(this.ctx, input, from, sourceName);
@@ -275,18 +399,31 @@ export class Game {
       this.particles.update(dt);
       this.entities.update(dt, this.ctx);
       this.projectiles.update(dt, this.ctx);
+      this.updateEnvironment(dt);
     }
 
     this.player.applyToCamera(this.camera);
+    this.camera.updateMatrixWorld();
     this.entities.faceCamera(this.camera);
+    this.pickups.faceCamera(this.camera.quaternion);
 
     this.hud.update(this.player, this.combat.hudState(this.ctx), {
       fps: this.fps,
       chunks: this.world.loadedChunkCount,
-      entities: this.entities.count,
+      entities: this.entities.hostileCount,
+      clock: this.time.clockLabel(),
+      phase: this.time.phaseLabel(),
+      weather: this.weather.label(),
+      underwater: this.underwater,
     });
 
     this.renderer.render(this.scene, this.camera);
+    this.worldRenderStats.triangles = this.renderer.info.render.triangles;
+    this.worldRenderStats.calls = this.renderer.info.render.calls;
+
+    // The held item is drawn last, over a cleared depth buffer, so it is never
+    // sliced open by a wall the player is standing against.
+    this.viewModel.render(this.renderer);
     this.input.endFrame();
   }
 
@@ -296,6 +433,9 @@ export class Game {
 
     this.handlePlayKeys();
 
+    // Environment first: spawn pressure and enemy sight both read daylight.
+    this.updateEnvironment(dt);
+
     this.world.update(this.player.position.x, this.player.position.z);
     this.combat.update(dt, this.input, this.ctx);
     this.player.update(dt, this.input, this.world);
@@ -303,6 +443,40 @@ export class Game {
     this.projectiles.update(dt, this.ctx);
     this.pickups.update(dt, this.ctx);
     this.particles.update(dt);
+
+    this.updateBlockHighlight();
+    this.updateViewModel(dt);
+  }
+
+  /** Outlines the block under the crosshair and cracks it as it breaks. */
+  private updateBlockHighlight(): void {
+    const state = this.combat.highlightState();
+    if (!state) {
+      this.highlight.hide();
+      return;
+    }
+    this.highlight.show(state.x, state.y, state.z, state.progress);
+  }
+
+  private updateViewModel(dt: number): void {
+    const view = this.combat.viewState(this.ctx);
+    const inventory = this.player.inventory;
+    this.viewModel.update(dt, {
+      action: view.action,
+      phase: view.phase,
+      progress: view.progress,
+      draw: view.draw,
+      blocking: this.player.blocking,
+      mainItemId: inventory.activeItemId ?? inventory.equipped.weapon,
+      shieldItemId: inventory.equipped.shield,
+      torchItemId: inventory.equipped.torch,
+      attackMode: view.attackMode,
+      speed: Math.hypot(this.player.velocity.x, this.player.velocity.z),
+      shotCounter: view.shotCounter,
+      daylight: this.time.daylight,
+      lookDx: this.input.mouseDX,
+      lookDy: this.input.mouseDY,
+    });
   }
 
   private handleGlobalKeys(): void {
@@ -327,8 +501,10 @@ export class Game {
   }
 
   private onResize(): void {
-    this.camera.aspect = window.innerWidth / window.innerHeight;
+    const aspect = window.innerWidth / window.innerHeight;
+    this.camera.aspect = aspect;
     this.camera.updateProjectionMatrix();
+    this.viewModel.setAspect(aspect);
     this.renderer.setSize(window.innerWidth, window.innerHeight);
   }
 
@@ -342,10 +518,11 @@ export class Game {
       mode: this.mode,
       chunks: this.world.loadedChunkCount,
       pendingChunks: this.world.pendingChunkCount,
-      triangles: this.renderer.info.render.triangles,
-      drawCalls: this.renderer.info.render.calls,
+      triangles: this.worldRenderStats.triangles,
+      drawCalls: this.worldRenderStats.calls,
       enemies: this.entities.count,
       projectiles: this.projectiles.count,
+      projectilesFired: this.projectiles.spawnedTotal,
       orbs: this.pickups.orbCount,
       playerX: Number(this.player.position.x.toFixed(2)),
       playerY: Number(this.player.position.y.toFixed(2)),
@@ -438,6 +615,122 @@ export class Game {
 
   debugClearEnemies(): void {
     this.entities.clear();
+  }
+
+  /** Jumps to a point in the day/night cycle. */
+  debugSetTime(phase: 'dawn' | 'day' | 'dusk' | 'night'): void {
+    this.time.setPhase(phase);
+    this.updateEnvironment(0);
+  }
+
+  /** Forces a weather state immediately. */
+  debugSetWeather(kind: 'clear' | 'fog' | 'rain' | 'storm', intensity = 1): void {
+    this.weather.force(kind, intensity);
+    this.updateEnvironment(0);
+  }
+
+  /** Stops the clock, so screenshots are reproducible. */
+  debugFreezeTime(frozen: boolean): void {
+    this.time.running = !frozen;
+  }
+
+  /** Environment readouts for tests. */
+  debugEnvironment(): Record<string, unknown> {
+    return {
+      clock: this.time.clockLabel(),
+      phase: this.time.phaseLabel(),
+      daylight: Number(this.time.daylight.toFixed(3)),
+      starOpacity: Number(this.time.starOpacity.toFixed(3)),
+      weather: this.weather.label(),
+      rainRate: Math.round(this.weather.rainRate),
+      raining: this.weather.isRaining,
+      underwater: this.underwater,
+      lightSources: this.world.lightSourceCount,
+      hostiles: this.entities.hostileCount,
+      fish: this.entities.fishCount,
+      hostileCap: this.entities.debugHostileCap(this.ctx),
+    };
+  }
+
+  /** View model animation state, for verifying swing/thrust are distinct. */
+  debugViewState(): Record<string, unknown> {
+    const view = this.combat.viewState(this.ctx);
+    return {
+      action: view.action,
+      phase: view.phase,
+      progress: Number(view.progress.toFixed(3)),
+      draw: Number(view.draw.toFixed(3)),
+      attackMode: view.attackMode,
+      shots: view.shotCounter,
+      mainItem: this.player.inventory.activeItemId,
+      torch: this.player.inventory.equipped.torch,
+      shield: this.player.inventory.equipped.shield,
+    };
+  }
+
+  /** Block highlight state, for verifying the mining animation advances. */
+  debugHighlight(): Record<string, unknown> | null {
+    const state = this.combat.highlightState();
+    if (!state) return null;
+    return { ...state, progress: Number(state.progress.toFixed(3)), visible: true };
+  }
+
+  /** Spawns fish in the nearest water, for testing the hunting loop. */
+  debugSpawnFish(): number {
+    return this.entities.debugSpawnFishNear(this.ctx);
+  }
+
+  /** Number of rain drops currently falling. */
+  debugRainDrops(): number {
+    return this.rain.dropCount;
+  }
+
+  /** Dynamic light state, for verifying the torch actually lights the world. */
+  debugTorchLight(): Record<string, unknown> {
+    return this.lights.debugState();
+  }
+
+  /** World-space transform of the held item, for comparing attack animations. */
+  debugViewPose(): Record<string, number> {
+    return this.viewModel.debugPose();
+  }
+
+  /**
+   * Makes an item active, assigning it to the current hotbar slot if it is not
+   * already on the bar.
+   */
+  debugSelectHotbarByItem(itemId: string): boolean {
+    const inventory = this.player.inventory;
+    let slot = inventory.hotbar.indexOf(itemId);
+    if (slot < 0) {
+      slot = inventory.selected;
+      inventory.assignToHotbar(slot, itemId);
+    }
+    inventory.select(slot);
+    this.player.syncEquipmentDerived();
+    return inventory.activeItemId === itemId;
+  }
+
+  /** Forces the active weapon's attack mode, for deterministic animation tests. */
+  debugSetAttackMode(mode: 'swing' | 'thrust'): boolean {
+    const active = this.player.inventory.activeItem;
+    const modes = active?.weapon?.melee;
+    if (!active || !modes || modes.length === 0) return false;
+    const index = modes.findIndex((m) => m.mode === mode);
+    if (index < 0) return false;
+    this.player.inventory.attackModes.set(active.id, index);
+    return true;
+  }
+
+  /** Equips an item directly, bypassing the hotbar. */
+  debugEquip(itemId: string): boolean {
+    const ok = this.player.inventory.equip(itemId);
+    this.player.syncEquipmentDerived();
+    return ok;
+  }
+
+  debugGiveItem(itemId: string, qty = 1): void {
+    this.player.inventory.add(itemId, qty);
   }
 
   /** Remaining spell slots per tier. */
@@ -537,6 +830,8 @@ export class Game {
       pitch: Number(this.player.pitch.toFixed(2)),
       yaw: Number(this.player.yaw.toFixed(2)),
       mode: this.mode,
+      combatState: this.combat.debugState(),
+      input: { ...this.input.counters },
     };
   }
 
@@ -578,6 +873,7 @@ export class Game {
         version: SAVE_VERSION,
         savedAt: Date.now(),
         seed: this.world.seed,
+        timeOfDay: this.time.fraction,
         player: {
           x: this.player.position.x,
           y: this.player.position.y,
@@ -614,6 +910,7 @@ export class Game {
       }
 
       this.world.applyEdits(data.edits);
+      if (typeof data.timeOfDay === 'number') this.time.fraction = data.timeOfDay;
 
       this.player.stats.restore(data.stats);
       this.player.inventory.restore(data.inventory);
@@ -630,6 +927,8 @@ export class Game {
       this.projectiles.clear();
       this.pickups.clear();
       this.particles.clear();
+      this.rain.clear();
+      this.highlight.hide();
       this.combat.reset();
       this.hud.hideDeath();
       if (this.mode === 'dead') {

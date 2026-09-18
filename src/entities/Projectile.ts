@@ -228,6 +228,12 @@ export class ProjectileManager {
   readonly group = new THREE.Group();
   private live: Projectile[] = [];
   private materialCache = new Map<string, THREE.Material>();
+  /**
+   * Total ever spawned. Lets a test distinguish "the shot never happened" from
+   * "the shot happened and the projectile already expired", which the live count
+   * alone cannot express.
+   */
+  private spawned = 0;
 
   constructor() {
     this.group.name = 'projectiles';
@@ -237,11 +243,16 @@ export class ProjectileManager {
     return this.live.length;
   }
 
+  get spawnedTotal(): number {
+    return this.spawned;
+  }
+
   spawn(req: ProjectileRequest): void {
     const look = req.look ?? 'arrow';
     const geometry = GEO[look];
     const material = this.material(look, req.color ?? defaultColor(look));
     const p = new Projectile(req, material, geometry);
+    this.spawned++;
     this.live.push(p);
     this.group.add(p.mesh);
   }

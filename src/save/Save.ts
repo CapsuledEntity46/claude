@@ -12,6 +12,8 @@ export interface SaveData {
   version: number;
   savedAt: number;
   seed: number;
+  /** Position in the day/night cycle, 0..1. Optional for older saves. */
+  timeOfDay?: number;
   player: { x: number; y: number; z: number; yaw: number; pitch: number };
   stats: StatsSnapshot;
   inventory: InventorySnapshot;

@@ -5,7 +5,8 @@ import type { Enemy } from '../entities/Enemy';
 import { Block, blockDef, blockDrop, isSolid } from '../world/blocks';
 import { PLAYER_HALF_WIDTH, PLAYER_HEIGHT } from '../player/Player';
 import { ammoItemFor, item, itemForBlock, type ItemDef } from './items';
-import { computeDamage, type DamageInput, type MeleeAttack, type RangedProfile } from './types';
+import { computeDamage, type AttackMode, type DamageInput, type MeleeAttack, type RangedProfile } from './types';
+import type { ViewAction, ViewPhase } from '../fx/ViewModel';
 
 const REACH = 5.2;
 /** Multiplier applied when a melee weapon chips a block instead of an enemy. */
@@ -55,6 +56,15 @@ export class CombatSystem {
   private target: Enemy | null = null;
   private rng = Math.random;
 
+  /** Which mode the current or just-finished melee attack used, for animation. */
+  private lastMeleeMode: AttackMode = 'swing';
+  /** Counts shots fired, so the view model can trigger a recoil kick. */
+  private shotCounter = 0;
+  /** Short timer driving the block-placement animation. */
+  private placeTimer = 0;
+  /** The block under the crosshair this frame, for the mining highlight. */
+  private blockTarget: { x: number; y: number; z: number } | null = null;
+
   /** Counters for debugging why an attack did or did not land. */
   readonly diag = {
     attempts: 0,
@@ -64,6 +74,10 @@ export class CombatSystem {
     mineCalls: 0,
     breaks: 0,
     lastReason: '',
+    /** Frames on which a left-click press was observed. */
+    primaryPresses: 0,
+    /** What the game saw on the most recent left-click press. */
+    lastPress: '',
   };
 
   // ------------------------------------------------------------------ per-frame
@@ -77,7 +91,9 @@ export class CombatSystem {
     }
 
     this.useCooldown = Math.max(0, this.useCooldown - dt);
+    this.placeTimer = Math.max(0, this.placeTimer - dt);
     this.updateTarget(ctx);
+    this.updateBlockTarget(ctx);
 
     const active = player.inventory.activeItem;
 
@@ -85,6 +101,9 @@ export class CombatSystem {
     this.handleGuard(input, ctx, active);
 
     if (this.state !== 'idle') {
+      if (input.mousePressed(0)) {
+        this.diag.lastReason = `press ignored: busy in ${this.state}`;
+      }
       this.tickBusyState(dt, ctx);
       return;
     }
@@ -139,6 +158,76 @@ export class CombatSystem {
     this.target = best;
   }
 
+  /** Tracks the block under the crosshair so it can be outlined every frame. */
+  private updateBlockTarget(ctx: GameContext): void {
+    const hit = ctx.world.raycast(ctx.player.eyePosition, ctx.player.lookDirection, REACH, isSolid);
+    this.blockTarget = hit ? { x: hit.x, y: hit.y, z: hit.z } : null;
+  }
+
+  /**
+   * What the block highlight should draw: the targeted block, plus mining
+   * progress when that block is actively being broken (negative when it is not).
+   */
+  highlightState(): { x: number; y: number; z: number; progress: number } | null {
+    if (!this.blockTarget) return null;
+    const { x, y, z } = this.blockTarget;
+    const key = `${x},${y},${z}`;
+    const progress = this.miningKey === key ? this.miningProgress : -1;
+    return { x, y, z, progress };
+  }
+
+  /**
+   * Animation state for the first-person view model. Wind-up and recovery are
+   * reported separately so the weapon can anticipate before it strikes.
+   */
+  viewState(ctx?: GameContext): {
+    action: ViewAction;
+    phase: ViewPhase;
+    progress: number;
+    draw: number;
+    attackMode: AttackMode;
+    shotCounter: number;
+  } {
+    const phaseProgress = 1 - this.timer / Math.max(0.0001, this.stateDuration);
+    const clamped = Math.max(0, Math.min(1, phaseProgress));
+
+    // The *currently selected* mode, which is what the idle stance should show.
+    // Reporting the last-used mode instead left the weapon carried in the old
+    // stance until the player attacked once after switching.
+    const selectedMode: AttackMode = ctx
+      ? this.currentMelee(ctx, ctx.player.inventory.activeItem)?.mode ?? this.lastMeleeMode
+      : this.lastMeleeMode;
+
+    // Mid-attack the animation must follow the mode that attack started with,
+    // even if the selection has since changed.
+    if (this.state === 'windup' || this.state === 'recovery') {
+      return {
+        action: this.lastMeleeMode,
+        phase: this.state === 'windup' ? 'windup' : 'recovery',
+        progress: clamped,
+        draw: this.draw,
+        attackMode: this.lastMeleeMode,
+        shotCounter: this.shotCounter,
+      };
+    }
+
+    let action: ViewAction = 'idle';
+    if (this.state === 'casting') action = 'cast';
+    else if (this.state === 'reloading') action = 'reload';
+    else if (this.draw > 0.02) action = 'draw';
+    else if (this.placeTimer > 0) action = 'place';
+    else if (this.miningKey !== null) action = 'mine';
+
+    return {
+      action,
+      phase: 'none',
+      progress: action === 'place' ? 1 - this.placeTimer / 0.18 : clamped,
+      draw: this.draw,
+      attackMode: selectedMode,
+      shotCounter: this.shotCounter,
+    };
+  }
+
   // ------------------------------------------------------------------ modes
 
   private handleModeSwitch(input: Input, ctx: GameContext, active: ItemDef | null): void {
@@ -169,16 +258,22 @@ export class CombatSystem {
 
   private handleGuard(input: Input, ctx: GameContext, active: ItemDef | null): void {
     const player = ctx.player;
-    // Holding blocks means right-click builds, so no guard while building.
-    const wantsGuard = input.isMouseDown(2) && active?.kind !== 'block';
+    // Holding something placeable means right-click builds, so no guard.
+    const placeable = active?.kind === 'block' || active?.kind === 'torch';
+    const wantsGuard = input.isMouseDown(2) && !placeable;
     player.blocking = wantsGuard && player.canBlock && this.state !== 'casting';
   }
 
   // ------------------------------------------------------------------ primary
 
   private handlePrimary(dt: number, input: Input, ctx: GameContext, active: ItemDef | null): void {
-    // Dedicated mining while a building block is selected.
-    if (active?.kind === 'block') {
+    if (input.mousePressed(0)) {
+      this.diag.primaryPresses++;
+      this.diag.lastPress = `item=${active?.id ?? 'none'} kind=${active?.kind ?? 'none'} state=${this.state} cd=${this.useCooldown.toFixed(2)}`;
+    }
+
+    // Dedicated mining while a placeable is selected (blocks and torches).
+    if (active?.kind === 'block' || active?.kind === 'torch') {
       if (input.isMouseDown(0)) this.mine(dt, ctx, 1);
       else this.resetMining();
       return;
@@ -216,7 +311,8 @@ export class CombatSystem {
   }
 
   private handleSecondary(input: Input, ctx: GameContext, active: ItemDef | null): void {
-    if (active?.kind === 'block' && input.mousePressed(2)) this.placeBlock(ctx, active);
+    const placeable = active?.kind === 'block' || active?.kind === 'torch';
+    if (placeable && input.mousePressed(2)) this.placeBlock(ctx, active!);
   }
 
   // ------------------------------------------------------------------ melee
@@ -241,6 +337,7 @@ export class CombatSystem {
     this.diag.lastReason = `began ${attack.mode}`;
 
     this.pendingMelee = attack;
+    this.lastMeleeMode = attack.mode;
     this.state = 'windup';
     this.stateDuration = attack.windup;
     this.timer = attack.windup;
@@ -434,6 +531,7 @@ export class CombatSystem {
     if (!ctx.world.setBlock(x, y, z, active.block)) return;
     ctx.player.inventory.remove(active.id, 1);
     this.useCooldown = 0.16;
+    this.placeTimer = 0.18;
   }
 
   // ------------------------------------------------------------------ bows
@@ -560,6 +658,8 @@ export class CombatSystem {
       });
     }
 
+    this.shotCounter++;
+
     if (profile.muzzleFlash) {
       ctx.particles.cone(origin, look, 22, 7, 0.35, { color: 0xffd070, size: 0.13, life: 0.22, gravity: -3, drag: 3 });
       ctx.particles.cone(origin, look, 26, 3, 0.6, { color: 0x8a8a8a, size: 0.2, life: 1.1, gravity: -1.5, drag: 1.4 });
@@ -599,6 +699,7 @@ export class CombatSystem {
       sourceName: active.name,
     });
     this.useCooldown = profile.cooldown;
+    this.shotCounter++;
     ctx.log('Fuse lit.', 'info');
   }
 
@@ -766,8 +867,25 @@ export class CombatSystem {
 
   private useConsumable(ctx: GameContext, active: ItemDef): void {
     if (this.useCooldown > 0) return;
+    const inventory = ctx.player.inventory;
+
+    // Cooking: hold a fish over the flame you are already carrying.
+    if (active.id === 'raw_fish' && inventory.equipped.torch) {
+      if (!inventory.remove('raw_fish', 1)) return;
+      inventory.add('cooked_fish', 1);
+      ctx.log('You cook the fish over your torch.', 'good');
+      ctx.particles.burst(ctx.player.center.clone().add(new THREE.Vector3(0, 0.2, 0)), 12, 1.6, {
+        color: 0xffa040,
+        size: 0.08,
+        life: 0.5,
+        gravity: -4,
+      });
+      this.useCooldown = 0.8;
+      return;
+    }
+
     const c = active.consumable!;
-    if (!ctx.player.inventory.remove(active.id, 1)) return;
+    if (!inventory.remove(active.id, 1)) return;
 
     const stats = ctx.player.stats;
     if (c.heal > 0) {
@@ -947,9 +1065,22 @@ export class CombatSystem {
       progress = this.miningProgress;
     }
 
-    const melee = this.currentMelee(ctx, active);
+    // Only real weapons describe an attack mode. Without this guard a torch or a
+    // stack of blocks inherits the bare-fists profile and the HUD claims you are
+    // holding something that swings for blunt damage.
+    const isWeapon = active?.kind === 'weapon' || active === null;
+    const melee = isWeapon ? this.currentMelee(ctx, active) : null;
     let modeLabel = '';
-    if (active?.kind === 'spell' && active.spell) {
+    if (active && !isWeapon && active.kind !== 'spell') {
+      modeLabel =
+        active.kind === 'block'
+          ? 'Left-click mines · right-click places'
+          : active.kind === 'torch'
+            ? 'Off-hand light · right-click plants one'
+            : active.kind === 'consumable'
+              ? 'Left-click to use'
+              : '';
+    } else if (active?.kind === 'spell' && active.spell) {
       modeLabel = `Tier ${active.spell.tier} · ${ctx.player.stats.slotsAvailable(active.spell.tier)} slots left`;
     } else if (profile && active?.weapon?.class !== 'melee') {
       const modes = active?.weapon?.melee.length ?? 0;
@@ -974,6 +1105,11 @@ export class CombatSystem {
     };
   }
 
+  /** The action state machine's current state, for diagnostics. */
+  debugState(): string {
+    return this.state;
+  }
+
   reset(): void {
     this.state = 'idle';
     this.timer = 0;
@@ -984,6 +1120,9 @@ export class CombatSystem {
     this.loaded.clear();
     this.resetMining();
     this.target = null;
+    this.blockTarget = null;
+    this.placeTimer = 0;
+    this.shotCounter = 0;
   }
 }
 

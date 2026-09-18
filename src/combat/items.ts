@@ -12,7 +12,7 @@ import type {
   WeaponDef,
 } from './types';
 
-export type ItemKind = 'weapon' | 'armor' | 'shield' | 'spell' | 'block' | 'consumable' | 'ammo';
+export type ItemKind = 'weapon' | 'armor' | 'shield' | 'spell' | 'block' | 'consumable' | 'ammo' | 'torch';
 
 export interface ItemDef {
   id: string;
@@ -32,6 +32,13 @@ export interface ItemDef {
   consumable?: ConsumableDef;
   ammo?: AmmoType;
   block?: Block;
+  torch?: TorchDef;
+}
+
+export interface TorchDef {
+  /** Light radius in blocks. */
+  radius: number;
+  intensity: number;
 }
 
 // ------------------------------------------------------------------ melee builders
@@ -456,9 +463,54 @@ defs.push(
   },
 );
 
+// --- Light sources ----------------------------------------------------------
+
+defs.push({
+  id: 'torch',
+  name: 'Torch',
+  kind: 'torch',
+  glyph: '🕯️',
+  tier: 1,
+  stackable: true,
+  maxStack: 24,
+  blurb: 'Held in the off hand, alongside a shield. Right-click to plant one as a light.',
+  torch: { radius: 11, intensity: 1.4 },
+  // Also placeable, so a stack of torches lights a building site.
+  block: Block.Torch,
+});
+
+// --- Food -------------------------------------------------------------------
+
+defs.push(
+  {
+    id: 'raw_fish',
+    name: 'Raw Fish',
+    kind: 'consumable',
+    glyph: '🐟',
+    tier: 1,
+    stackable: true,
+    maxStack: 16,
+    blurb: 'Edible, barely. Use it while holding a lit torch to cook it instead.',
+    consumable: { heal: 5, restoreTier: 0, stamina: 30 },
+  },
+  {
+    id: 'cooked_fish',
+    name: 'Cooked Fish',
+    kind: 'consumable',
+    glyph: '🍣',
+    tier: 2,
+    stackable: true,
+    maxStack: 16,
+    blurb: 'Restores 26 health and a good deal of stamina.',
+    consumable: { heal: 26, restoreTier: 0, stamina: 70 },
+  },
+);
+
 // --- Placeable blocks (generated from the block registry) -------------------
 
 for (const b of PLACEABLE) {
+  // The torch already exists as a hand-held item that doubles as a placeable.
+  if (b === Block.Torch) continue;
   const bd = blockDef(b);
   defs.push({
     id: `block_${bd.name.toLowerCase().replace(/[^a-z]+/g, '_')}`,

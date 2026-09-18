@@ -8,14 +8,19 @@
  *
  * Run with: npm run test:unit
  */
+import { Vector3 } from 'three';
 import { item } from '../src/combat/items';
 import { computeDamage, type DamageInput, type DefenseProfile } from '../src/combat/types';
+import { ARCHETYPES, FISH, pickArchetype } from '../src/entities/archetypes';
 import { Inventory } from '../src/player/Inventory';
 import { PlayerStats, xpToReach } from '../src/player/Stats';
-import { Block } from '../src/world/blocks';
+import { Block, isLightSource } from '../src/world/blocks';
 import { CHUNK_SX, CHUNK_SY, CHUNK_SZ, Chunk, voxelIndex } from '../src/world/Chunk';
 import { meshChunk } from '../src/world/ChunkMesher';
+import { mulberry32 } from '../src/world/noise';
 import { TerrainGen } from '../src/world/TerrainGen';
+import { TimeOfDay } from '../src/world/TimeOfDay';
+import { Weather } from '../src/world/Weather';
 
 let passed = 0;
 const failures: string[] = [];
@@ -413,6 +418,191 @@ tampered.restore({
 check(
   'a corrupt save is sanitised rather than trusted',
   tampered.bag[0] === null && tampered.hotbar[0] === null && tampered.equipped.weapon === null && tampered.selected < 8,
+);
+
+// ---------------------------------------------------------------- day/night
+
+section('day/night cycle');
+
+const clock = new TimeOfDay(0.5);
+check('noon is fully lit', clock.daylight > 0.95, `daylight ${clock.daylight.toFixed(2)}`);
+check('noon reads as day', clock.phase === 'day', clock.phaseLabel());
+check('the sun is overhead at noon', clock.sunAltitude > 0.95, `altitude ${clock.sunAltitude.toFixed(2)}`);
+check('no stars at noon', clock.starOpacity < 0.05, `${clock.starOpacity.toFixed(2)}`);
+
+clock.setPhase('night');
+check('midnight is dark', clock.daylight < 0.05, `daylight ${clock.daylight.toFixed(2)}`);
+check('midnight reads as night', clock.isNight && clock.phase === 'night', clock.phaseLabel());
+check('stars are fully out at midnight', clock.starOpacity > 0.95, `${clock.starOpacity.toFixed(2)}`);
+check('there is still some ambient light at night', clock.ambientIntensity > 0.1, `${clock.ambientIntensity.toFixed(2)}`);
+
+clock.setPhase('dawn');
+check('dawn is a transition, not day or night', clock.phase === 'dawn', clock.phaseLabel());
+check('dawn is partially lit', clock.daylight > 0 && clock.daylight < 0.9, `daylight ${clock.daylight.toFixed(2)}`);
+
+check(
+  'the clock advances and wraps',
+  (() => {
+    const t = new TimeOfDay(0.99, 100);
+    t.update(2); // 2s of a 100s day pushes past midnight
+    return t.fraction >= 0 && t.fraction < 0.5;
+  })(),
+);
+check(
+  'the clock label is a 24-hour time',
+  /^\d{2}:\d{2}$/.test(new TimeOfDay(0.5).clockLabel()),
+  new TimeOfDay(0.5).clockLabel(),
+);
+check(
+  'daylight is brighter than night by a wide margin',
+  new TimeOfDay(0.5).sunIntensity > new TimeOfDay(0).sunIntensity * 3,
+);
+check(
+  'the light direction stays above the horizon at night (moonlight)',
+  (() => {
+    const t = new TimeOfDay(0);
+    return t.lightDirection(new Vector3()).y > 0;
+  })(),
+);
+
+// ---------------------------------------------------------------- weather
+
+section('weather');
+
+const weather = new Weather(mulberry32(7));
+weather.force('clear');
+check('clear weather has no rain and no fog', weather.rainRate === 0 && weather.fogTighten === 0);
+check('clear weather is labelled clear', weather.label() === 'Clear', weather.label());
+
+weather.force('rain', 1);
+check('rain produces falling drops', weather.rainRate > 100 && weather.isRaining, `rate ${weather.rainRate}`);
+check('rain pulls the fog in', weather.fogTighten > 0.2, `${weather.fogTighten.toFixed(2)}`);
+
+weather.force('storm', 1);
+const stormRate = weather.rainRate;
+weather.force('rain', 1);
+check('a storm rains harder than rain', stormRate > weather.rainRate, `storm ${stormRate} vs rain ${weather.rainRate}`);
+
+weather.force('fog', 1);
+check('fog obscures without raining', weather.fogTighten > 0.5 && !weather.isRaining, `${weather.fogTighten.toFixed(2)}`);
+
+check(
+  'weather transitions ease rather than snapping',
+  (() => {
+    const w = new Weather(mulberry32(3));
+    w.force('rain', 1);
+    const full = w.rainRate;
+    // Drive it to clear and step a fraction of the transition.
+    w.force('clear');
+    w.force('rain', 0.2);
+    return w.rainRate > 0 && w.rainRate < full;
+  })(),
+);
+// Simulate a long stretch of real-time weather and watch how it changes.
+const weatherLog: { kind: string; intensity: number }[] = [];
+{
+  const w = new Weather(mulberry32(99));
+  let previous = w.kind;
+  for (let step = 0; step < 60_000; step++) {
+    w.update(0.1); // 100 minutes at 10 Hz
+    if (w.kind !== previous) {
+      weatherLog.push({ kind: w.kind, intensity: w.intensity });
+      previous = w.kind;
+    }
+  }
+}
+
+check('weather changes over time', weatherLog.length > 4, `${weatherLog.length} changes in 100 minutes`);
+check(
+  'weather variety is used, not just one state',
+  new Set(weatherLog.map((e) => e.kind)).size >= 3,
+  [...new Set(weatherLog.map((e) => e.kind))].join(', '),
+);
+check(
+  'the weather kind only changes once the previous one has faded out',
+  weatherLog.every((e) => e.intensity <= 0.05),
+  `worst intensity at a switch: ${Math.max(0, ...weatherLog.map((e) => e.intensity)).toFixed(3)}`,
+);
+check(
+  'consecutive weather states differ',
+  weatherLog.every((e, i) => i === 0 || e.kind !== weatherLog[i - 1].kind),
+);
+
+// ---------------------------------------------------------------- torches, fish, food
+
+section('torches, fish, and food');
+
+const torch = item('torch');
+check('a torch is its own equipment kind', torch.kind === 'torch', torch.kind);
+check('a torch emits light', (torch.torch?.radius ?? 0) > 5, `radius ${torch.torch?.radius}`);
+check('a torch can also be planted as a block', torch.block === Block.Torch);
+check('the torch block is a light source', isLightSource(Block.Torch));
+check('plain stone is not a light source', !isLightSource(Block.Stone));
+
+const withTorch = new Inventory();
+withTorch.add('torch', 4);
+withTorch.add('iron_kite_shield');
+withTorch.add('shortsword');
+withTorch.equip('torch');
+withTorch.equip('iron_kite_shield');
+withTorch.equip('shortsword');
+check(
+  'a torch and a shield can be carried at the same time',
+  withTorch.equipped.torch === 'torch' && withTorch.equipped.shield === 'iron_kite_shield',
+  `torch ${withTorch.equipped.torch}, shield ${withTorch.equipped.shield}`,
+);
+check('equipping a torch does not disturb the weapon', withTorch.equipped.weapon === 'shortsword');
+check('the starting kit includes a lit torch', Inventory.startingKit().equipped.torch === 'torch');
+
+const rawFish = item('raw_fish');
+const cookedFish = item('cooked_fish');
+check('raw fish is edible', (rawFish.consumable?.heal ?? 0) > 0, `heals ${rawFish.consumable?.heal}`);
+check(
+  'cooking a fish makes it much more nourishing',
+  (cookedFish.consumable?.heal ?? 0) > (rawFish.consumable?.heal ?? 0) * 3,
+  `raw ${rawFish.consumable?.heal} vs cooked ${cookedFish.consumable?.heal}`,
+);
+
+check('fish are aquatic', FISH.aquatic === true);
+check('fish never fight back', FISH.passive === true);
+check('fish use a fish body, not a humanoid one', FISH.look.bodyStyle === 'fish');
+check('fish have no attack of any kind', !FISH.melee && !FISH.ranged);
+check(
+  'fish always drop something to eat',
+  FISH.extraLoot?.some((l) => l.itemId === 'raw_fish' && l.chance >= 1) === true,
+);
+check('fish are excluded from the hostile spawn roll', FISH.weight === 0);
+check(
+  'the hostile spawn roll never returns a fish',
+  (() => {
+    const rand = mulberry32(4242);
+    for (let i = 0; i < 300; i++) {
+      if (pickArchetype(20, rand).id === FISH.id) return false;
+    }
+    return true;
+  })(),
+);
+
+// ---------------------------------------------------------------- enemy sight
+
+section('enemy sight ranges');
+
+// The playtest complaint was that enemies noticed the player from absurd range.
+const meleeSight = ARCHETYPES.filter((a) => !a.ranged).map((a) => a.aggroRange);
+check(
+  'melee enemies only notice you from close range',
+  Math.max(...meleeSight) <= 15,
+  `longest melee sight ${Math.max(...meleeSight)} blocks`,
+);
+const rangedSight = ARCHETYPES.filter((a) => a.ranged).map((a) => a.aggroRange);
+check(
+  'ranged enemies see further, but not across the map',
+  Math.max(...rangedSight) <= 20 && Math.max(...rangedSight) > Math.min(...meleeSight),
+  `longest ranged sight ${Math.max(...rangedSight)} blocks`,
+);
+check(
+  'archers stand off further than they can be surprised from',
+  ARCHETYPES.every((a) => !a.ranged || a.aggroRange > a.ranged.standoff),
 );
 
 // ---------------------------------------------------------------- result

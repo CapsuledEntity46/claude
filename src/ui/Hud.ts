@@ -19,6 +19,16 @@ function el<T extends HTMLElement>(id: string): T {
  * All the on-screen readouts. Kept as DOM rather than in-canvas: text, bars, and
  * grids are simply better in HTML, and it costs nothing at these update rates.
  */
+export interface HudEnvironment {
+  fps: number;
+  chunks: number;
+  entities: number;
+  clock: string;
+  phase: string;
+  weather: string;
+  underwater: boolean;
+}
+
 export class Hud {
   private hpFill = el<HTMLDivElement>('hp-fill');
   private hpText = el<HTMLSpanElement>('hp-text');
@@ -85,7 +95,7 @@ export class Hud {
 
   // ---------------------------------------------------------------- per-frame
 
-  update(player: Player, combat: HudCombatState, info: { fps: number; chunks: number; entities: number }): void {
+  update(player: Player, combat: HudCombatState, info: HudEnvironment): void {
     const stats = player.stats;
 
     const hpFraction = Math.max(0, stats.hp / stats.maxHp);
@@ -198,7 +208,7 @@ export class Hud {
     this.activeMode.textContent = bits.join('  ·  ');
   }
 
-  private updateStatus(player: Player, combat: HudCombatState, info: { fps: number; chunks: number; entities: number }): void {
+  private updateStatus(player: Player, combat: HudCombatState, info: HudEnvironment): void {
     const defense = player.defense;
     const armorName = player.inventory.equippedDef('armor')?.name ?? 'Unarmoured';
     const resists = Object.entries(defense.resist)
@@ -207,7 +217,16 @@ export class Hud {
       .join('  ');
 
     const ward = player.stats.wardArmor > 0 ? `  (+${player.stats.wardArmor} ward)` : '';
-    this.armorLine.innerHTML = `${armorName} · Armor ${defense.armor}${ward}<br><span style="opacity:.7">${resists}</span>`;
+
+    // Off-hand: shield and torch can be carried together, so show both.
+    const shield = player.inventory.equippedDef('shield');
+    const torch = player.inventory.equippedDef('torch');
+    const offhand = [shield?.name, torch ? `${torch.name} (lit)` : null].filter(Boolean).join(' + ') || 'Off-hand empty';
+
+    this.armorLine.innerHTML =
+      `${armorName} · Armor ${defense.armor}${ward}<br>` +
+      `<span style="opacity:.7">${resists}</span><br>` +
+      `<span style="opacity:.8">${offhand}</span>`;
 
     const target = combat.targetName
       ? `<br><span style="color:#ffd9a0">${combat.targetName} — ${Math.round(combat.targetHpFraction * 100)}%</span>`
@@ -215,7 +234,13 @@ export class Hud {
     this.posLine.innerHTML =
       `${player.position.x.toFixed(0)}, ${player.position.y.toFixed(0)}, ${player.position.z.toFixed(0)}${target}`;
 
-    this.perfLine.textContent = `${info.fps} fps · ${info.chunks} chunks · ${info.entities} foes`;
+    const night = info.phase === 'Night' || info.phase === 'Dusk';
+    const clockColor = night ? '#9fb4e0' : '#ffe0a0';
+    const weatherNote = info.weather === 'Clear' ? '' : ` · ${info.weather}`;
+    const submerged = info.underwater ? ' · <span style="color:#7fd0e8">underwater</span>' : '';
+    this.perfLine.innerHTML =
+      `<span style="color:${clockColor}">${info.clock} ${info.phase}</span>${weatherNote}${submerged}<br>` +
+      `<span style="opacity:.65">${info.fps} fps · ${info.chunks} chunks · ${info.entities} foes</span>`;
   }
 
   // ---------------------------------------------------------------- log

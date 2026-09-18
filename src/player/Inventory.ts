@@ -5,7 +5,11 @@ export interface Stack {
   qty: number;
 }
 
-export type EquipSlot = 'weapon' | 'shield' | 'armor';
+/**
+ * A torch occupies its own slot rather than competing with the shield: the whole
+ * point of carrying one is to light the way *while* still being able to block.
+ */
+export type EquipSlot = 'weapon' | 'shield' | 'armor' | 'torch';
 
 export const BAG_SIZE = 24;
 export const HOTBAR_SIZE = 8;
@@ -28,7 +32,7 @@ export interface InventorySnapshot {
 export class Inventory {
   bag: (Stack | null)[] = new Array(BAG_SIZE).fill(null);
   hotbar: (string | null)[] = new Array(HOTBAR_SIZE).fill(null);
-  equipped: Record<EquipSlot, string | null> = { weapon: null, shield: null, armor: null };
+  equipped: Record<EquipSlot, string | null> = { weapon: null, shield: null, armor: null, torch: null };
   selected = 0;
 
   /** Remembered swing/thrust choice per weapon id. */
@@ -99,7 +103,13 @@ export class Inventory {
   }
 
   private isHotbarWorthy(def: ItemDef): boolean {
-    return def.kind === 'weapon' || def.kind === 'spell' || def.kind === 'block' || def.kind === 'consumable';
+    return (
+      def.kind === 'weapon' ||
+      def.kind === 'spell' ||
+      def.kind === 'block' ||
+      def.kind === 'consumable' ||
+      def.kind === 'torch'
+    );
   }
 
   remove(itemId: string, qty = 1): boolean {
@@ -146,6 +156,10 @@ export class Inventory {
       this.equipped.armor = itemId;
       return true;
     }
+    if (def.kind === 'torch') {
+      this.equipped.torch = itemId;
+      return true;
+    }
     return false;
   }
 
@@ -155,7 +169,7 @@ export class Inventory {
     const id = this.hotbar[index];
     const def = id ? ITEMS.get(id) : undefined;
     // Picking a weapon on the hotbar is the same gesture as drawing it.
-    if (def && (def.kind === 'weapon' || def.kind === 'shield' || def.kind === 'armor')) {
+    if (def && (def.kind === 'weapon' || def.kind === 'shield' || def.kind === 'armor' || def.kind === 'torch')) {
       this.equip(def.id);
     }
   }
@@ -213,6 +227,7 @@ export class Inventory {
       weapon: s.equipped.weapon && ITEMS.has(s.equipped.weapon) ? s.equipped.weapon : null,
       shield: s.equipped.shield && ITEMS.has(s.equipped.shield) ? s.equipped.shield : null,
       armor: s.equipped.armor && ITEMS.has(s.equipped.armor) ? s.equipped.armor : null,
+      torch: s.equipped.torch && ITEMS.has(s.equipped.torch) ? s.equipped.torch : null,
     };
     this.selected = Math.max(0, Math.min(HOTBAR_SIZE - 1, s.selected));
     this.attackModes = new Map(s.attackModes ?? []);
@@ -231,12 +246,14 @@ export class Inventory {
     inv.add('healing_draught', 2);
     inv.add('block_cobblestone', 48);
     inv.add('block_planks', 32);
+    inv.add('torch', 8);
 
     inv.equip('shortsword');
     inv.equip('wooden_buckler');
     inv.equip('quilted_armor');
+    inv.equip('torch');
 
-    inv.hotbar = ['shortsword', 'shortbow', 'firebolt', 'mend', 'healing_draught', 'block_cobblestone', 'block_planks', null];
+    inv.hotbar = ['shortsword', 'shortbow', 'firebolt', 'mend', 'healing_draught', 'torch', 'block_cobblestone', 'block_planks'];
     inv.select(0);
     return inv;
   }

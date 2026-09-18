@@ -53,6 +53,10 @@ export interface GameContext {
   enemies: EnemyWorld;
   /** Seconds since the world started; useful for cooldown bookkeeping. */
   time: number;
+  /** 0 at night, 1 at midday. Drives spawn pressure and how far enemies see. */
+  daylight: number;
+  /** True while rain or a storm is falling. */
+  raining: boolean;
 
   damagePlayer(input: DamageInput, from: THREE.Vector3, sourceName: string): void;
   spawnProjectile(req: ProjectileRequest): void;

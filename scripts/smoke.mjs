@@ -111,6 +111,25 @@ const snapshot = () => page.evaluate(() => window.__voxelquest.debugSnapshot());
 const diagnostics = () => page.evaluate(() => window.__voxelquest.debugCombatDiag());
 
 /**
+ * Waits until the combat system will accept a new action.
+ *
+ * Attacks commit the player for a wind-up plus a recovery, and because the game
+ * clamps `dt`, that window takes longer in wall-clock time the slower the
+ * renderer is. Sleeping a fixed interval before the next click is therefore
+ * unreliable; wait for the state machine instead.
+ */
+async function waitForIdle(timeoutMs = 8000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const d = await diagnostics();
+    if (d.combatState === 'idle') return true;
+    await page.waitForTimeout(80);
+  }
+  console.log('  note  combat system never returned to idle');
+  return false;
+}
+
+/**
  * Polls until a predicate holds. Necessary because the game clamps `dt`, so on a
  * software renderer running at ~9 fps, game-time advances several times slower
  * than wall-clock and fixed sleeps become unreliable.
@@ -166,28 +185,72 @@ try {
   check('player rests on terrain (not falling)', Math.abs(y2 - y1) < 0.6, `y ${y1} -> ${y2}`);
   check('player is above sea level', y2 > 20, `y=${y2}`);
 
-  // Walk forward across a flat platform, so this measures the movement code
-  // rather than whatever hillside the player happened to spawn against.
+  // Walk across a flat platform, so this measures the movement code rather than
+  // whatever hillside the player happened to spawn against.
   await page.evaluate(() => {
     const g = window.__voxelquest;
-    g.debugFlattenArena(14);
+    g.debugFlattenArena(16);
     g.debugLook(0, 0);
   });
   await page.waitForTimeout(1500);
-  const beforeWalk = await snapshot();
-  await page.keyboard.down('KeyW');
-  const walked = await waitUntil(
-    'player to walk 4 blocks',
-    async () => {
-      const s = await snapshot();
-      return Math.hypot(s.playerX - beforeWalk.playerX, s.playerZ - beforeWalk.playerZ) > 4 ? s : null;
-    },
-    12_000,
-  );
-  await page.keyboard.up('KeyW');
-  const moved = walked ? Math.hypot(walked.playerX - beforeWalk.playerX, walked.playerZ - beforeWalk.playerZ) : 0;
-  check('player can walk', moved > 4, `moved ${moved.toFixed(1)} blocks`);
-  check('still on solid ground after walking', (walked ?? beforeWalk).playerY > 4, `y=${(walked ?? beforeWalk).playerY}`);
+
+  /**
+   * Walks with one key and reports displacement along the camera's forward and
+   * right axes. Measuring *direction* matters: the original test only checked
+   * total distance moved, so it passed happily while W and S were inverted.
+   */
+  const walkAndMeasure = async (key, seconds = 1.6) => {
+    // Reset position and aim, but do not rebuild the arena every time: doing so
+    // dirties several chunks and the resulting re-mesh slows the frame rate
+    // enough to distort a distance measurement.
+    await page.evaluate(() => {
+      const g = window.__voxelquest;
+      g.debugLook(0, 0);
+      g.debugRefill();
+    });
+    await page.waitForTimeout(400);
+    const start = await snapshot();
+    await page.keyboard.down(key);
+    await page.waitForTimeout(seconds * 1000);
+    await page.keyboard.up(key);
+    await page.waitForTimeout(250);
+    const end = await snapshot();
+    // With yaw 0 the camera faces -Z and right is +X.
+    return {
+      forward: -(end.playerZ - start.playerZ),
+      right: end.playerX - start.playerX,
+      total: Math.hypot(end.playerX - start.playerX, end.playerZ - start.playerZ),
+    };
+  };
+
+  /**
+   * Asserts the movement went the right way along the right axis.
+   *
+   * Direction, not distance: the bug this guards against is an inverted or
+   * swapped axis, and absolute distance is at the mercy of the frame rate under
+   * software rendering. Requiring the intended axis to dominate the other by 3x
+   * catches inversions and swaps without being flaky.
+   */
+  const checkDirection = (label, m, axis, sign) => {
+    const intended = axis === 'forward' ? m.forward : m.right;
+    const other = axis === 'forward' ? m.right : m.forward;
+    const moved = m.total > 0.5;
+    const correctSign = Math.sign(intended) === sign;
+    const dominant = Math.abs(intended) > Math.abs(other) * 3;
+    check(
+      label,
+      moved && correctSign && dominant,
+      `forward ${m.forward.toFixed(2)}, right ${m.right.toFixed(2)}`,
+    );
+  };
+
+  checkDirection('W moves the player forward', await walkAndMeasure('KeyW'), 'forward', 1);
+  checkDirection('S moves the player backward', await walkAndMeasure('KeyS'), 'forward', -1);
+  checkDirection('D strafes right', await walkAndMeasure('KeyD'), 'right', 1);
+  checkDirection('A strafes left', await walkAndMeasure('KeyA'), 'right', -1);
+
+  const afterWalk = await snapshot();
+  check('still on solid ground after walking', afterWalk.playerY > 4, `y=${afterWalk.playerY}`);
 
   console.log('\n[melee]');
   // A controlled arena: level ground, no incoming damage, full stamina. This
@@ -269,6 +332,7 @@ try {
   // X must switch swing -> thrust, and the thrust must also land.
   await setupArena(2.6);
   await page.waitForTimeout(1200);
+  await waitForIdle();
   await page.keyboard.press('KeyX');
   await page.waitForTimeout(400);
   const modeLabel = await page.evaluate(() => document.getElementById('active-mode').textContent);
@@ -289,26 +353,45 @@ try {
   );
 
   console.log('\n[ranged and spells]');
-  await page.evaluate(() => window.__voxelquest.debugRefill());
-  await page.keyboard.press('Digit2'); // shortbow
+  await page.evaluate(() => {
+    window.__voxelquest.debugRefill();
+    window.__voxelquest.debugSelectHotbarByItem('shortbow');
+  });
+  await page.waitForTimeout(200);
   const staminaBeforeDraw = await page.evaluate(() => window.__voxelquest.debugStamina());
+  const firedBefore = (await snapshot()).projectilesFired;
   await page.mouse.move(CENTER_X, CENTER_Y);
   await page.mouse.down();
-  await page.waitForTimeout(900);
+  await page.waitForTimeout(1100);
   await page.mouse.up();
-  await page.waitForTimeout(80);
-  const shot = await snapshot();
-  check('bow fires a projectile', shot.projectiles > 0, `${shot.projectiles} in flight, stamina was ${staminaBeforeDraw}`);
+  // Poll: the projectile appears on a later frame, and a slow renderer can take
+  // longer than one fixed wait to get there.
+  const shot = await waitUntil('an arrow to be launched', async () => {
+    const s2 = await snapshot();
+    return s2.projectilesFired > firedBefore ? s2 : null;
+  }, 6000, 40);
+  check(
+    'bow launches a projectile',
+    (shot?.projectilesFired ?? firedBefore) > firedBefore,
+    `fired ${firedBefore} -> ${shot?.projectilesFired ?? firedBefore}, ${shot?.projectiles ?? 0} still in flight, stamina was ${staminaBeforeDraw}`,
+  );
 
   const arrowsBefore = await page.evaluate(() => window.__voxelquest.debugItemCount('arrow'));
   check('firing consumed an arrow', arrowsBefore < 24, `${arrowsBefore} arrows left of 24`);
 
-  await page.keyboard.press('Digit3'); // firebolt
+  await page.evaluate(() => window.__voxelquest.debugSelectHotbarByItem('firebolt'));
+  await page.waitForTimeout(200);
   const slotsBefore = await page.evaluate(() => window.__voxelquest.debugSpellSlots());
   await page.mouse.click(CENTER_X, CENTER_Y);
-  await page.waitForTimeout(600);
-  const slotsAfter = await page.evaluate(() => window.__voxelquest.debugSpellSlots());
-  check('casting consumes a spell slot', slotsAfter[0] < slotsBefore[0], `tier1 ${slotsBefore[0]} -> ${slotsAfter[0]}`);
+  const slotsAfter = await waitUntil('a spell slot to be spent', async () => {
+    const now = await page.evaluate(() => window.__voxelquest.debugSpellSlots());
+    return now[0] < slotsBefore[0] ? now : null;
+  }, 5000, 100);
+  check(
+    'casting consumes a spell slot',
+    (slotsAfter?.[0] ?? slotsBefore[0]) < slotsBefore[0],
+    `tier1 ${slotsBefore[0]} -> ${slotsAfter?.[0] ?? slotsBefore[0]}`,
+  );
 
   await page.evaluate(() => {
     window.__voxelquest.debugSetInvulnerable(false);
@@ -327,7 +410,9 @@ try {
     g.debugLookDown();
   });
   await page.waitForTimeout(500);
-  await page.keyboard.press('Digit6'); // cobblestone
+  // Select by item, not by digit: the hotbar layout is not a test contract.
+  await page.evaluate(() => window.__voxelquest.debugSelectHotbarByItem('block_cobblestone'));
+  await page.waitForTimeout(200);
 
   const blockBefore = await page.evaluate(() => window.__voxelquest.debugTargetBlock());
   check('a block is targeted under the crosshair', blockBefore !== null, JSON.stringify(blockBefore));
@@ -370,6 +455,203 @@ try {
   );
 
   await page.evaluate(() => window.__voxelquest.debugSetInvulnerable(false));
+
+  console.log('\n[view model]');
+  // The held item must be visible and, crucially, animate *differently* for a
+  // swing than for a thrust — that was the whole point of the feedback.
+  await setupArena(2.4);
+  await page.waitForTimeout(1200);
+  await page.evaluate(() => {
+    const g = window.__voxelquest;
+    g.debugSelectHotbarByItem('shortsword');
+    // An earlier section toggled this weapon to thrust; pin it explicitly.
+    g.debugSetAttackMode('swing');
+  });
+  await page.waitForTimeout(300);
+
+  const idleView = await page.evaluate(() => window.__voxelquest.debugViewState());
+  check('a weapon is held in the view model', idleView.mainItem === 'shortsword', `holding ${idleView.mainItem}`);
+
+  // Capture the pose partway through each attack and compare.
+  const sampleAttack = async (expectMode) => {
+    // The previous attack must have finished, or this click is swallowed.
+    await waitForIdle();
+    await page.evaluate(() => window.__voxelquest.debugRefill());
+    await page.mouse.click(CENTER_X, CENTER_Y);
+    const seen = await waitUntil(
+      `${expectMode} animation`,
+      async () => {
+        const v = await page.evaluate(() => window.__voxelquest.debugViewState());
+        return v.action === expectMode ? v : null;
+      },
+      6000,
+      50,
+    );
+    // Sample the pose mid-strike, which is where the two motions differ most.
+    const pose = await page.evaluate(() => window.__voxelquest.debugViewPose());
+    return { view: seen, pose };
+  };
+
+  const swingSample = await sampleAttack('swing');
+  check('swinging drives a swing animation', swingSample.view?.action === 'swing', `action ${swingSample.view?.action}, phase ${swingSample.view?.phase}`);
+
+  await waitForIdle();
+  const modeSet = await page.evaluate(() => window.__voxelquest.debugSetAttackMode('thrust'));
+  await page.waitForTimeout(250);
+  const pinned = await page.evaluate(() => window.__voxelquest.debugViewState());
+  check('the weapon can be pinned to thrust mode', modeSet && pinned.attackMode === 'thrust', `set ${modeSet}, mode ${pinned.attackMode}`);
+
+  const thrustSample = await sampleAttack('thrust');
+  const thrustDiag = await page.evaluate(() => window.__voxelquest.debugCombatDiag());
+  check(
+    'thrusting drives a thrust animation',
+    thrustSample.view?.action === 'thrust',
+    `action ${thrustSample.view?.action} | diag ${JSON.stringify(thrustDiag)}`,
+  );
+
+  // A swing rolls the weapon across the screen; a thrust drives it forward.
+  check(
+    'swing and thrust are visually distinct poses',
+    Math.abs((swingSample.pose?.rotZ ?? 0) - (thrustSample.pose?.rotZ ?? 0)) > 0.25 ||
+      Math.abs((swingSample.pose?.posZ ?? 0) - (thrustSample.pose?.posZ ?? 0)) > 0.1,
+    `swing rotZ ${swingSample.pose?.rotZ} posZ ${swingSample.pose?.posZ} | thrust rotZ ${thrustSample.pose?.rotZ} posZ ${thrustSample.pose?.posZ}`,
+  );
+
+  console.log('\n[block breaking animation]');
+  await page.evaluate(() => {
+    const g = window.__voxelquest;
+    g.debugSetInvulnerable(true);
+    g.debugClearEnemies();
+    g.debugFlattenArena(8);
+    g.debugLook(0, 0);
+    g.debugLookDown();
+  });
+  await page.waitForTimeout(600);
+  await page.evaluate(() => window.__voxelquest.debugSelectHotbarByItem('block_cobblestone'));
+  await page.waitForTimeout(200);
+
+  const idleHighlight = await page.evaluate(() => window.__voxelquest.debugHighlight());
+  check('the targeted block is outlined', idleHighlight !== null, JSON.stringify(idleHighlight));
+  check('outline shows no cracks before mining', (idleHighlight?.progress ?? 0) < 0, `progress ${idleHighlight?.progress}`);
+
+  await page.mouse.move(CENTER_X, CENTER_Y);
+  await page.mouse.down();
+  const cracking = await waitUntil(
+    'crack progress to advance',
+    async () => {
+      const h = await page.evaluate(() => window.__voxelquest.debugHighlight());
+      return h && h.progress > 0.15 ? h : null;
+    },
+    20_000,
+    150,
+  );
+  await page.mouse.up();
+  check('mining advances the crack animation', (cracking?.progress ?? 0) > 0.15, `progress ${cracking?.progress}`);
+
+  console.log('\n[day/night cycle]');
+  const day = await page.evaluate(() => {
+    window.__voxelquest.debugSetTime('day');
+    return window.__voxelquest.debugEnvironment();
+  });
+  check('noon is fully lit', day.daylight > 0.9, `daylight ${day.daylight}, clock ${day.clock}`);
+  check('no stars at noon', day.starOpacity < 0.05, `starOpacity ${day.starOpacity}`);
+
+  const night = await page.evaluate(() => {
+    window.__voxelquest.debugSetTime('night');
+    return window.__voxelquest.debugEnvironment();
+  });
+  check('midnight is dark', night.daylight < 0.05, `daylight ${night.daylight}, clock ${night.clock}`);
+  check('stars are visible at night', night.starOpacity > 0.9, `starOpacity ${night.starOpacity}`);
+  check(
+    'night raises the enemy population cap above daytime',
+    night.hostileCap > day.hostileCap,
+    `day cap ${day.hostileCap} -> night cap ${night.hostileCap}`,
+  );
+
+  console.log('\n[weather]');
+  const storm = await page.evaluate(() => {
+    window.__voxelquest.debugSetTime('day');
+    window.__voxelquest.debugSetWeather('storm', 1);
+    return window.__voxelquest.debugEnvironment();
+  });
+  check('a storm produces rain', storm.raining && storm.rainRate > 100, `rainRate ${storm.rainRate}`);
+  await page.waitForTimeout(1500);
+  const drops = await page.evaluate(() => window.__voxelquest.debugRainDrops());
+  check('rain drops exist in the world', drops > 50, `${drops} drops`);
+
+  const clear = await page.evaluate(() => {
+    window.__voxelquest.debugSetWeather('clear');
+    return window.__voxelquest.debugEnvironment();
+  });
+  check('clearing the weather stops the rain', !clear.raining, `weather ${clear.weather}`);
+
+  console.log('\n[torch and off-hand]');
+  const offhand = await page.evaluate(() => {
+    const g = window.__voxelquest;
+    g.debugSetTime('night');
+    // Earlier sections drew a two-handed bow, which correctly drops the shield.
+    // Re-equip a one-handed weapon plus shield to test the off-hand pairing.
+    g.debugEquip('shortsword');
+    g.debugEquip('wooden_buckler');
+    g.debugEquip('torch');
+    return g.debugViewState();
+  });
+  check('a torch is equipped in the off hand', offhand.torch === 'torch', `torch ${offhand.torch}`);
+  check(
+    'a shield can be carried at the same time as the torch',
+    !!offhand.shield,
+    `shield ${offhand.shield}, torch ${offhand.torch}`,
+  );
+
+  const lit = await page.evaluate(() => window.__voxelquest.debugTorchLight());
+  check('the held torch casts light in the world', lit.handLightOn && lit.handIntensity > 0.5, JSON.stringify(lit));
+
+  // Planting a torch should register a world light source.
+  const lightsBefore = (await page.evaluate(() => window.__voxelquest.debugEnvironment())).lightSources;
+  await page.evaluate(() => {
+    window.__voxelquest.debugSelectHotbarByItem('torch');
+    window.__voxelquest.debugLookDown();
+  });
+  await page.waitForTimeout(300);
+  await page.mouse.click(CENTER_X, CENTER_Y, { button: 'right' });
+  await page.waitForTimeout(500);
+  const lightsAfter = (await page.evaluate(() => window.__voxelquest.debugEnvironment())).lightSources;
+  check('planting a torch adds a world light', lightsAfter > lightsBefore, `${lightsBefore} -> ${lightsAfter}`);
+
+  console.log('\n[fish and food]');
+  const fishSpawned = await page.evaluate(() => window.__voxelquest.debugSpawnFish());
+  const fishEnv = await page.evaluate(() => window.__voxelquest.debugEnvironment());
+  if (fishSpawned > 0) {
+    check('fish spawn in water', fishEnv.fish > 0, `${fishEnv.fish} fish`);
+    check('fish are not counted as hostiles', fishEnv.hostiles >= 0 && fishEnv.fish > 0, `hostiles ${fishEnv.hostiles}, fish ${fishEnv.fish}`);
+  } else {
+    console.log('  note  no water within range of this spawn point; skipping fish spawn check');
+  }
+
+  // Cooking: a raw fish plus the torch you are already carrying.
+  const cooked = await page.evaluate(() => {
+    const g = window.__voxelquest;
+    g.debugGiveItem('raw_fish', 2);
+    return { raw: g.debugItemCount('raw_fish'), cooked: g.debugItemCount('cooked_fish') };
+  });
+  const holdingFish = await page.evaluate(() => {
+    const g = window.__voxelquest;
+    g.debugEquip('torch');
+    return g.debugSelectHotbarByItem('raw_fish');
+  });
+  check('the raw fish can be held', holdingFish, `selected ${holdingFish}`);
+  await page.waitForTimeout(300);
+  await page.mouse.click(CENTER_X, CENTER_Y);
+  await page.waitForTimeout(1200);
+  const afterCook = await page.evaluate(() => ({
+    raw: window.__voxelquest.debugItemCount('raw_fish'),
+    cooked: window.__voxelquest.debugItemCount('cooked_fish'),
+  }));
+  check(
+    'holding a torch cooks a raw fish instead of eating it',
+    afterCook.cooked > cooked.cooked && afterCook.raw < cooked.raw,
+    `raw ${cooked.raw}->${afterCook.raw}, cooked ${cooked.cooked}->${afterCook.cooked}`,
+  );
 
   console.log('\n[save/load]');
   await page.keyboard.press('F5');

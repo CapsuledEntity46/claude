@@ -1229,6 +1229,96 @@ try {
   // The all-items loadout. Last, deliberately: it rewrites the inventory and the
   // equipped slots, and run mid-suite it silently broke the bow checks that followed
   // by swapping the weapon out from under them.
+  console.log('\n[enemy AI]');
+
+  // A melee enemy that has closed to reach must actually swing.
+  //
+  // It used to attack only inside 0.92 of its reach but hold station anywhere inside
+  // 1.05, leaving a band where it did neither — and since circling holds distance
+  // roughly constant, anything that arrived in that band orbited the player forever.
+  await page.evaluate(() => {
+    const g = window.__voxelquest;
+    g.debugClearEnemies();
+    g.debugFreezeEnemies(false);
+    g.debugRevive();
+    g.debugSetInvulnerable(false);
+    g.debugRefill();
+    g.debugSpawnArchetype('goblin_grunt', 2.2);
+  });
+  const meleeStates = new Set();
+  let meleeHp = (await snapshot()).hp;
+  let meleeDamaged = false;
+  for (let i = 0; i < 90; i++) {
+    await page.waitForTimeout(100);
+    const report = await page.evaluate(() => window.__voxelquest.debugEnemyReport());
+    if (report[0]) meleeStates.add(report[0].state);
+    const hp = (await snapshot()).hp;
+    if (hp < meleeHp) meleeDamaged = true;
+    meleeHp = hp;
+    if (meleeDamaged && meleeStates.has('windup')) break;
+  }
+  check(
+    'a melee enemy in reach commits to an attack',
+    meleeStates.has('windup'),
+    `states seen: ${[...meleeStates].join(', ') || 'none'}`,
+  );
+  check('a melee enemy actually lands hits', meleeDamaged, `player hp fell to ${meleeHp}`);
+
+  // An archer backed into a corner must keep shooting while it gives ground. Closing
+  // the distance used to switch it off completely.
+  await page.evaluate(() => {
+    const g = window.__voxelquest;
+    g.debugClearEnemies();
+    g.debugFreezeEnemies(false);
+    g.debugSetInvulnerable(true);
+    g.debugRevive();
+    g.debugSpawnArchetype('bandit_archer', 4);
+  });
+  const shotsBefore = (await snapshot()).projectilesFired;
+  const archerStates = new Set();
+  for (let i = 0; i < 90; i++) {
+    await page.waitForTimeout(100);
+    const report = await page.evaluate(() => window.__voxelquest.debugEnemyReport());
+    if (report[0]) archerStates.add(report[0].state);
+    if ((await snapshot()).projectilesFired > shotsBefore) break;
+  }
+  const shotsAfter = (await snapshot()).projectilesFired;
+  check(
+    'a crowded archer keeps shooting while giving ground',
+    shotsAfter > shotsBefore,
+    `${shotsBefore} -> ${shotsAfter} shots, states: ${[...archerStates].join(', ')}`,
+  );
+
+  // Being shot from outside its sight range must wake it *and* set it hunting. This set
+  // `aggro` alone, and the acquire check is guarded on `!aggro` — so a sniped enemy
+  // stayed awake and idle forever, wandering while its health dropped.
+  await page.evaluate(() => {
+    const g = window.__voxelquest;
+    g.debugClearEnemies();
+    g.debugFreezeEnemies(true);
+    g.debugSpawnArchetype('goblin_grunt', 26);
+  });
+  await page.waitForTimeout(600);
+  const asleep = await page.evaluate(() => window.__voxelquest.debugEnemyReport());
+  check(
+    'a distant enemy starts unaware',
+    asleep[0] && asleep[0].hunting === false,
+    `state ${asleep[0]?.state}, hunting ${asleep[0]?.hunting}`,
+  );
+  await page.evaluate(() => window.__voxelquest.debugDamageNearestEnemy(3));
+  await page.waitForTimeout(400);
+  const woken = await page.evaluate(() => window.__voxelquest.debugEnemyReport());
+  check(
+    'hitting a distant enemy makes it hunt you',
+    woken[0] && woken[0].hunting === true && woken[0].state !== 'idle',
+    `state ${woken[0]?.state}, hunting ${woken[0]?.hunting}`,
+  );
+  await page.evaluate(() => {
+    const g = window.__voxelquest;
+    g.debugFreezeEnemies(false);
+    g.debugClearEnemies();
+  });
+
   console.log('\n[full loadout]');
   const loadout = await page.evaluate(() => window.__voxelquest.debugGiveAll());
   check(
@@ -1255,3 +1345,4 @@ try {
 
 console.log(failures.length === 0 ? '\nALL CHECKS PASSED' : `\n${failures.length} CHECK(S) FAILED: ${failures.join(', ')}`);
 process.exit(failures.length === 0 ? 0 : 1);
+

@@ -734,6 +734,28 @@ export class Game {
    * Test/debug helper: places an enemy at the player's own elevation so melee
    * reach is predictable regardless of terrain slope.
    */
+  /**
+   * Damages the nearest enemy without the player attacking, for testing.
+   *
+   * Goes through the same path a spell or arrow does, so it exercises the real wake-up
+   * behaviour rather than a shortcut.
+   */
+  debugDamageNearestEnemy(amount = 3): boolean {
+    let nearest = null;
+    let best = Infinity;
+    for (const enemy of this.entities.enemies) {
+      const d = enemy.center.distanceTo(this.player.center);
+      if (d < best) {
+        best = d;
+        nearest = enemy;
+      }
+    }
+    if (!nearest) return false;
+    const direction = nearest.center.clone().sub(this.player.center).setY(0).normalize();
+    nearest.applyDamage({ damage: amount, crit: false, mitigated: 0 }, direction, 0, this.ctx);
+    return true;
+  }
+
   /** Spawns one named archetype ahead of the player, for model screenshots. */
   debugSpawnArchetype(archetypeId: string, distance = 5): boolean {
     const point = this.player.position.clone().addScaledVector(this.player.facing, distance);
@@ -831,12 +853,23 @@ export class Game {
   }
 
   /** Test/debug helper: per-enemy health and distance, for verifying hit logic. */
-  debugEnemyReport(): { name: string; hp: number; maxHp: number; distance: number }[] {
+  debugEnemyReport(): {
+    name: string;
+    hp: number;
+    maxHp: number;
+    distance: number;
+    state: string;
+    hunting: boolean;
+  }[] {
     return this.entities.enemies.map((e) => ({
       name: e.name,
       hp: Number(e.hp.toFixed(1)),
       maxHp: e.maxHp,
       distance: Number(e.center.distanceTo(this.player.center).toFixed(2)),
+      // AI state, so "does it actually attack" can be asserted rather than inferred
+      // from whether the player happened to lose health.
+      state: e.aiState,
+      hunting: e.isHunting,
     }));
   }
 

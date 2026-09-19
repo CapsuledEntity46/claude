@@ -13,6 +13,14 @@ const DEATH_DURATION = 0.1;
 
 type AIState = 'idle' | 'chase' | 'windup' | 'recover' | 'reposition' | 'backoff' | 'dying';
 
+/**
+ * How far out a melee enemy both strikes and holds station, as a multiple of its reach.
+ *
+ * Deliberately one number. Two different thresholds leave a band where the enemy is too
+ * far to swing but close enough to stop advancing, and it circles there forever.
+ */
+const MELEE_ENGAGE = 1.05;
+
 // Creature bodies come from fx/creatures. Only the health bar quad is shared.
 const GEO = {
   bar: new THREE.PlaneGeometry(1, 1),
@@ -229,7 +237,14 @@ export class Enemy {
     this.hp -= result.damage;
     this.hitFlash = 0.12;
     this.healthBar.visible = true;
-    this.aggro = true;
+    // Being hit wakes it *and* sets it hunting.
+    //
+    // This used to set `aggro` alone, which left an enemy shot from outside its sight
+    // range permanently awake and permanently idle: the acquire check at the top of
+    // `update` is guarded on `!this.aggro`, so it never ran again and the state never
+    // left 'idle'. Shooting something from a distance did nothing but chip its health
+    // while it wandered about.
+    this.alert();
 
     // Getting hit interrupts a wind-up, which rewards aggressive play.
     if (this.state === 'windup' && result.damage > this.maxHp * 0.08) {
@@ -269,6 +284,15 @@ export class Enemy {
   }
 
   // ---------------------------------------------------------------- AI
+
+  /** Current AI state and whether it has noticed the player, for tests. */
+  get aiState(): string {
+    return this.state;
+  }
+
+  get isHunting(): boolean {
+    return this.aggro;
+  }
 
   /** Wakes the enemy — used by loud noises like gunfire and explosions. */
   alert(): void {
@@ -609,22 +633,30 @@ export class Enemy {
       return;
     }
 
-    if (melee && distance <= melee.reach * 0.92 && this.attackCooldown <= 0) {
+    // One threshold for both striking and holding position.
+    //
+    // These used to disagree: it would attack inside 0.92 of its reach but hold and
+    // circle anywhere inside 1.05, leaving a band where it did neither. Circling holds
+    // distance roughly constant, so an enemy that arrived in that band orbited the
+    // player indefinitely without ever swinging — which is exactly what it looked like.
+    if (melee && distance <= melee.reach * MELEE_ENGAGE && this.attackCooldown <= 0) {
       this.beginAttack('melee', melee.windup);
       return;
     }
 
-    // Already in range but still on cooldown: hold the line and circle instead of
-    // walking into the player. Shoving the player around while flailing made
-    // fights unwinnable except by retreating in a straight line.
-    if (melee && distance <= melee.reach * 1.05) {
+    // In range but still on cooldown: hold the line and circle instead of walking into
+    // the player. Shoving the player around while flailing made fights unwinnable
+    // except by retreating in a straight line.
+    if (melee && distance <= melee.reach * MELEE_ENGAGE) {
       const strafe = new THREE.Vector3(-Math.cos(this.yaw), 0, Math.sin(this.yaw));
       const sign = this.jitter > 0.5 ? 1 : -1;
       const target = this.position.clone().addScaledVector(strafe, sign * 3);
-      // Ease outwards if we have crowded inside our own reach.
-      if (distance < melee.reach * 0.7) {
+      // Ease outwards only if genuinely inside its own guard, and only a little: a
+      // bigger nudge walks it out of strike range, so the cooldown expires with the
+      // player too far away and it never commits.
+      if (distance < melee.reach * 0.55) {
         const away = this.position.clone().sub(ctx.player.position).setY(0);
-        if (away.lengthSq() > 1e-4) target.addScaledVector(away.normalize(), 2);
+        if (away.lengthSq() > 1e-4) target.addScaledVector(away.normalize(), 0.8);
       }
       this.steerTowards(target, this.currentSpeed * 0.5);
       return;
@@ -641,6 +673,14 @@ export class Enemy {
     }
   }
 
+  /**
+   * Give ground — while still shooting.
+   *
+   * This used to be a pure retreat, so closing on an archer switched it off entirely:
+   * it would turn and walk away without ever loosing another arrow, and the way to beat
+   * one was simply to jog at it. Backing off is the right instinct, but a bowman gives
+   * ground *and* keeps shooting.
+   */
   private doReposition(dt: number, ctx: GameContext, distance: number): void {
     this.stateTimer -= dt;
     const away = this.position.clone().sub(ctx.player.position).setY(0);
@@ -648,6 +688,10 @@ export class Enemy {
     this.steerTowards(this.position.clone().add(away.normalize().multiplyScalar(6)), this.currentSpeed * 0.9);
 
     const ranged = this.archetype.ranged;
+    if (ranged && this.attackCooldown <= 0 && this.hasLineOfSight(ctx, distance)) {
+      this.beginAttack('ranged', ranged.windup);
+      return;
+    }
     if (this.stateTimer <= 0 || (ranged && distance > ranged.standoff)) this.state = 'chase';
   }
 
@@ -663,8 +707,19 @@ export class Enemy {
 
   private doWindup(dt: number, ctx: GameContext, distance: number): void {
     this.stateTimer -= dt;
-    this.velocity.x *= 0.8;
-    this.velocity.z *= 0.8;
+
+    // A crowded archer keeps backing away as it draws, rather than planting its feet.
+    // Standing still to aim while something runs at you with a sword is what made
+    // closing the distance a free win.
+    const givingGround = this.archetype.ranged;
+    if (this.pendingAttack === 'ranged' && givingGround && distance < givingGround.standoff) {
+      const away = this.position.clone().sub(ctx.player.position).setY(0);
+      if (away.lengthSq() < 1e-4) away.set(1, 0, 0);
+      this.steerTowards(this.position.clone().addScaledVector(away.normalize(), 5), this.currentSpeed * 0.75);
+    } else {
+      this.velocity.x *= 0.8;
+      this.velocity.z *= 0.8;
+    }
     if (this.stateTimer > 0) return;
 
     if (this.pendingAttack === 'melee') {

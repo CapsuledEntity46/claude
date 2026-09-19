@@ -225,11 +225,14 @@ try {
           .join(', ')
       : `flat: ${flat.map(([name, s]) => `${name} ${s.stdev}`).join(', ')}`,
   );
+  // A tolerance rather than an exact match: the tile is drawn flat white, but it is
+  // filtered and mipmapped like everything else, so a stray thousandth is expected.
   check(
     'the blank tile really is blank',
-    tiles.Blank && tiles.Blank.stdev === 0 && tiles.Blank.mean === 1,
+    !!tiles.Blank && tiles.Blank.stdev < 0.01 && tiles.Blank.mean > 0.99,
     `mean ${tiles.Blank?.mean}, stdev ${tiles.Blank?.stdev} — the identity for a multiply`,
   );
+
   check('draw calls issued', streamed.drawCalls > 0, `${streamed.drawCalls} calls`);
   check('frame loop is running', streamed.fps > 0, `${streamed.fps} fps`);
 
@@ -622,11 +625,26 @@ try {
     const min = {};
     const max = {};
     let frames = 0;
-    for (let i = 0; i < 80; i++) {
-      const [view, pose] = await Promise.all([
-        page.evaluate(() => window.__voxelquest.debugViewState()),
-        page.evaluate(() => window.__voxelquest.debugViewPose()),
-      ]);
+    // One sample per *rendered frame*, via requestAnimationFrame.
+    //
+    // Both obvious approaches fail. A fixed sleep between samples catches too few
+    // frames on a slow renderer — 11 across a whole swing — and misses the extremes
+    // the range depends on. Removing the sleep goes the other way and samples the
+    // same unchanged pose hundreds of times, giving a range of exactly zero.
+    // Synchronising to the frame loop samples as often as there is something new to
+    // see, and never more.
+    for (let i = 0; i < 240; i++) {
+      const { view, pose } = await page.evaluate(
+        () =>
+          new Promise((resolve) => {
+            requestAnimationFrame(() =>
+              resolve({
+                view: window.__voxelquest.debugViewState(),
+                pose: window.__voxelquest.debugViewPose(),
+              }),
+            );
+          }),
+      );
       if (view.action === expectMode) {
         frames++;
         for (const key of keys) {
@@ -637,7 +655,6 @@ try {
       } else if (frames > 0) {
         break;
       }
-      await page.waitForTimeout(25);
     }
     const range = {};
     for (const key of keys) range[key] = (max[key] ?? 0) - (min[key] ?? 0);
@@ -1208,6 +1225,23 @@ try {
   check('no uncaught page errors', errors.length === 0, errors.slice(0, 3).join(' | ') || 'none');
   check('no console errors', consoleErrors.length === 0, consoleErrors.slice(0, 3).join(' | ') || 'none');
   check('still rendering at the end', final.triangles > 1000 && final.fps > 0, `${final.triangles} tris, ${final.fps} fps`);
+
+  // The all-items loadout. Last, deliberately: it rewrites the inventory and the
+  // equipped slots, and run mid-suite it silently broke the bow checks that followed
+  // by swapping the weapon out from under them.
+  console.log('\n[full loadout]');
+  const loadout = await page.evaluate(() => window.__voxelquest.debugGiveAll());
+  check(
+    'the full loadout hands over every item',
+    loadout.weapons >= 10 && loadout.other >= 20,
+    `${loadout.weapons} weapons and ${loadout.other} other items`,
+  );
+  const equipped = await page.evaluate(() => window.__voxelquest.debugViewState());
+  check(
+    'the loadout equips a one-handed weapon with shield and torch',
+    equipped.mainItem === 'shortsword' && equipped.shield === 'iron_kite_shield' && equipped.torch === 'torch',
+    `main ${equipped.mainItem}, shield ${equipped.shield}, torch ${equipped.torch}`,
+  );
 
   await page.screenshot({ path: join(SHOTS, 'smoke-gameplay.png') });
   console.log('\nfinal snapshot:', JSON.stringify(final, null, 2));

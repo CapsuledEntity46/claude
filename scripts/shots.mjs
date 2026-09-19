@@ -101,6 +101,9 @@ await g(() => {
   game.debugSetTime('day');
   game.debugEquip('fists');
   game.debugSelectHotbarByItem('fists');
+  // Spawn lands on the highest solid block and leaves are solid, so in a forest this
+  // would otherwise photograph a tree canopy and call it the ground.
+  game.debugStandOnGrass();
   game.debugLook(0.6, -0.75);
 });
 await page.waitForTimeout(1800);

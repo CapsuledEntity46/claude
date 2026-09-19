@@ -400,9 +400,25 @@ foliage with veins, and logs showing **growth rings on their cut faces and bark 
 their sides**. Everything else is still flat-coloured.
 
 The atlas is **generated in code on a canvas at load** — no external assets, same rule
-as the models. Tiles are 64px, drawn from a fixed seed so the atlas is identical every
-run and screenshots stay comparable. 32px came first and was too coarse: a 3px pebble
-is a tenth of a 32px block face, so soil read as confetti.
+as the models. Tiles are 128px and sampled with `LinearFilter`, so the result reads as
+a photograph of soil or bark rather than as pixel art. Drawn from a fixed seed, so the
+atlas is identical every run and screenshots stay comparable.
+
+Getting there took three passes. 32px with nearest-filter sampling was far too coarse —
+a 3px pebble is a tenth of a 32px face, so soil read as confetti. 64px fixed the scale
+but kept the deliberately blocky filtering. The textures are now *painted* rather than
+plotted: soft radial dabs, translucent grain and curved strokes, layered. Hard-edged
+speckle is legible at 32px and reads as noise at 128px; the same detail painted with
+translucent brushes reads as grain and wear.
+
+Two palette corrections worth knowing, because both are counter-intuitive:
+
+- **Layered translucent painting darkens as it accumulates.** Palettes are pitched
+  brighter than the reference to land where the reference sits once the layers, the
+  baked face brightness (0.70–0.88 on sides) and ambient occlusion have all applied.
+- **Brightening is not the same as desaturating.** A first correction made the grass
+  brighter and it came out a vivid emerald lawn. Turf needs the *red* channel raised —
+  olive, not emerald.
 
 Ground cover and foliage come in **two variants each**, chosen by a hash of the block's
 world position. One tile per block type makes a dug pit or a canopy visibly
@@ -456,11 +472,27 @@ fails any tile whose contrast falls below a floor:
 node scripts/atlas.mjs   # per-tile brightness and contrast
 ```
 
-Tuning textures by eye does not work well; tuning them against that number does.
+Tuning textures by eye does not work well; tuning them against that number does. It
+caught bark falling to 0.053 contrast during the realistic rewrite, which on a trunk
+looks like a flat brown smear.
 
 `tileRect` throws on an unknown tile rather than returning `NaN` UVs. Renaming a tile
 once left a stale list in the tests referring to `undefined`, every UV came out NaN,
 and the only symptom was untextured ground — which is exactly the failure mode above.
+
+### Texture orientation
+
+The face bases in the mesher are chosen so that `u × v === n`, which is what guarantees
+counter-clockwise winding without a hand-maintained corner table. That is the right
+constraint for geometry, but it means the bases are **not** consistently oriented: on
+the -Z face `u` is the one pointing up, not `v`. Mapping texture coordinates straight
+from the corner parameters therefore laid the image on its side on exactly one of the
+six faces — grass appearing at the edge of a block instead of on top, and bark furrows
+running around a trunk instead of along it.
+
+`FACE_UV_SWAP` corrects it, and is *derived* from the bases rather than written out, so
+it cannot fall out of step with them. A unit check asserts the invariant directly: on
+every side face, the upper edge of the quad samples the upper edge of the tile.
 
 ### How the world is shaded
 
@@ -555,7 +587,7 @@ Some notes on the parts that are less obvious than they look:
 ## Tests
 
 ```bash
-npm test            # typecheck + 233 unit checks
+npm test            # typecheck + 235 unit checks
 npm run test:unit   # damage model, mesher, terrain determinism, inventory
 npm run test:smoke  # boots the real build in headless Chromium and plays it
 ```

@@ -1650,6 +1650,79 @@ check(
 );
 
 
+
+section('texture orientation');
+
+// The invariant: on a side face, the texture's vertical axis must map to world Y, the
+// same way up. Grass is drawn at the top of its tile's canvas, so if this is inverted
+// the turf appears underneath the soil — and bark furrows, drawn down the canvas, come
+// out running around the trunk instead of along it.
+//
+// `flipY` is true by default on a THREE texture, so canvas row 0 becomes v = 1.
+// `tileRect` encodes that: v1 is the canvas *top* edge.
+{
+  const chunk = new Chunk(0, 0);
+  chunk.voxels[voxelIndex(8, 8, 8)] = Block.Grass;
+  const { opaque } = meshChunk(chunk, () => Block.Air);
+  const position = opaque!.getAttribute('position');
+  const normal = opaque!.getAttribute('normal');
+  const uv = opaque!.getAttribute('uv');
+  const rect = tileRect(tileForFace(Block.Grass, 'side', 8, 8));
+
+  let sideFaces = 0;
+  let correctlyOriented = 0;
+  // Faces are emitted as runs of four vertices.
+  for (let i = 0; i + 3 < position.count; i += 4) {
+    if (Math.abs(normal.getY(i)) > 0.5) continue; // top or bottom face
+    sideFaces++;
+
+    let topV = -Infinity;
+    let bottomV = Infinity;
+    let topY = -Infinity;
+    let bottomY = Infinity;
+    for (let k = 0; k < 4; k++) {
+      const y = position.getY(i + k);
+      const v = uv.getY(i + k);
+      if (y > topY) { topY = y; topV = v; }
+      if (y < bottomY) { bottomY = y; bottomV = v; }
+    }
+    // The upper edge of the quad must sample the upper edge of the tile.
+    if (Math.abs(topV - rect.v1) < 1e-6 && Math.abs(bottomV - rect.v0) < 1e-6) correctlyOriented++;
+  }
+
+  check(
+    'side faces map the texture the same way up as the world',
+    sideFaces === 4 && correctlyOriented === sideFaces,
+    `${correctlyOriented} of ${sideFaces} side faces upright`,
+  );
+}
+
+// Top faces must not be mirrored relative to each other either, or adjacent blocks
+// disagree about which way the grain runs.
+{
+  const chunk = new Chunk(0, 0);
+  chunk.voxels[voxelIndex(4, 8, 4)] = Block.Wood;
+  chunk.voxels[voxelIndex(6, 8, 4)] = Block.Wood;
+  const { opaque } = meshChunk(chunk, () => Block.Air);
+  const normal = opaque!.getAttribute('normal');
+  const uv = opaque!.getAttribute('uv');
+
+  // Collect the UV winding of every +Y face and require they all agree.
+  const windings = new Set<string>();
+  for (let i = 0; i + 3 < normal.count; i += 4) {
+    if (normal.getY(i) < 0.5) continue;
+    const du = uv.getX(i + 1) - uv.getX(i);
+    const dv = uv.getY(i + 3) - uv.getY(i);
+    windings.add(`${Math.sign(du)},${Math.sign(dv)}`);
+  }
+  check(
+    'every top face lays its texture the same way round',
+    windings.size === 1,
+    `${windings.size} distinct windings across ${[...windings].join(' ')}`,
+  );
+}
+
+
 console.log(`\n${passed} passed, ${failures.length} failed`);
 if (failures.length > 0) {
   console.log(`FAILED: ${failures.join(', ')}`);

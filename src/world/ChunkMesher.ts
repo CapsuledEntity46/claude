@@ -47,6 +47,22 @@ const CORNERS: readonly (readonly [number, number])[] = [
 ];
 
 /**
+ * Whether a face's texture axes need swapping relative to its geometry basis.
+ *
+ * The face bases above are chosen so that u × v === n, which is what guarantees
+ * counter-clockwise winding without a hand-maintained corner table. That is the right
+ * constraint for geometry, but it means the bases are *not* consistently oriented:
+ * on the -Z face `u` is the one pointing up, not `v`. Mapping texture coordinates
+ * straight from (a, b) therefore laid the image on its side on exactly that one face
+ * — grass appearing at the edge of a block instead of on top, and bark furrows
+ * running around a trunk instead of along it.
+ *
+ * Derived from the bases rather than written out, so it cannot fall out of step with
+ * them: on any face with a vertical tangent, the texture's vertical axis follows it.
+ */
+const FACE_UV_SWAP: readonly boolean[] = FACES.map((face) => face.u[1] === 1 && face.v[1] !== 1);
+
+/**
  * Brightness for AO levels 0..3 (0 = most enclosed).
  *
  * A balance found by trial: a very steep ramp (0.42 at the darkest) produces hard
@@ -143,6 +159,7 @@ function emitShape(
       const shade = CUBE_FACE_SHADE[f];
       const start = buf.pos.length / 3;
       const rect = tileRect(tileForFace(def.id, face.tint, wx, wz));
+      const swapUV = FACE_UV_SWAP[f];
       // A shaped block's boxes are sub-cube, so its faces take the whole tile
       // rather than a slice of it. Every shaped block currently samples the blank
       // tile anyway, so there is nothing to stretch.
@@ -157,7 +174,9 @@ function emitShape(
         const cz = oz + uz * a + vz * b;
         buf.pos.push(x + bx0 + cx * sizeX, y + by0 + cy * sizeY, z + bz0 + cz * sizeZ);
         buf.norm.push(dx, dy, dz);
-        buf.uv.push(rect.u0 + (rect.u1 - rect.u0) * a, rect.v0 + (rect.v1 - rect.v0) * b);
+        const tu = swapUV ? b : a;
+        const tv = swapUV ? a : b;
+        buf.uv.push(rect.u0 + (rect.u1 - rect.u0) * tu, rect.v0 + (rect.v1 - rect.v0) * tv);
         buf.col.push(
           Math.min(1, tint[0] * shade + emissive),
           Math.min(1, tint[1] * shade + emissive),
@@ -232,6 +251,7 @@ export function meshChunk(chunk: Chunk, neighbor: NeighborLookup): MeshResult {
           // World coordinates, so a block's texture variant is the same however the
           // world streams in and does not change at chunk boundaries.
           const rect = tileRect(tileForFace(id, face.tint, baseX + x, baseZ + z));
+          const swapUV = FACE_UV_SWAP[faceIndex];
           // For a textured block the vertex colour carries shading only and the
           // texture supplies the hue. Multiplying a green texture by an already
           // green tint would darken it twice over.
@@ -261,7 +281,9 @@ export function meshChunk(chunk: Chunk, neighbor: NeighborLookup): MeshResult {
             const shade = AO_SHADE[ao] * faceShade;
             buf.pos.push(x + ox + ux * a + vx * b, y + oy + uy * a + vy * b, z + oz + uz * a + vz * b);
             buf.norm.push(nx, ny, nz);
-            buf.uv.push(rect.u0 + (rect.u1 - rect.u0) * a, rect.v0 + (rect.v1 - rect.v0) * b);
+            const tu = swapUV ? b : a;
+            const tv = swapUV ? a : b;
+            buf.uv.push(rect.u0 + (rect.u1 - rect.u0) * tu, rect.v0 + (rect.v1 - rect.v0) * tv);
             buf.col.push(
               Math.min(1, (textured ? shade : tint[0] * shade) + emissive),
               Math.min(1, (textured ? shade : tint[1] * shade) + emissive),

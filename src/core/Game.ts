@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { CombatSystem } from '../combat/CombatSystem';
 import { blockCollisionBoxes, blockDef } from '../world/blocks';
 import { makeMeta, shapeBoxes } from '../world/shapes';
-import { item, tryItem } from '../combat/items';
+import { ITEMS, item, tryItem } from '../combat/items';
 import { EntityManager } from '../entities/EntityManager';
 import { PickupManager } from '../entities/Pickups';
 import { ProjectileManager } from '../entities/Projectile';
@@ -232,8 +232,16 @@ export class Game {
       fog.color.copy(this.fogColorScratch);
       // Weather pulls the fog plane in; fog weather does it hardest.
       const tighten = this.weather.fogTighten;
-      fog.near = viewDistance * (0.45 - tighten * 0.42);
-      fog.far = viewDistance * (0.95 - tighten * 0.72);
+      // Base haze, before weather. Brought in from 0.45/0.95 of the view distance:
+      // at that range fog only ever touched the streaming frontier, so it read as a
+      // way of hiding chunk pop-in rather than as atmosphere. Starting it closer gives
+      // hills and treelines real aerial perspective.
+      //
+      // Night is hazier than day, which is both atmospheric and useful: it shortens
+      // how far you can see trouble coming once it gets dark.
+      const nightHaze = 1 - daylight;
+      fog.near = viewDistance * (0.2 - tighten * 0.17 - nightHaze * 0.08);
+      fog.far = viewDistance * (0.78 - tighten * 0.56 - nightHaze * 0.16);
     }
 
     (this.scene.background as THREE.Color).copy(this.skyColor);
@@ -388,7 +396,17 @@ export class Game {
     this.mode = 'playing';
     this.hud.setMenuVisible(false);
     this.input.requestLock();
+
+    // `?loadout=all` fills the bags with everything, for looking at the models and
+    // trying the weapons without grinding for drops. Applied once, not on every
+    // unpause, or reopening the menu would keep topping the bags up.
+    if (!this.loadoutApplied && typeof location !== 'undefined') {
+      this.loadoutApplied = true;
+      if (new URLSearchParams(location.search).get('loadout') === 'all') this.debugGiveAll();
+    }
   }
+
+  private loadoutApplied = false;
 
   private openSheet(): void {
     this.mode = 'sheet';
@@ -908,6 +926,64 @@ export class Game {
    */
   debugTerrainMaterial(): Record<string, unknown> {
     return this.world.debugMaterialState();
+  }
+
+  /**
+   * Moves the player to the nearest block of open grass.
+   *
+   * Spawn lands on the highest solid block, and leaves are solid — so in a forest the
+   * player can start standing on a canopy. A screenshot of "the ground" taken there
+   * photographs leaves, which is how the grass texture came to be reviewed twice
+   * without anyone actually looking at it.
+   */
+  debugStandOnGrass(radius = 48): boolean {
+    const start = this.player.position.clone();
+    for (let r = 0; r <= radius; r += 2) {
+      for (let step = 0; step < 24; step++) {
+        const angle = (step / 24) * Math.PI * 2;
+        const x = Math.floor(start.x + Math.cos(angle) * r);
+        const z = Math.floor(start.z + Math.sin(angle) * r);
+        this.world.ensureLoadedAround(x, z, 1);
+        const top = this.world.highestSolidY(x, z);
+        if (top < 0) continue;
+        if (this.world.getBlock(x, top, z) !== Block.Grass) continue;
+        this.player.position.set(x + 0.5, top + 1.05, z + 0.5);
+        this.player.velocity.set(0, 0, 0);
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Fills the bags with one of everything and equips a usable loadout.
+   *
+   * For looking at the models and trying the weapons without grinding for drops.
+   * Reachable from the console as `__voxelquest.debugGiveAll()`, or by loading the
+   * page with `?loadout=all`.
+   */
+  debugGiveAll(): Record<string, number> {
+    const inventory = this.player.inventory;
+    let weapons = 0;
+    let other = 0;
+
+    for (const def of ITEMS.values()) {
+      // Stackables come in useful quantities; a weapon only needs to exist once.
+      const count = def.stackable ? Math.min(def.maxStack, def.kind === 'block' ? 256 : 24) : 1;
+      inventory.add(def.id, count);
+      if (def.kind === 'weapon') weapons++;
+      else other++;
+    }
+
+    // A loadout that shows off the view model: shield and lit torch in the off hand
+    // alongside the weapon. Deliberately a *one-handed* weapon — equipping a
+    // two-hander puts the shield away, which is correct behaviour and the opposite of
+    // what this is for.
+    for (const id of ['shortsword', 'iron_plate', 'iron_kite_shield', 'torch']) inventory.equip(id);
+    this.debugSelectHotbarByItem('shortsword');
+
+    this.hud.log(`Loadout: ${weapons} weapons and ${other} other items added.`, 'good');
+    return { weapons, other };
   }
 
   /** Per-tile contrast of the block atlas, for telling a flat tile from a missing one. */

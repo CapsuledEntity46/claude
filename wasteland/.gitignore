@@ -1,0 +1,9 @@
+node_modules/
+
+# Build output. `npm run build` regenerates dist/index.html as a single
+# self-contained file; `npm run build:harness` regenerates test/dist.
+dist/
+test/dist/
+
+*.log
+.DS_Store

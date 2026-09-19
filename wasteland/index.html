@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
+    <title>WASTELAND — survival</title>
+  </head>
+  <body>
+    <div id="app">
+      <canvas id="game"></canvas>
+
+      <!-- ============ HUD ============ -->
+      <div id="hud">
+        <div id="hud-top">
+          <div id="clock" class="hud-chip"><span id="clock-time">06:00</span><span id="clock-day">Day 1</span></div>
+          <div id="compass" class="hud-chip"><span id="compass-dir">N</span></div>
+          <div id="temp" class="hud-chip"><span id="temp-val">20°C</span></div>
+        </div>
+
+        <div id="hud-status">
+          <div class="vital" data-vital="health"><span class="vital-ico">HP</span><div class="vital-bar"><i></i></div><span class="vital-num"></span></div>
+          <div class="vital" data-vital="stamina"><span class="vital-ico">STA</span><div class="vital-bar"><i></i></div><span class="vital-num"></span></div>
+          <div class="vital" data-vital="food"><span class="vital-ico">FOOD</span><div class="vital-bar"><i></i></div><span class="vital-num"></span></div>
+          <div class="vital" data-vital="water"><span class="vital-ico">H2O</span><div class="vital-bar"><i></i></div><span class="vital-num"></span></div>
+        </div>
+
+        <div id="hud-effects"></div>
+
+        <div id="weapon-readout">
+          <div id="weapon-name">Unarmed</div>
+          <div id="weapon-ammo"><span id="ammo-mag">—</span><span id="ammo-reserve"></span></div>
+        </div>
+
+        <div id="hotbar"></div>
+
+        <div id="crosshair"><i></i><i></i><i></i><i></i></div>
+        <div id="interact-prompt"></div>
+        <div id="hitmarker"></div>
+        <div id="damage-vignette"></div>
+        <div id="toasts"></div>
+        <canvas id="minimap" width="168" height="168"></canvas>
+        <div id="build-hint"></div>
+      </div>
+
+      <!-- ============ INVENTORY / CRAFTING SCREEN ============ -->
+      <div id="inventory-screen" class="screen hidden">
+        <div class="inv-columns">
+          <section class="panel" id="panel-character">
+            <h2>Character</h2>
+            <div id="equip-slots"></div>
+            <div id="char-stats"></div>
+          </section>
+
+          <section class="panel" id="panel-inventory">
+            <h2>Inventory <span id="inv-weight" class="dim"></span></h2>
+            <div id="player-grid" class="grid-host"></div>
+            <h3 id="belt-label">Belt</h3>
+            <div id="belt-grid" class="grid-host"></div>
+          </section>
+
+          <section class="panel hidden" id="panel-loot">
+            <h2 id="loot-title">Container</h2>
+            <div id="loot-grid" class="grid-host"></div>
+            <button id="loot-take-all" class="btn">Take All</button>
+          </section>
+
+          <section class="panel" id="panel-craft">
+            <h2>Crafting</h2>
+            <div id="craft-filter">
+              <input id="craft-search" type="text" placeholder="Search recipes…" autocomplete="off" />
+            </div>
+            <div id="craft-queue"></div>
+            <div id="craft-list"></div>
+          </section>
+        </div>
+        <div id="item-tooltip" class="hidden"></div>
+        <div id="drag-ghost" class="hidden"></div>
+        <div id="split-dialog" class="hidden">
+          <label>Split amount</label>
+          <input id="split-range" type="range" min="1" max="100" value="1" />
+          <div id="split-value">1</div>
+          <div class="row"><button id="split-ok" class="btn">Split</button><button id="split-cancel" class="btn ghost">Cancel</button></div>
+        </div>
+      </div>
+
+      <!-- ============ MENUS ============ -->
+      <div id="main-menu" class="screen">
+        <div class="menu-card">
+          <h1>WASTELAND</h1>
+          <p class="tagline">A brutal top-down survival sandbox. Loot the towns, fear the night.</p>
+          <label class="field"><span>World seed</span><input id="seed-input" type="text" placeholder="random" /></label>
+          <div class="menu-buttons">
+            <button id="btn-new" class="btn primary">New Game</button>
+            <button id="btn-continue" class="btn">Continue</button>
+          </div>
+          <div class="controls-help">
+            <h3>Controls</h3>
+            <div class="keys">
+              <span><b>WASD</b> move</span><span><b>Shift</b> sprint</span><span><b>Ctrl</b> crouch</span>
+              <span><b>Mouse</b> aim</span><span><b>LMB</b> attack</span><span><b>RMB</b> aim down sights</span>
+              <span><b>R</b> reload</span><span><b>G</b> throw</span><span><b>E</b> interact / loot</span>
+              <span><b>Tab</b> inventory</span><span><b>1–6</b> hotbar</span><span><b>Q</b> holster</span>
+              <span><b>F</b> flashlight</span><span><b>B</b> build menu</span><span><b>Space</b> mount / dismount</span>
+              <span><b>H</b> bandage</span><span><b>M</b> map</span><span><b>Esc</b> pause</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div id="pause-menu" class="screen hidden">
+        <div class="menu-card small">
+          <h1>Paused</h1>
+          <div class="menu-buttons column">
+            <button id="btn-resume" class="btn primary">Resume</button>
+            <button id="btn-save" class="btn">Save Game</button>
+            <button id="btn-quit" class="btn ghost">Abandon Run</button>
+          </div>
+        </div>
+      </div>
+
+      <div id="death-screen" class="screen hidden">
+        <div class="menu-card small">
+          <h1 class="dead">YOU DIED</h1>
+          <p id="death-cause"></p>
+          <div id="death-stats"></div>
+          <div class="menu-buttons column">
+            <button id="btn-respawn" class="btn primary">Respawn</button>
+          </div>
+        </div>
+      </div>
+
+      <div id="map-screen" class="screen hidden">
+        <div class="map-card">
+          <h2>Region Map</h2>
+          <canvas id="bigmap" width="720" height="720"></canvas>
+          <p class="dim">Towns are marked once discovered. Press <b>M</b> to close.</p>
+        </div>
+      </div>
+    </div>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

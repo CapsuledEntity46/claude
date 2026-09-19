@@ -394,13 +394,25 @@ Three traps worth knowing if you extend `fx/models.ts`:
 
 ### Block textures
 
-Ground cover is textured: turf on top of a grass block, a ragged fringe of it hanging
-over gritty pebbled soil on the sides, plain soil underneath. Everything else is still
-flat-coloured.
+Ground cover and trees are textured: turf on top of a grass block with a ragged fringe
+of it hanging over gritty pebbled soil on the sides, leaves as dense overlapping
+foliage with veins, and logs showing **growth rings on their cut faces and bark around
+their sides**. Everything else is still flat-coloured.
 
 The atlas is **generated in code on a canvas at load** — no external assets, same rule
-as the models. Tiles are 32px, drawn from a fixed seed so the atlas is identical every
-run and screenshots stay comparable.
+as the models. Tiles are 64px, drawn from a fixed seed so the atlas is identical every
+run and screenshots stay comparable. 32px came first and was too coarse: a 3px pebble
+is a tenth of a 32px block face, so soil read as confetti.
+
+Ground cover and foliage come in **two variants each**, chosen by a hash of the block's
+world position. One tile per block type makes a dug pit or a canopy visibly
+checkerboard, because every block carries the identical image. The choice is a pure
+function of position, so it never changes as chunks stream in.
+
+Leaves are drawn opaque, with deep shadow green between the leaves rather than an
+alpha cutout. They render in the opaque pass on a material shared with every other
+block, so a cutout would mean either a second material for one block type or
+`alphaTest` across the whole world — and the inside of a canopy is dark anyway.
 
 It coexists with the vertex colours rather than replacing them. The material
 multiplies the map by the vertex colour, and the mesher keeps writing ambient
@@ -431,6 +443,24 @@ missing UV attribute, or UVs that all land on the blank tile each reproduce the 
 world exactly. `debugTerrainMaterial` reports the plumbing, and the smoke test asserts
 the atlas is bound, that UVs exist, that they span more than one tile, and that vertex
 colours are still in play.
+
+There is a subtler version of the same trap: a tile that is drawn, uploaded and
+sampled perfectly, but which came out **flat**. That happened to the grass — seven
+passes of blades overdrew each other until only the lightest survived and the tile
+averaged out to a single tone, at a third of the contrast the leaf tiles carry. On
+screen it is identical to having no texture. So `debugAtlasStats` reads the atlas back
+and reports each tile's mean brightness and standard deviation, and the smoke test
+fails any tile whose contrast falls below a floor:
+
+```bash
+node scripts/atlas.mjs   # per-tile brightness and contrast
+```
+
+Tuning textures by eye does not work well; tuning them against that number does.
+
+`tileRect` throws on an unknown tile rather than returning `NaN` UVs. Renaming a tile
+once left a stale list in the tests referring to `undefined`, every UV came out NaN,
+and the only symptom was untextured ground — which is exactly the failure mode above.
 
 ### How the world is shaded
 
@@ -525,7 +555,7 @@ Some notes on the parts that are less obvious than they look:
 ## Tests
 
 ```bash
-npm test            # typecheck + 229 unit checks
+npm test            # typecheck + 233 unit checks
 npm run test:unit   # damage model, mesher, terrain determinism, inventory
 npm run test:smoke  # boots the real build in headless Chromium and plays it
 ```

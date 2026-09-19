@@ -113,7 +113,16 @@ export interface MeshResult {
  * which is far more bookkeeping than the handful of hidden triangles is worth —
  * shaped blocks are a small fraction of any chunk.
  */
-function emitShape(buf: Buffers, x: number, y: number, z: number, def: BlockDef, meta: number): void {
+function emitShape(
+  buf: Buffers,
+  x: number,
+  y: number,
+  z: number,
+  wx: number,
+  wz: number,
+  def: BlockDef,
+  meta: number,
+): void {
   const boxes = shapeBoxes(def.shape, meta);
   const emissive = def.emissive ?? 0;
 
@@ -133,7 +142,7 @@ function emitShape(buf: Buffers, x: number, y: number, z: number, def: BlockDef,
       const tint = def[face.tint];
       const shade = CUBE_FACE_SHADE[f];
       const start = buf.pos.length / 3;
-      const rect = tileRect(tileForFace(def.id, face.tint));
+      const rect = tileRect(tileForFace(def.id, face.tint, wx, wz));
       // A shaped block's boxes are sub-cube, so its faces take the whole tile
       // rather than a slice of it. Every shaped block currently samples the blank
       // tile anyway, so there is nothing to stretch.
@@ -201,7 +210,7 @@ export function meshChunk(chunk: Chunk, neighbor: NeighborLookup): MeshResult {
         // term is defined against the voxel lattice, and sampling it at
         // arbitrary sub-block positions produces creases in the wrong places.
         if (def.shape !== 'cube') {
-          emitShape(buf, x, y, z, def, chunk.meta[index]);
+          emitShape(buf, x, y, z, baseX + x, baseZ + z, def, chunk.meta[index]);
           continue;
         }
 
@@ -220,7 +229,9 @@ export function meshChunk(chunk: Chunk, neighbor: NeighborLookup): MeshResult {
           const tint = def[face.tint];
           const emissive = def.emissive ?? 0;
           const faceShade = CUBE_FACE_SHADE[faceIndex];
-          const rect = tileRect(tileForFace(id, face.tint));
+          // World coordinates, so a block's texture variant is the same however the
+          // world streams in and does not change at chunk boundaries.
+          const rect = tileRect(tileForFace(id, face.tint, baseX + x, baseZ + z));
           // For a textured block the vertex colour carries shading only and the
           // texture supplies the hue. Multiplying a green texture by an already
           // green tint would darken it twice over.

@@ -21,6 +21,7 @@ import {
 import { buildCreature } from '../src/fx/creatures';
 import { clearPropCache, dungeonPropVoxels, propsForSite } from '../src/world/DungeonProps';
 import {
+  ALL_TILE_IDS,
   ATLAS_PIXELS,
   TILE_PADDING,
   TILE_PIXELS,
@@ -1525,8 +1526,11 @@ section('block textures');
 // arithmetic wrong samples a neighbouring tile, which looks like the wrong texture
 // rather than like a bug.
 {
+  // Iterating the exported list, not a hand-written one. A local list silently went
+  // stale when tiles were renamed: the missing names became `undefined`, every UV
+  // came out NaN, and the only symptom was untextured ground.
   let allInside = true;
-  for (const tile of [Tile.Blank, Tile.GrassTop, Tile.GrassSide, Tile.Dirt]) {
+  for (const tile of ALL_TILE_IDS) {
     const rect = tileRect(tile);
     if (rect.u0 < 0 || rect.v0 < 0 || rect.u1 > 1 || rect.v1 > 1) allInside = false;
     // The drawn area is exactly one tile wide, gutters excluded.
@@ -1538,8 +1542,8 @@ section('block textures');
 
   // Tiles must not touch: the gap between them is the gutter that stops mipmapping
   // averaging grass into dirt as the camera pulls back.
-  const a = tileRect(Tile.Blank);
-  const b = tileRect(Tile.GrassTop);
+  const a = tileRect(ALL_TILE_IDS[0]);
+  const b = tileRect(ALL_TILE_IDS[1]);
   const gap = (b.u0 - a.u1) * ATLAS_PIXELS;
   check(
     'tiles are separated by a mipmap gutter',
@@ -1551,15 +1555,40 @@ section('block textures');
 check(
   'a grass block uses three different tiles',
   new Set([
-    tileForFace(Block.Grass, 'top'),
-    tileForFace(Block.Grass, 'side'),
-    tileForFace(Block.Grass, 'bottom'),
+    tileForFace(Block.Grass, 'top', 0, 0),
+    tileForFace(Block.Grass, 'side', 0, 0),
+    tileForFace(Block.Grass, 'bottom', 0, 0),
   ]).size === 3,
   'turf on top, fringe on the sides, soil underneath',
 );
 check(
+  'a log shows end grain on its cut faces and bark on its sides',
+  tileForFace(Block.Wood, 'top', 0, 0) === tileForFace(Block.Wood, 'bottom', 0, 0) &&
+    tileForFace(Block.Wood, 'top', 0, 0) !== tileForFace(Block.Wood, 'side', 0, 0),
+  'rings above and below, bark around',
+);
+// Ground cover and foliage vary per block, or a dug pit and a canopy visibly
+// checkerboard because every block carries the identical image.
+{
+  const sample = (block: number, face: 'top' | 'side') => {
+    const seen = new Set<number>();
+    for (let wx = 0; wx < 16; wx++) for (let wz = 0; wz < 16; wz++) seen.add(tileForFace(block, face, wx, wz));
+    return seen;
+  };
+  const grass = sample(Block.Grass, 'top');
+  const leaves = sample(Block.Leaves, 'side');
+  check('grass varies between blocks', grass.size > 1, `${grass.size} variants across 256 positions`);
+  check('leaves vary between blocks', leaves.size > 1, `${leaves.size} variants across 256 positions`);
+  // And the choice must be stable, or a block would flicker as chunks reload.
+  check(
+    'a block always picks the same variant',
+    tileForFace(Block.Grass, 'top', 7, -3) === tileForFace(Block.Grass, 'top', 7, -3),
+    'variant is a pure function of world position',
+  );
+}
+check(
   'untextured blocks sample the blank tile',
-  tileForFace(Block.Stone, 'top') === Tile.Blank && tileForFace(Block.DungeonBrick, 'side') === Tile.Blank,
+  tileForFace(Block.Stone, 'top', 0, 0) === Tile.Blank && tileForFace(Block.DungeonBrick, 'side', 0, 0) === Tile.Blank,
   'so adding a texture to one block cannot disturb the rest of the world',
 );
 
@@ -1583,7 +1612,9 @@ check(
   // Grass vertices are greyscale; stone keeps its tint. Identified by which tile the
   // UV points at rather than by vertex index, which would depend on emit order.
   const color = opaque!.getAttribute('color');
-  const grassTop = tileRect(Tile.GrassTop);
+  // Ask the same question the mesher does, rather than assuming which variant a
+  // block at this position lands on.
+  const grassTop = tileRect(tileForFace(Block.Grass, 'top', 4, 4));
   let greyscaleGrass = true;
   let grassVertices = 0;
   let tintedStone = false;

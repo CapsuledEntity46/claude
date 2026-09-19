@@ -205,6 +205,31 @@ try {
     terrainMaterial.vertexColors === true,
     'ambient occlusion and face shading are preserved',
   );
+
+  // Every tile has to carry visible detail.
+  //
+  // This is the check that would have caught the real bug. The grass tile was drawn,
+  // uploaded and sampled correctly, but seven passes of blades overdrew each other
+  // until the tile averaged out nearly flat — measured contrast a third of the leaf
+  // tiles'. On screen that is indistinguishable from the texture never having been
+  // applied, and no amount of looking at screenshots tells you which it is.
+  const tiles = await page.evaluate(() => window.__voxelquest.debugAtlasStats());
+  const flat = Object.entries(tiles).filter(([name, s]) => name !== 'Blank' && s.stdev < 0.06);
+  check(
+    'every atlas tile carries visible detail',
+    flat.length === 0,
+    flat.length === 0
+      ? Object.entries(tiles)
+          .filter(([name]) => name !== 'Blank')
+          .map(([name, s]) => `${name} ${s.stdev}`)
+          .join(', ')
+      : `flat: ${flat.map(([name, s]) => `${name} ${s.stdev}`).join(', ')}`,
+  );
+  check(
+    'the blank tile really is blank',
+    tiles.Blank && tiles.Blank.stdev === 0 && tiles.Blank.mean === 1,
+    `mean ${tiles.Blank?.mean}, stdev ${tiles.Blank?.stdev} — the identity for a multiply`,
+  );
   check('draw calls issued', streamed.drawCalls > 0, `${streamed.drawCalls} calls`);
   check('frame loop is running', streamed.fps > 0, `${streamed.fps} fps`);
 

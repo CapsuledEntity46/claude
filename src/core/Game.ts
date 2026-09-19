@@ -910,6 +910,11 @@ export class Game {
     return this.world.debugMaterialState();
   }
 
+  /** Per-tile contrast of the block atlas, for telling a flat tile from a missing one. */
+  debugAtlasStats(): Record<string, unknown> {
+    return this.world.debugAtlasStats();
+  }
+
   /** Dungeon prop counts by kind, for verifying the kit is being placed. */
   debugProps(): Record<string, unknown> {
     return this.props.debugState();

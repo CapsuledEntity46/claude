@@ -3,7 +3,7 @@ import { Block, blockCollisionBoxes, blockDef, isLightSource, isSolid, isTargeta
 import { CHUNK_SX, CHUNK_SY, CHUNK_SZ, Chunk, MeshState, chunkKey, voxelIndex } from './Chunk';
 import { meshChunk } from './ChunkMesher';
 import { TerrainGen } from './TerrainGen';
-import { tryCreateBlockAtlas } from './textures';
+import { atlasTileStats, tryCreateBlockAtlas } from './textures';
 import { META_OPEN, metaIsOpen } from './shapes';
 
 export interface RaycastHit {
@@ -82,6 +82,12 @@ export class World {
       transparent: true,
       opacity: 0.72,
     });
+  }
+
+  /** Per-tile brightness and contrast of the atlas. A flat tile has stdev near 0. */
+  debugAtlasStats(): Record<string, unknown> {
+    const map = this.opaqueMat.map;
+    return map ? atlasTileStats(map) : {};
   }
 
   /** Atlas and UV plumbing, for diagnosis. See Game.debugTerrainMaterial. */

@@ -1,4 +1,5 @@
 import { Block, PLACEABLE, blockDef } from '../world/blocks';
+import { meleeModes } from './types';
 import type {
   AmmoType,
   ArmorDef,
@@ -106,7 +107,7 @@ function melee(name: string, glyph: string, tier: number, attacks: MeleeAttack[]
     stackable: false,
     maxStack: 1,
     blurb,
-    weapon: { class: 'melee', melee: attacks, twoHanded },
+    weapon: { class: 'melee', melee: meleeModes(attacks), twoHanded },
   };
 }
 
@@ -153,7 +154,7 @@ function rangedItem(
     stackable: false,
     maxStack: 1,
     blurb,
-    weapon: { class: cls, melee: meleeFallback, ranged: profile, twoHanded },
+    weapon: { class: cls, melee: meleeModes(meleeFallback), ranged: profile, twoHanded },
   };
 }
 
@@ -247,7 +248,7 @@ defs.push(
     weapon: {
       class: 'thrown',
       twoHanded: false,
-      melee: [],
+      melee: {},
       ranged: ranged({
         damage: 34, ammo: 'none', type: 'explosive', speed: 22, gravity: 1.4,
         fuse: 2.6, aoeRadius: 4.5, blockDamage: 2.6, armorPierce: 0.35,

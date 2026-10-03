@@ -45,6 +45,32 @@ canvas#game { display: block; width: 100vw; height: 100vh; }
 #crosshair::after { top: 8px; left: 0; height: 2px; width: 18px; }
 #crosshair.charging::before, #crosshair.charging::after { background: var(--gold); }
 
+/* ---------- melee gesture indicator ----------
+   Sits on the crosshair and leans towards the stroke the mouse is describing. The
+   arrow is pushed outwards and brightened as the gesture charges, so the player can
+   see both *which* attack and *how close* it is to committing. */
+#gesture {
+  position: fixed;
+  left: 50%; top: 50%;
+  width: 0; height: 0;
+  pointer-events: none;
+  z-index: 6;
+  opacity: 0;
+  transition: opacity 70ms linear;
+}
+#gesture.active { opacity: 1; }
+#gesture-arrow {
+  position: absolute;
+  left: -7px; top: -7px;
+  width: 14px; height: 14px;
+  /* A triangle, so the direction reads without a glyph or an image. */
+  clip-path: polygon(50% 0%, 100% 100%, 0% 100%);
+  background: #fff;
+  box-shadow: 0 0 3px #000;
+  transform-origin: 50% 50%;
+}
+#gesture.committed #gesture-arrow { background: var(--gold); }
+
 /* ---------- vitals ---------- */
 /* Vitals sit top-left: the things you check under pressure belong where the eye
    already goes for the combat log. */

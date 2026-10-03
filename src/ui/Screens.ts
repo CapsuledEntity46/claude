@@ -1,4 +1,5 @@
 import { describeMode, item } from '../combat/items';
+import { availableModes } from '../combat/types';
 import { BAG_CAPACITY, type BagTab, type EquipSlot } from '../player/Inventory';
 import type { Player } from '../player/Player';
 import { ATTRIBUTE_INFO, type AttributeKey } from '../player/Stats';
@@ -185,23 +186,20 @@ export class Screens {
       this.equipHost.append(row);
     }
 
-    // Spell out every attack mode the equipped weapon has — this is where the
+    // Spell out what the equipped weapon's shape allows — this is where the
     // swing/thrust rules are explained to the player.
+    //
+    // No longer a selection. The mouse gesture picks the stroke, so there is nothing
+    // to mark as active and nothing to switch; what matters is which motions the
+    // weapon can perform at all.
     const weapon = player.inventory.equippedDef('weapon');
-    if (weapon?.weapon && weapon.weapon.melee.length > 0) {
-      this.equipHost.append(heading('Attack Modes  (X to switch)'));
-      const activeIndex = player.inventory.attackModeIndex(weapon.id, weapon.weapon.melee.length);
-      weapon.weapon.melee.forEach((attack, i) => {
+    const weaponModes = availableModes(weapon?.weapon?.melee);
+    if (weapon?.weapon && weaponModes.length > 0) {
+      this.equipHost.append(heading('Attack Modes  (hold LMB and move the mouse)'));
+      weaponModes.forEach((attack) => {
         const row = document.createElement('div');
         row.className = 'eq-slot';
         const left = document.createElement('div');
-        if (i === activeIndex) {
-          row.style.borderColor = '#d8b25a';
-          // A CSS triangle, not a glyph — see .mode-marker in styles.css.
-          const marker = document.createElement('div');
-          marker.className = 'mode-marker';
-          left.append(marker);
-        }
         const value = document.createElement('div');
         value.className = 'eq-val';
         value.textContent = describeMode(attack);

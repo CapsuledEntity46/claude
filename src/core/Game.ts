@@ -3,6 +3,7 @@ import { CombatSystem } from '../combat/CombatSystem';
 import { blockCollisionBoxes, blockDef } from '../world/blocks';
 import { makeMeta, shapeBoxes } from '../world/shapes';
 import { ITEMS, item, tryItem } from '../combat/items';
+import { availableModes, type AttackDirection } from '../combat/types';
 import { EntityManager } from '../entities/EntityManager';
 import { PickupManager } from '../entities/Pickups';
 import { ProjectileManager } from '../entities/Projectile';
@@ -639,6 +640,7 @@ export class Game {
       shieldItemId: inventory.equipped.shield,
       torchItemId: inventory.equipped.torch,
       attackMode: view.attackMode,
+      attackDirection: view.attackDirection,
       speed: Math.hypot(this.player.velocity.x, this.player.velocity.z),
       shotCounter: view.shotCounter,
       daylight: this.time.daylight,
@@ -921,13 +923,13 @@ export class Game {
       progress: Number(view.progress.toFixed(3)),
       draw: Number(view.draw.toFixed(3)),
       attackMode: view.attackMode,
+      // The stroke the mouse gesture chose, and the one the animation is playing.
+      attackDirection: view.attackDirection,
+      activeStroke: this.viewModel.activeStroke,
       shots: view.shotCounter,
       mainItem: this.player.inventory.activeItemId,
       torch: this.player.inventory.equipped.torch,
       shield: this.player.inventory.equipped.shield,
-      // Which diagonal each recent slash cut along. Consecutive swings alternate,
-      // so that together they trace an X.
-      swingDirections: [...this.viewModel.recentSwingDirections],
       torchEmbers: this.viewModel.emberCount,
     };
   }
@@ -1402,15 +1404,39 @@ export class Game {
     return inventory.activeItemId === itemId;
   }
 
-  /** Forces the active weapon's attack mode, for deterministic animation tests. */
-  debugSetAttackMode(mode: 'swing' | 'thrust'): boolean {
-    const active = this.player.inventory.activeItem;
-    const modes = active?.weapon?.melee;
-    if (!active || !modes || modes.length === 0) return false;
-    const index = modes.findIndex((m) => m.mode === mode);
-    if (index < 0) return false;
-    this.player.inventory.attackModes.set(active.id, index);
-    return true;
+  /**
+   * Performs one melee gesture outright, for deterministic tests and screenshots.
+   *
+   * Drives the real path — the same `beginMelee` a mouse gesture reaches — so the
+   * weapon-geometry fallbacks and the direction modifiers all apply. Returns the
+   * stroke actually performed, which is not always the one asked for: a mace handed a
+   * thrust answers with a downcut.
+   */
+  debugMeleeGesture(direction: AttackDirection): string | null {
+    return this.combat.debugPerformGesture(this.ctx, direction);
+  }
+
+  /**
+   * Feeds mouse movement into the frame, for driving melee gestures in tests.
+   *
+   * See `Input.debugFeedMouseDelta`: the browser's own synthetic deltas are unusable
+   * under pointer lock, so a test drag holds the real mouse button and supplies the
+   * movement through here.
+   */
+  debugFeedMouse(dx: number, dy: number): void {
+    this.input.debugFeedMouseDelta(dx, dy);
+  }
+
+  /** The gesture currently being drawn, for tests and the HUD. */
+  debugGestureState(): Record<string, unknown> {
+    const g = this.combat.gestureState(this.ctx);
+    return {
+      active: g.active,
+      direction: g.direction,
+      magnitude: Number(g.magnitude.toFixed(2)),
+      charge: Number(g.charge.toFixed(3)),
+      lastDirection: g.lastDirection,
+    };
   }
 
   /** Equips an item directly, bypassing the hotbar. */
@@ -1516,17 +1542,17 @@ export class Game {
   /** Combat counters plus the last reason an action was refused. */
   debugCombatDiag(): Record<string, unknown> {
     const active = this.player.inventory.activeItem;
-    const modeCount = active?.weapon?.melee.length ?? 0;
+    const modeCount = availableModes(active?.weapon?.melee).length;
     return {
       ...this.combat.diag,
       activeItem: this.player.inventory.activeItemId,
-      modeIndex: active ? this.player.inventory.attackModeIndex(active.id, modeCount) : -1,
       modeCount,
       stamina: Math.round(this.player.stats.stamina),
       pitch: Number(this.player.pitch.toFixed(2)),
       yaw: Number(this.player.yaw.toFixed(2)),
       mode: this.mode,
       combatState: this.combat.debugState(),
+      useCooldown: Number(this.combat.debugUseCooldown().toFixed(3)),
       input: { ...this.input.counters },
     };
   }

@@ -132,6 +132,9 @@ export class Player {
   }
 
   private applyLook(input: Input): void {
+    // Mouse movement can belong to a melee gesture instead of to the camera. Without
+    // this the view spun wildly through every attack, since the same deltas drove both.
+    if (!input.lookAvailable) return;
     this.yaw -= input.mouseDX * input.sensitivity;
     this.pitch -= input.mouseDY * input.sensitivity;
     const limit = Math.PI / 2 - 0.01;

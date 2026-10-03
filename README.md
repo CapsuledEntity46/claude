@@ -19,23 +19,53 @@ npm run dev     # then open the printed localhost URL
 | --- | --- |
 | `WASD` | Move · `Space` jump / swim up · `Shift` sprint |
 | Mouse | Look (click the canvas to capture the pointer) |
-| `LMB` | Attack, cast, throw, use — or mine, when a block or torch is selected |
+| `LMB` | **Melee: hold and move the mouse** — the direction is the attack · cast, throw, fire, use · mine, when a block or torch is selected |
 | `RMB` | Guard · place a block · **aim** a bow or grenade · open a door |
-| `X` | Switch swing / thrust, or cycle the build tool's shape |
+| `X` | Cycle the build tool's shape |
 | `R` | Reload a firearm, or sample a block with the build tool |
 | `1`–`8` / wheel | Hotbar |
 | `Tab` | Character sheet: stats, attribute points, equipment, bag |
 | `F5` / `F9` | Save / load · `Esc` pause |
 
 You can see what you are holding. Weapons, torches, shields, spells, and blocks
-all have a first-person model, and a swing sweeps a wide arc across the screen
-while a thrust drives straight down the centre — the two motions are meant to be
-distinguishable without reading the HUD.
+all have a first-person model, and the weapon travels the way you moved the mouse
+— a left drag sweeps right-to-left across the screen, an up drag rips vertically,
+a thrust drives straight down the centre. The motion is meant to be readable
+without consulting the HUD.
+
+## Melee is a mouse gesture, not a button
+
+Hold `LMB` with a melee weapon (or bare fists) and move the mouse. The direction
+you move picks the attack — nine of them:
+
+| Gesture | Attack | Character |
+| --- | --- | --- |
+| ← / → | Left or right slash | Fast, wide arc |
+| ↑ | Uppercut | Slow, hits hard, narrow arc |
+| ↓ | Downcut | Slow, hits hard, narrow arc |
+| ↖ ↗ ↙ ↘ | Diagonal cuts | Between the two |
+| No movement, or a quick click | Thrust | Narrow, long reach, armour-piercing |
+
+The attack fires the instant your movement crosses the commit threshold, so the
+blow lands while the mouse is still moving rather than waiting for you to let go.
+Releasing early commits whatever stroke you had made; releasing without having
+moved past the dead zone is a thrust. While the button is held the mouse drives
+the weapon and **not** the camera, so a stroke never spins your view; an arrow by
+the crosshair shows the stroke being drawn.
+
+The stroke also leans the hit cone towards the side it travels, so a left slash
+favours targets on your left. Melee still never damages terrain and never kicks
+the camera.
+
+Tunables live in `GESTURE_CONFIG` in `src/combat/GestureTracker.ts` (dead zone,
+commit threshold, sample window, sector tolerance, sensitivity) and in
+`DIRECTION_MODIFIERS` in `src/combat/types.ts` (per-direction damage, timing,
+stamina, reach and arc).
 
 ## The central idea: weapon geometry decides how you can attack
 
-A weapon's available attack modes follow from its shape, and each mode deals a
-different damage type:
+A gesture asks for an attack; the weapon's shape decides whether it can oblige.
+Each family deals a different damage type:
 
 | Weapon | Swing | Thrust | Why |
 | --- | :-: | :-: | --- |
@@ -47,6 +77,10 @@ different damage type:
   damage. They barely get past armour.
 - **Thrusts** commit along a narrow line, reach further, hit one target, crit more
   often, and **bypass about half of the target's armour**.
+
+A gesture the weapon cannot perform falls back to the nearest thing it can, and
+says so in the log: thrust at something with a mace and you get a downward chop,
+slash with a rapier and you get a thrust.
 
 ## Armour, and why the choice matters
 
@@ -558,12 +592,19 @@ Some notes on the parts that are less obvious than they look:
 - **Melee does not move the camera.** Kicking the view during a swing reads as the
   camera glitching or clipping rather than as a weapon being swung, so all of the
   motion belongs to the weapon. Firearms still recoil, where a shove is expected.
-- **A swing follows Skyrim's one-handed rhythm.** The weapon hauls back behind the
-  shoulder and partly out of frame, drives across the view at chest height *and
+- **A swing travels the way you moved the mouse.** The weapon hauls back opposite
+  the stroke and partly out of frame, drives across the view at chest height *and
   forward*, over-travels past the far side, then drifts back to a low central guard.
-  Consecutive attacks alternate sides. What distinguishes it from the sweeps that
-  came before is that the arm commits: the hand travels forward into the strike
-  rather than the wrist merely rotating in place. Three earlier versions each failed
+  The stroke's screen-space vector is decomposed into horizontal and vertical
+  components, so one animation covers all eight directions. Earlier versions
+  alternated sides automatically on consecutive attacks; with the gesture choosing
+  the direction, a forced alternation would fight the player's own input, so the
+  history it needed is gone. Vertical cuts carry an extra gain
+  (`SWING_VERTICAL_GAIN`) because the original constants were tuned for a full-width
+  horizontal sweep and an unscaled uppercut barely moved. What distinguishes the
+  motion from the sweeps that came before is that the arm commits: the hand travels
+  forward into the strike rather than the wrist merely rotating in place. Three
+  earlier versions each failed
   a different way — a circular screen-space path sent the blade off the edge of the
   view, a flat horizontal yaw sweep read as the weapon being waved, and a symmetric
   diagonal X never looked like it was hitting anything.
@@ -587,7 +628,7 @@ Some notes on the parts that are less obvious than they look:
 ## Tests
 
 ```bash
-npm test            # typecheck + 235 unit checks
+npm test            # typecheck + 267 unit checks
 npm run test:unit   # damage model, mesher, terrain determinism, inventory
 npm run test:smoke  # boots the real build in headless Chromium and plays it
 ```
@@ -599,14 +640,16 @@ slim post rather than a cube, that an open door has no collision, that mana neve
 regenerates on its own, that materials add no carry weight, that dungeon layouts
 are deterministic and chunk-order independent, that a dungeon entrance is both
 open *and* lit at the mouth, that stair treads face uphill, that a mace beats plate,
-that thrusts beat swings against armour, that a weapon's attack modes follow from
-its shape, that the mesher culls shared faces and bakes AO, that terrain is
+that thrusts beat swings against armour, that a weapon's attacks follow from
+its shape, that every mouse direction classifies into the stroke you would expect
+and slow drift never commits one, that the mesher culls shared faces and bakes AO, that terrain is
 deterministic per seed, that night raises the spawn cap above daytime, that
 weather never switches kind mid-downpour, and that a corrupt save is sanitised
 rather than trusted.
 
-The smoke test drives a real browser — it walks in all four directions, swings,
-switches to a thrust, kills an enemy and collects the orbs, fires the bow, casts a
+The smoke test drives a real browser — it walks in all four directions, holds the
+mouse button and drags out gesture attacks in several directions, clicks for a
+thrust, kills an enemy and collects the orbs, fires the bow, casts a
 spell, mines a block through its crack animation, plants a torch, cooks a fish,
 cycles day to night and clear to storm, saves and loads, and opens the character
 sheet, asserting the *effects* of each rather than just the absence of exceptions.
@@ -628,15 +671,29 @@ Two more lessons the animation checks paid for, both worth copying:
   which frame the poller caught, and it failed a swing that was behaving perfectly.
   Sampling the trajectory and taking each axis's range gives the same numbers
   (1.85 across, 1.03 down) whether the run captures 24 frames or 51.
-- **Assert state the game records rather than state a test infers.** Whether
-  consecutive swings alternate is now read from a recorded history of the directions
-  used. Inferring it from sampled poses reported two swings as cutting the same way
-  when the second had simply been caught at the start of its travel.
+- **Assert state the game records rather than state a test infers.** Which way a
+  stroke travelled is read from the direction the game committed to, not guessed
+  from sampled poses — inference reported two swings as cutting the same way when
+  the second had simply been caught at the start of its travel. The same rule
+  retired a signal built on `lastReason`: resolving a stroke that hits nothing, and
+  mining whatever the miss landed on, both overwrite it before a test can read it,
+  so "did an attack begin?" is now a monotonic `started` counter.
+
+Driving the gestures needed one concession. **Synthetic mouse moves are unusable
+under pointer lock**: Chromium reports them as cancelling pairs that sum to roughly
+zero, so a scripted drag could never cross the commit threshold no matter how far it
+travelled. The drag therefore injects deltas at exactly the point a real event
+enters `Input`, while still using real `mouse.down` and `mouse.up`. Everything that
+matters — accumulation, classification, look suppression, the geometry fallbacks and
+the attack itself — remains the code under test.
 
 And the recurring one: **a single synthetic click behind a fixed wait is not a
 test.** Placement and the build tool share a cooldown with whatever attack just ran,
 so a click can be swallowed entirely. Those checks now retry and poll for the
-outcome, which is what they were always meant to assert.
+outcome, which is what they were always meant to assert. Waiting for the combat
+state to read `idle` is not sufficient either: the between-uses cooldown outlives
+the recovery phase, and an attack refused by it leaves the *previous* stroke's
+direction on display — which reads as a misclassified gesture rather than a no-op.
 
 It needs Playwright:
 

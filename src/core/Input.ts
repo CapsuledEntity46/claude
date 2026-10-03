@@ -21,6 +21,16 @@ export class Input {
   sensitivity = 0.0022;
   locked = false;
 
+  /**
+   * Set when something else has claimed this frame's mouse movement.
+   *
+   * Melee is driven by mouse gestures, and the same deltas would otherwise also turn
+   * the camera — so every attack would spin the view. The combat system claims the
+   * movement while a gesture is being captured and the player skips its look update.
+   * Cleared every frame, so forgetting to re-enable it is impossible.
+   */
+  private lookClaimed = false;
+
   /** Raw event tallies, for diagnosing "did the click even arrive?". */
   readonly counters = { mouseDowns: 0, mouseUps: 0, keyDowns: 0 };
 
@@ -89,6 +99,21 @@ export class Input {
     });
   }
 
+  /**
+   * Adds mouse movement as though the browser had reported it.
+   *
+   * Exists for the tests. Synthetic `mousemove` events under pointer lock report
+   * movement deltas computed against the absolute cursor position rather than the
+   * previous event — observed as cancelling pairs like (640, 360) then (-640, -360) —
+   * so a gesture driven that way sums to nothing and never commits. Injecting here
+   * enters the pipeline at exactly the point a real event would, leaving every line of
+   * gesture accumulation, look suppression and attack resolution under test.
+   */
+  debugFeedMouseDelta(dx: number, dy: number): void {
+    this.mouseDX += dx;
+    this.mouseDY += dy;
+  }
+
   requestLock(): void {
     void this.canvas.requestPointerLock();
   }
@@ -100,6 +125,20 @@ export class Input {
   /** Suspends mouse-look without dropping pointer lock (used by overlays). */
   setLookEnabled(on: boolean): void {
     this.enabled = on;
+  }
+
+  /**
+   * Claims this frame's mouse movement for something other than looking around.
+   *
+   * Lasts one frame only. Must be called before the player consumes the deltas, which
+   * it is: the combat system updates first.
+   */
+  claimLook(): void {
+    this.lookClaimed = true;
+  }
+
+  get lookAvailable(): boolean {
+    return !this.lookClaimed;
   }
 
   isDown(code: string): boolean {
@@ -139,5 +178,6 @@ export class Input {
     this.mouseDX = 0;
     this.mouseDY = 0;
     this.wheelDelta = 0;
+    this.lookClaimed = false;
   }
 }

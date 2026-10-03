@@ -47,7 +47,14 @@ export interface InventorySnapshot {
   hotbar: (string | null)[];
   equipped: Record<EquipSlot, string | null>;
   selected: number;
-  attackModes: [string, number][];
+  /**
+   * Removed. Melee attacks are chosen by mouse gesture, so there is no stored
+   * swing/thrust selection any more.
+   *
+   * Still declared, and optional, purely so an existing save deserialises without
+   * complaint — `restore` ignores it.
+   */
+  attackModes?: [string, number][];
 }
 
 /**
@@ -64,9 +71,6 @@ export class Inventory {
   hotbar: (string | null)[] = new Array(HOTBAR_SIZE).fill(null);
   equipped: Record<EquipSlot, string | null> = { weapon: null, shield: null, armor: null, torch: null };
   selected = 0;
-
-  /** Remembered swing/thrust choice per weapon id. */
-  attackModes = new Map<string, number>();
 
   /**
    * The shield a two-handed weapon forced you to put away.
@@ -273,19 +277,6 @@ export class Inventory {
     if (slot === this.selected && itemId) this.select(slot);
   }
 
-  /** Cycles the active weapon's attack mode. Returns the new index. */
-  cycleAttackMode(weaponId: string, modeCount: number): number {
-    if (modeCount <= 1) return 0;
-    const next = ((this.attackModes.get(weaponId) ?? 0) + 1) % modeCount;
-    this.attackModes.set(weaponId, next);
-    return next;
-  }
-
-  attackModeIndex(weaponId: string, modeCount: number): number {
-    if (modeCount === 0) return 0;
-    return Math.min(this.attackModes.get(weaponId) ?? 0, modeCount - 1);
-  }
-
   // ---------------------------------------------------------------- persistence
 
   snapshot(): InventorySnapshot {
@@ -296,7 +287,6 @@ export class Inventory {
       hotbar: [...this.hotbar],
       equipped: { ...this.equipped },
       selected: this.selected,
-      attackModes: [...this.attackModes.entries()],
     };
   }
 
@@ -323,7 +313,8 @@ export class Inventory {
     };
     this.stashedShield = null;
     this.selected = Math.max(0, Math.min(HOTBAR_SIZE - 1, s.selected));
-    this.attackModes = new Map(s.attackModes ?? []);
+    // `s.attackModes` may be present in a save written before melee moved to mouse
+    // gestures. There is nothing to restore it into; dropping it is deliberate.
   }
 
   /** The kit a new character wakes up with. */

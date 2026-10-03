@@ -107,6 +107,19 @@ const check = (name, condition, detail) => {
   }
 };
 
+/**
+ * How many frames a scripted drag is spread over.
+ *
+ * It has to fit inside the tracker's rolling sample window (0.25s by default), and
+ * one step per rendered frame is the only way to have them counted as separate
+ * samples. At ~20fps a six-step drag spans 300ms, so the earliest samples expire
+ * before the last one lands and the sum never reaches the commit threshold — the
+ * gesture then silently fails to commit, and only on slow runs. Three steps stay
+ * inside the window with room to spare, and still read as a flick rather than a
+ * single teleporting jump.
+ */
+const GESTURE_STEPS = 3;
+
 const snapshot = () => page.evaluate(() => window.__voxelquest.debugSnapshot());
 const diagnostics = () => page.evaluate(() => window.__voxelquest.debugCombatDiag());
 
@@ -117,15 +130,51 @@ const diagnostics = () => page.evaluate(() => window.__voxelquest.debugCombatDia
  * clamps `dt`, that window takes longer in wall-clock time the slower the
  * renderer is. Sleeping a fixed interval before the next click is therefore
  * unreliable; wait for the state machine instead.
+ *
+ * The budget is generous because the slowest case is genuinely slow: a mace downcut
+ * is a long wind-up, a long recovery and a heavy weapon's cooldown, all stretched by
+ * the clamped `dt` of a software renderer.
  */
-async function waitForIdle(timeoutMs = 8000) {
+async function waitForIdle(timeoutMs = 20_000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const d = await diagnostics();
-    if (d.combatState === 'idle') return true;
+    // Both conditions matter. 'idle' only means the animation finished; the
+    // between-uses cooldown runs on past it and refuses the next attack.
+    if (d.combatState === 'idle' && (d.useCooldown ?? 0) <= 0) return true;
     await page.waitForTimeout(80);
   }
   console.log('  note  combat system never returned to idle');
+  return false;
+}
+
+/**
+ * How many melee attacks have actually begun, as opposed to been attempted.
+ *
+ * Melee can be refused for reasons that have nothing to do with the gesture —
+ * cooldown, stamina, no melee mode — and a refusal is silent in the view state. The
+ * gesture helpers compare this counter across an attempt so they can retry rather
+ * than assert against the previous stroke's direction.
+ */
+async function attacksStarted() {
+  const d = await diagnostics();
+  return d.started ?? 0;
+}
+
+/**
+ * Waits briefly for a new attack to begin, rather than reading the counter once.
+ *
+ * A single read right after the input is a race: the press is handled on the next
+ * rendered frame, and on a software renderer at ~9 fps that can be a tenth of a
+ * second away. Reading too early looks like a refusal, and the retry that follows
+ * presses the button *during* the wind-up of the attack that was starting all along.
+ */
+async function waitForAttackStart(before, timeoutMs = 2000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if ((await attacksStarted()) > before) return true;
+    await page.waitForTimeout(60);
+  }
   return false;
 }
 
@@ -326,6 +375,77 @@ try {
   const afterWalk = await snapshot();
   check('still on solid ground after walking', afterWalk.playerY > 4, `y=${afterWalk.playerY}`);
 
+  /**
+   * Performs a melee attack the way a player does: hold the left button, move the
+   * mouse, let go.
+   *
+   * The movement is injected rather than sent as `mouse.move`. Synthetic moves under
+   * pointer lock report deltas computed against the absolute cursor position — probed
+   * here as cancelling pairs like (640, 360) then (-640, -360) — so a drag built from
+   * them sums to zero and no gesture would ever commit. Injection enters at exactly
+   * the point a real event does, so gesture accumulation, look suppression, the
+   * geometry fallbacks and the attack itself are all still the code under test.
+   *
+   * @param dx total horizontal movement; negative is leftwards
+   * @param dy total vertical movement, y-down as the browser reports it
+   */
+  const meleeDrag = async (dx, dy, { steps = GESTURE_STEPS, release = true, attempts = 3 } = {}) => {
+    let state = null;
+    for (let attempt = 0; attempt < attempts; attempt++) {
+      // Readiness, not just idleness: `beginMelee` refuses while the between-uses
+      // cooldown runs, and a refused attack leaves the *previous* stroke's direction
+      // on display, which reads as a misclassified gesture rather than a no-op.
+      await waitForIdle();
+      const startedBefore = await attacksStarted();
+      await page.evaluate(() => window.__voxelquest.debugRefill());
+      await page.mouse.down({ button: 'left' });
+      state = null;
+      for (let i = 0; i < steps; i++) {
+        await page.evaluate(([x, y]) => window.__voxelquest.debugFeedMouse(x, y), [dx / steps, dy / steps]);
+        // One rendered frame per step, so the tracker sees them as separate samples
+        // inside its rolling window.
+        await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => r(null))));
+        // Sample the instant the stroke commits. The gesture fires partway through
+        // the drag, so reading only after the last step would miss the start of the
+        // animation, which is what the trajectory samplers need to latch onto.
+        if (state === null) {
+          const v = await page.evaluate(() => window.__voxelquest.debugViewState());
+          if (v.action === 'swing' || v.action === 'thrust') {
+            state = v;
+            // Stop feeding movement the moment the stroke commits. Continuing would
+            // spend the remaining steps *inside* the animation, and on a software
+            // renderer those few frames are most of the swing — the trajectory
+            // sampler would then start after the interesting part was over.
+            break;
+          }
+        }
+      }
+      if (release) await page.mouse.up({ button: 'left' });
+      if (state === null) state = await page.evaluate(() => window.__voxelquest.debugViewState());
+      if (await waitForAttackStart(startedBefore)) return state;
+      // Retrying with the button held would stack holds; one attempt is all we get.
+      if (!release) return state;
+    }
+    console.log('  note  melee drag never started an attack');
+    return state;
+  };
+
+  /** A bare click: button down, nothing moved, button up. Should read as a thrust. */
+  const meleeClick = async (attempts = 3) => {
+    let state = null;
+    for (let attempt = 0; attempt < attempts; attempt++) {
+      await waitForIdle();
+      const startedBefore = await attacksStarted();
+      await page.evaluate(() => window.__voxelquest.debugRefill());
+      await page.mouse.click(CENTER_X, CENTER_Y);
+      const began = await waitForAttackStart(startedBefore);
+      state = await page.evaluate(() => window.__voxelquest.debugViewState());
+      if (began) return state;
+    }
+    console.log('  note  melee click never started an attack');
+    return state;
+  };
+
   console.log('\n[melee]');
   // A controlled arena: level ground, no incoming damage, full stamina. This
   // measures the hit pipeline rather than staging a survival fight.
@@ -358,7 +478,7 @@ try {
 
   // A single swing must resolve and reduce that enemy's HP.
   const hitsBefore = (await diagnostics()).hits;
-  await page.mouse.click(CENTER_X, CENTER_Y);
+  await meleeDrag(-260, 0);
   const swung = await waitUntil('swing to resolve', async () => {
     const d = await diagnostics();
     return d.resolved > 0 ? d : null;
@@ -391,7 +511,9 @@ try {
     'enemy to die and drop orbs',
     async () => {
       await page.evaluate(() => window.__voxelquest.debugRefill());
-      await page.mouse.click(CENTER_X, CENTER_Y);
+      // A gesture, not a click. A bare click now thrusts, which is the narrow
+      // single-target attack — far too slow to grind a kill inside the timeout.
+      await page.evaluate(() => window.__voxelquest.debugMeleeGesture('left'));
       const s = await snapshot();
       return s.orbs > 0 || s.xp > 0 ? s : null;
     },
@@ -406,19 +528,146 @@ try {
   });
   check('orbs are collected into XP', (collected?.xp ?? 0) > 0, `xp ${collected?.xp}`);
 
-  console.log('\n[attack modes]');
-  // X must switch swing -> thrust, and the thrust must also land.
+  console.log('\n[melee gestures]');
+  // Melee is driven by mouse gestures now: hold the button, move the mouse, and the
+  // direction chooses the attack. The X key no longer switches swing and thrust.
   await setupArena(2.6);
   await page.waitForTimeout(1200);
   await waitForIdle();
+
+  // A real held-button drag, left across the screen.
+  const yawBefore = (await page.evaluate(() => window.__voxelquest.debugCombatDiag())).yaw;
+  const dragState = await meleeDrag(-260, 0);
+  check(
+    'a held-LMB drag left throws a left slash',
+    dragState.attackDirection === 'left',
+    `direction ${dragState.attackDirection}, action ${dragState.action}`,
+  );
+  const yawAfter = (await page.evaluate(() => window.__voxelquest.debugCombatDiag())).yaw;
+  // The same deltas that chose the attack must not also turn the camera.
+  check(
+    'the gesture does not spin the camera',
+    Math.abs(yawAfter - yawBefore) < 0.01,
+    `yaw ${yawBefore} -> ${yawAfter}`,
+  );
+
+  // Vertical and diagonal strokes. Mouse dy is y-down, so a negative dy is upwards.
+  await waitForIdle();
+  const upState = await meleeDrag(0, -260);
+  check('dragging up throws an uppercut', upState.attackDirection === 'up', upState.attackDirection);
+
+  await waitForIdle();
+  const diagonalState = await meleeDrag(200, -200);
+  check(
+    'dragging up and right throws a rising slash',
+    diagonalState.attackDirection === 'upRight',
+    diagonalState.attackDirection,
+  );
+
+  // The crosshair must show the stroke being drawn while the button is held. Fed
+  // past the dead zone but short of the commit threshold, so the gesture is still
+  // being made rather than already spent.
+  await waitForIdle();
+  await page.mouse.down({ button: 'left' });
+  const indicator = await page.evaluate(
+    () =>
+      new Promise((resolve) => {
+        const g = window.__voxelquest;
+        let fed = 0;
+        const tick = () => {
+          if (g.debugGestureState().active && fed < 2) {
+            g.debugFeedMouse(-9, 0);
+            fed++;
+            requestAnimationFrame(tick);
+            return;
+          }
+          if (fed < 2) {
+            requestAnimationFrame(tick);
+            return;
+          }
+          const el = document.getElementById('gesture');
+          const arrow = document.getElementById('gesture-arrow');
+          resolve({
+            active: el?.classList.contains('active') ?? false,
+            committed: el?.classList.contains('committed') ?? false,
+            transform: arrow?.style.transform ?? '',
+            state: g.debugGestureState(),
+          });
+        };
+        requestAnimationFrame(tick);
+      }),
+  );
+  // Releasing this hold commits a left swing, which is correct: the movement is
+  // past the dead zone, so it is a real stroke rather than a click. It has to be
+  // drained before moving on, or the next check latches onto *this* attack starting
+  // and reads its direction instead of its own.
+  const pendingBefore = await attacksStarted();
+  await page.mouse.up({ button: 'left' });
+  await waitForAttackStart(pendingBefore);
+  await waitForIdle();
+  check(
+    'a held gesture draws an indicator at the crosshair',
+    indicator.active && indicator.state.direction === 'left' && indicator.transform.includes('translate'),
+    `active ${indicator.active}, direction ${indicator.state.direction}, charge ${indicator.state.charge?.toFixed?.(2)}`,
+  );
+  check(
+    'the indicator points the way the mouse moved, and is not yet committed',
+    indicator.transform.startsWith('translate(-') && !indicator.committed,
+    `transform ${indicator.transform.slice(0, 40)}`,
+  );
+
+  // A click with no movement is a thrust, which is what keeps clicking sensible.
+  await waitForIdle();
+  const clickState = await meleeClick();
+  check('a click with no movement thrusts', clickState.attackDirection === 'thrust', clickState.attackDirection);
+
+  // Weapon geometry still governs: a mace has no point, so a thrust becomes a chop.
+  await waitForIdle();
+  await page.evaluate(() => {
+    const g = window.__voxelquest;
+    g.debugGiveItem('mace', 1);
+    g.debugSelectHotbarByItem('mace');
+  });
+  await page.waitForTimeout(250);
+  const maceThrust = await page.evaluate(() => window.__voxelquest.debugMeleeGesture('thrust'));
+  check('a thrust gesture with a mace falls back to a swing', maceThrust === 'down', `performed ${maceThrust}`);
+
+  await waitForIdle();
+  await page.evaluate(() => {
+    const g = window.__voxelquest;
+    g.debugGiveItem('rapier', 1);
+    g.debugSelectHotbarByItem('rapier');
+  });
+  await page.waitForTimeout(250);
+  const rapierSlash = await page.evaluate(() => window.__voxelquest.debugMeleeGesture('left'));
+  check('a slash gesture with a rapier falls back to a thrust', rapierSlash === 'thrust', `performed ${rapierSlash}`);
+
+  // X must still cycle the build tool's shape, which shared the key with the old
+  // attack-mode switch.
+  await page.evaluate(() => {
+    const g = window.__voxelquest;
+    g.debugSelectHotbarByItem('build_tool');
+  });
+  await page.waitForTimeout(250);
+  const toolBefore = await page.evaluate(() => document.getElementById('active-mode').textContent);
   await page.keyboard.press('KeyX');
-  await page.waitForTimeout(400);
-  const modeLabel = await page.evaluate(() => document.getElementById('active-mode').textContent);
-  check('mode label reports Thrust after pressing X', /thrust/i.test(modeLabel ?? ''), modeLabel?.slice(0, 70));
+  await page.waitForTimeout(250);
+  const toolAfter = await page.evaluate(() => document.getElementById('active-mode').textContent);
+  check(
+    'X still cycles the build tool shape',
+    !!toolBefore && !!toolAfter && toolBefore !== toolAfter,
+    `${toolBefore?.slice(0, 28)} -> ${toolAfter?.slice(0, 28)}`,
+  );
+
+  await page.evaluate(() => window.__voxelquest.debugSelectHotbarByItem('shortsword'));
+  await page.waitForTimeout(250);
+  await setupArena(2.6);
+  await page.waitForTimeout(1000);
+  await waitForIdle();
 
   const beforeThrust = await page.evaluate(() => window.__voxelquest.debugEnemyReport());
   const thrustHitsBefore = (await diagnostics()).hits;
-  await page.mouse.click(CENTER_X, CENTER_Y);
+  await meleeClick();
   const thrust = await waitUntil('thrust to land', async () => {
     const d = await diagnostics();
     return d.hits > thrustHitsBefore ? d : null;
@@ -553,7 +802,6 @@ try {
     const g = window.__voxelquest;
     g.debugSelectHotbarByItem('shortsword');
     // An earlier section toggled this weapon to thrust; pin it explicitly.
-    g.debugSetAttackMode('swing');
   });
   await page.waitForTimeout(300);
 
@@ -567,21 +815,24 @@ try {
    * The strike (the recovery phase) is where the two motions actually differ; the
    * wind-up is mostly a small pull-back in both cases.
    */
-  const sampleAttack = async (expectMode) => {
-    // The previous attack must have finished, or this click is swallowed.
-    await waitForIdle();
-    await page.evaluate(() => window.__voxelquest.debugRefill());
-    await page.mouse.click(CENTER_X, CENTER_Y);
+  const sampleAttack = async (expectMode, drag = [-260, 0]) => {
+    // The gesture *is* the mode selector now, so the drag has to be performed: a
+    // bare click always thrusts, and asking it for a swing would wait forever.
+    const dragged =
+      drag[0] === 0 && drag[1] === 0 ? await meleeClick() : await meleeDrag(drag[0], drag[1]);
 
-    const seen = await waitUntil(
-      `${expectMode} animation`,
-      async () => {
-        const v = await page.evaluate(() => window.__voxelquest.debugViewState());
-        return v.action === expectMode ? v : null;
-      },
-      6000,
-      40,
-    );
+    const seen =
+      dragged?.action === expectMode
+        ? dragged
+        : await waitUntil(
+            `${expectMode} animation`,
+            async () => {
+              const v = await page.evaluate(() => window.__voxelquest.debugViewState());
+              return v.action === expectMode ? v : null;
+            },
+            6000,
+            40,
+          );
 
     // Poll for the strike, keeping the most extreme pose we observe.
     let extreme = await page.evaluate(() => window.__voxelquest.debugViewPose());
@@ -616,49 +867,106 @@ try {
    * which frame the sampler happened to catch, and it failed on a swing that was
    * behaving perfectly. Range over the whole animation is the honest measure.
    */
-  const sampleTrajectory = async (expectMode) => {
+  const sampleTrajectory = async (expectMode, drag = [-260, 0]) => {
     await waitForIdle();
-    await page.evaluate(() => window.__voxelquest.debugRefill());
-    await page.mouse.click(CENTER_X, CENTER_Y);
 
     const keys = ['posX', 'posY', 'posZ', 'rotX', 'rotY', 'rotZ'];
     const min = {};
     const max = {};
-    let frames = 0;
-    // One sample per *rendered frame*, via requestAnimationFrame.
+    // The pose the stroke started from, read while still at rest. Taken after the
+    // drag it would be a mid-swing pose, and every "which way did it travel" signed
+    // excursion would be measured from the middle of the motion it is describing.
+    const baseline = await page.evaluate(() => window.__voxelquest.debugViewPose());
+
+    // The drag *and* the recording happen inside one page call, one sample per
+    // rendered frame.
     //
-    // Both obvious approaches fail. A fixed sleep between samples catches too few
-    // frames on a slow renderer — 11 across a whole swing — and misses the extremes
-    // the range depends on. Removing the sleep goes the other way and samples the
-    // same unchanged pose hundreds of times, giving a range of exactly zero.
-    // Synchronising to the frame loop samples as often as there is something new to
-    // see, and never more.
-    for (let i = 0; i < 240; i++) {
-      const { view, pose } = await page.evaluate(
-        () =>
+    // Sampling from Node instead costs a round trip per frame, and a swing is only
+    // about five frames on a software renderer — so the recording could begin after
+    // most of the motion was already over, and the same healthy swing measured 1.32
+    // on one run and 0.08 on the next. Staying inside the page removes the latency
+    // altogether: nothing is missed between the stroke committing and the first
+    // sample. Deltas are fed only until the attack starts, since the stroke is
+    // chosen by then and further movement would just be follow-through.
+    let recorded = [];
+    for (let attempt = 0; attempt < 3 && recorded.length === 0; attempt++) {
+      await waitForIdle();
+      await page.evaluate(() => window.__voxelquest.debugRefill());
+      // Clear any button state left over from the previous stroke before pressing.
+      // A `mouse.down` issued while the browser already considers the button held
+      // produces no press transition, so the tracker never starts capturing and the
+      // whole recording comes back empty.
+      await page.mouse.up({ button: 'left' }).catch(() => {});
+      await page.mouse.down({ button: 'left' });
+      const result = await page.evaluate(
+        ([dx, dy, steps, expect]) =>
           new Promise((resolve) => {
-            requestAnimationFrame(() =>
-              resolve({
-                view: window.__voxelquest.debugViewState(),
-                pose: window.__voxelquest.debugViewPose(),
-              }),
-            );
+            const g = window.__voxelquest;
+            const poses = [];
+            let fed = 0;
+            let started = false;
+            let waited = 0;
+            const tick = () => {
+              // Only feed once the press has actually reached the tracker. Feeding
+              // beforehand throws the deltas away: they are consumed each frame
+              // whether or not a gesture is capturing them.
+              const capturing = g.debugGestureState().active;
+              if (!started && capturing && fed < steps) {
+                g.debugFeedMouse(dx / steps, dy / steps);
+                fed++;
+              }
+              const view = g.debugViewState();
+              if (view.action === expect) {
+                started = true;
+                poses.push(g.debugViewPose());
+              } else if (started) {
+                // The animation has finished; stop on the first frame past it.
+                resolve({ poses, fed, reason: 'complete' });
+                return;
+              }
+              // Give up rather than hang if the gesture never commits. Kept short:
+              // a stuck hold here would sit on the button for seconds and starve
+              // every later check of wall-clock budget.
+              if (++waited > 90) {
+                resolve({ poses, fed, reason: capturing ? 'never committed' : 'press never registered' });
+                return;
+              }
+              requestAnimationFrame(tick);
+            };
+            requestAnimationFrame(tick);
           }),
+        [drag[0], drag[1], GESTURE_STEPS, expectMode],
       );
-      if (view.action === expectMode) {
-        frames++;
-        for (const key of keys) {
-          const v = pose[key] ?? 0;
-          min[key] = min[key] === undefined ? v : Math.min(min[key], v);
-          max[key] = max[key] === undefined ? v : Math.max(max[key], v);
-        }
-      } else if (frames > 0) {
-        break;
+      await page.mouse.up({ button: 'left' });
+      recorded = result.poses;
+      if (recorded.length === 0) {
+        // Reported rather than swallowed. An empty recording used to surface as a
+        // travel of exactly zero, which looks like a broken animation instead of a
+        // gesture that never fired.
+        console.log(`  note  ${expectMode} stroke recorded no frames (${result.reason}, fed ${result.fed})`);
+      }
+    }
+
+    const frames = recorded.length;
+    for (const pose of recorded) {
+      for (const key of keys) {
+        const v = pose[key] ?? 0;
+        min[key] = min[key] === undefined ? v : Math.min(min[key], v);
+        max[key] = max[key] === undefined ? v : Math.max(max[key], v);
       }
     }
     const range = {};
-    for (const key of keys) range[key] = (max[key] ?? 0) - (min[key] ?? 0);
-    return { range, frames };
+    // Signed excursion as well as magnitude: which *way* the weapon travelled is the
+    // whole point once the player's gesture chooses the stroke, and an unsigned range
+    // cannot tell a left slash from a right one.
+    const signedRange = {};
+    for (const key of keys) {
+      range[key] = (max[key] ?? 0) - (min[key] ?? 0);
+      const low = (min[key] ?? 0) - (baseline[key] ?? 0);
+      const high = (max[key] ?? 0) - (baseline[key] ?? 0);
+      signedRange[key] = Math.abs(high) >= Math.abs(low) ? high : low;
+    }
+    return { range, signedRange, frames };
   };
 
   // Reference pose with nothing happening, so animations can be measured as
@@ -670,17 +978,8 @@ try {
   const swingSample = await sampleAttack('swing');
   check('swinging drives a swing animation', swingSample.view?.action === 'swing', `action ${swingSample.view?.action}, phase ${swingSample.view?.phase}`);
 
-  // A second swing, to check the pair alternates. Consecutive slashes are supposed
-  // to cut along opposite diagonals so that together they trace an X.
-  const swingSampleB = await sampleAttack('swing');
-
-  await waitForIdle();
-  const modeSet = await page.evaluate(() => window.__voxelquest.debugSetAttackMode('thrust'));
-  await page.waitForTimeout(250);
-  const pinned = await page.evaluate(() => window.__voxelquest.debugViewState());
-  check('the weapon can be pinned to thrust mode', modeSet && pinned.attackMode === 'thrust', `set ${modeSet}, mode ${pinned.attackMode}`);
-
-  const thrustSample = await sampleAttack('thrust');
+  // The stroke is chosen by the gesture, so a thrust is a drag of nothing at all.
+  const thrustSample = await sampleAttack('thrust', [0, 0]);
   const thrustDiag = await page.evaluate(() => window.__voxelquest.debugCombatDiag());
   check(
     'thrusting drives a thrust animation',
@@ -729,8 +1028,7 @@ try {
   // Measured as the range over the whole animation, not from one frame: see
   // sampleTrajectory.
   await waitForIdle();
-  await page.evaluate(() => window.__voxelquest.debugSetAttackMode('swing'));
-  const swingTravel = await sampleTrajectory('swing');
+  const swingTravel = await sampleTrajectory('swing', [-260, 180]);
   const acrossRange = swingTravel.range.rotY + swingTravel.range.posX;
   const downRange = swingTravel.range.rotX + swingTravel.range.posY;
   check(
@@ -739,21 +1037,29 @@ try {
     `across ${acrossRange.toFixed(2)}, down ${downRange.toFixed(2)} over ${swingTravel.frames} frames`,
   );
 
-  // And consecutive slashes mirror each other, which is what makes the X.
-  //
-  // Read from the recorded history rather than inferred from a sampled pose. The
-  // first version of this compared the most extreme pose of each swing, which
-  // depends on which frame the sampler happened to catch: it reported two swings
-  // as cutting the same way when the second had simply been caught at the start of
-  // its travel rather than the end.
-  const directions = (await page.evaluate(() => window.__voxelquest.debugViewState())).swingDirections ?? [];
-  const lastTwo = directions.slice(-2);
+  // The gesture, not an alternating counter, decides which way the blade travels.
+  // The animation must follow the stroke that was actually asked for — this replaced
+  // a check that consecutive swings mirrored each other, which was the right
+  // assertion only while the player had no say in the matter.
+  await waitForIdle();
+  const leftStroke = await sampleTrajectory('swing', [-260, 0]);
+  const leftYaw = leftStroke.signedRange.rotY;
+  await waitForIdle();
+  const rightStroke = await sampleTrajectory('swing', [260, 0]);
+  const rightYaw = rightStroke.signedRange.rotY;
   check(
-    'consecutive swings cut along opposite diagonals',
-    lastTwo.length === 2 && lastTwo[0] === -lastTwo[1],
-    `directions ${JSON.stringify(directions)}`,
+    'opposite gestures sweep the weapon opposite ways',
+    Math.sign(leftYaw) !== 0 && Math.sign(leftYaw) === -Math.sign(rightYaw),
+    `left stroke yaw ${leftYaw.toFixed(2)}, right stroke yaw ${rightYaw.toFixed(2)}`,
   );
-  void swingSampleB;
+
+  await waitForIdle();
+  const upStroke = await sampleTrajectory('swing', [0, -260]);
+  check(
+    'an uppercut travels vertically rather than across',
+    upStroke.range.rotX > upStroke.range.rotY,
+    `pitch ${upStroke.range.rotX.toFixed(2)} vs yaw ${upStroke.range.rotY.toFixed(2)}`,
+  );
   // And a thrust must bring the weapon towards the centre, not away from it.
   check(
     'a thrust moves the weapon towards screen centre',
@@ -768,9 +1074,7 @@ try {
   // reported, twice. This measures the thing itself: the tip's projected position
   // relative to the crosshair, at its closest approach during the thrust.
   await waitForIdle();
-  await page.evaluate(() => window.__voxelquest.debugSetAttackMode('thrust'));
-  await page.evaluate(() => window.__voxelquest.debugRefill());
-  await page.mouse.click(CENTER_X, CENTER_Y);
+  await meleeClick();
   let closestTip = null;
   for (let i = 0; i < 70; i++) {
     const sample = await page.evaluate(() => ({
@@ -1021,9 +1325,15 @@ try {
   // A torch must place as a slim post, not a cube.
   await page.evaluate(() => window.__voxelquest.debugSelectHotbarByItem('torch'));
   await page.waitForTimeout(250);
-  await page.mouse.click(CENTER_X, CENTER_Y, { button: 'right' });
-  await page.waitForTimeout(400);
-  const torchShape = await page.evaluate(() => window.__voxelquest.debugPlacedShape('torch'));
+  // Retried rather than clicked once behind a fixed wait. Placement shares a
+  // cooldown with the use that cooked the fish a moment ago, so a lone right-click
+  // here can be swallowed entirely and the shape read back as null.
+  const torchShape = await waitUntil('a torch to be placed', async () => {
+    await waitForIdle();
+    await page.mouse.click(CENTER_X, CENTER_Y, { button: 'right' });
+    await page.waitForTimeout(400);
+    return page.evaluate(() => window.__voxelquest.debugPlacedShape('torch'));
+  });
   check(
     'a placed torch is a slim post, not a cube',
     torchShape?.shape === 'torch' && torchShape.fillsVoxel === false,

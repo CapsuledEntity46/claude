@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { blockDef } from '../world/blocks';
 import { tryItem, type ItemDef } from '../combat/items';
-import type { AttackMode } from '../combat/types';
+import { DIRECTION_VECTOR, type AttackDirection, type AttackMode } from '../combat/types';
 import { Particles, POINT_SIZE_SCALE } from './Particles';
 import {
   MODEL_MAT,
@@ -52,6 +52,8 @@ export interface ViewModelInput {
   shieldItemId: string | null;
   torchItemId: string | null;
   attackMode: AttackMode;
+  /** Which of the nine strokes the current attack is, for the swing animation. */
+  attackDirection: AttackDirection;
   /** Horizontal move speed, for walk sway. */
   speed: number;
   /** Monotonic counter; a change triggers a recoil kick. */
@@ -119,24 +121,27 @@ const TIP_LOCAL = new THREE.Vector3(0, 0, -0.78);
 const BLADE_AXIS = new THREE.Vector3(0, 0, -1);
 /** Half-angle of the swing arc, in radians. Wide enough to cross the whole view. */
 /**
- * Swing geometry, cut to Skyrim's one-handed rhythm.
+ * Swing geometry, driven by the player's gesture.
  *
- * What distinguishes a Skyrim slash from the generic screen-space sweep this
- * replaced is that the *arm* commits, not just the wrist. The sequence is:
+ * The stroke is whichever of the eight directions the mouse described, so the
+ * animation has to be able to travel any of them rather than replaying one clip. The
+ * sequence is the same in every case:
  *
- *  1. The weapon hauls back behind the shoulder — out and away from the screen,
- *     partly leaving frame — which is the telegraph.
- *  2. It drives across the view at roughly chest height *and forward*, so the blade
- *     travels towards what it is hitting rather than merely rotating in place. The
- *     cut is flatter than a diagonal slash, with a modest downward cant.
+ *  1. The weapon hauls back to the *start* of the stroke — out and away from the
+ *     screen, partly leaving frame — which is the telegraph.
+ *  2. It drives along the gesture direction *and forward*, so the blade travels
+ *     towards what it is hitting rather than merely rotating in place.
  *  3. It over-travels past the far side, then drifts back to a low, central guard
  *     rather than snapping straight back to the carry pose.
- *
- * Consecutive attacks still alternate sides, as Skyrim's do.
  *
  * Two earlier attempts are worth remembering. A circular screen-space path sent the
  * blade off the edge of the view. A pure horizontal yaw sweep read as the weapon
  * being waved, because rotation alone never moves the blade towards the target.
+ *
+ * This replaced a strictly alternating left/right swing. Alternation was the right
+ * answer while the player had no say in the stroke; now that the gesture picks it,
+ * alternating would actively fight the input — you would ask for a left slash and get
+ * a right one because the last swing happened to go left.
  */
 /** How far the weapon hauls back before the cut. */
 const SWING_WINDBACK = 0.42;
@@ -162,6 +167,14 @@ const SWING_REACH = 0.2;
 const SWING_GUARD_Y = -0.05;
 /** Share of the recovery window spent cutting, with the rest settling to guard. */
 const SWING_SWEEP_FRACTION = 0.42;
+/**
+ * Extra travel on the vertical component of a stroke.
+ *
+ * The horizontal constants were tuned for a sweep that crosses the whole view, and a
+ * vertical cut reusing them unscaled barely moved — pitch travel alone is a fraction
+ * of the yaw travel it was paired with. An uppercut has to visibly rise.
+ */
+const SWING_VERTICAL_GAIN = 1.7;
 /** How far a thrust pulls the hand in towards screen centre. */
 const THRUST_CENTRING = 0.72;
 
@@ -220,23 +233,13 @@ export class ViewModel {
   private mineClock = 0;
   private idleClock = 0;
   /**
-   * Which diagonal the next slash cuts along: +1 from the upper right down to the
-   * lower left, -1 the mirror image.
+   * The stroke the swing currently playing is travelling along.
    *
-   * Strictly alternating, not randomised. This used to flip on a 62% coin toss to
-   * avoid a mechanical rhythm, but the two diagonals are only read as an X if they
-   * reliably follow one another — a random repeat of the same cut breaks the shape.
+   * Latched when the wind-up starts, not read live: the combat system reports the same
+   * direction throughout an attack, but latching makes it explicit that a gesture made
+   * mid-swing cannot redirect a blade already in motion.
    */
-  private swingDirection = 1;
-  /**
-   * The diagonal each recent slash cut along, most recent last.
-   *
-   * Recorded rather than inferred. A test can only tell which way a slash went by
-   * catching it mid-animation, and sampling the "most extreme" pose picks whichever
-   * frame happened to land — which reported two swings as travelling the same way
-   * when they had not. The history makes the alternation checkable after the fact.
-   */
-  private swingHistory: number[] = [];
+  private swingStroke: AttackDirection = 'right';
   private lastSwingPhase: ViewPhase = 'none';
   private recoil = 0;
   private lastShotCounter = 0;
@@ -409,11 +412,9 @@ export class ViewModel {
     );
     this.sway.lerp(this.swayTarget, Math.min(1, dt * 9));
 
-    // A new wind-up means a new attack: cut along the other diagonal.
+    // A new wind-up means a new attack: take the stroke the gesture chose.
     if (input.phase === 'windup' && this.lastSwingPhase !== 'windup') {
-      this.swingDirection = -this.swingDirection;
-      this.swingHistory.push(this.swingDirection);
-      if (this.swingHistory.length > 8) this.swingHistory.shift();
+      this.swingStroke = input.attackDirection;
     }
     this.lastSwingPhase = input.phase;
 
@@ -499,27 +500,29 @@ export class ViewModel {
 
     switch (input.action) {
       case 'swing': {
-        // `side` is +1 for a cut travelling right-to-left, -1 for the backhand;
-        // consecutive attacks alternate, as Skyrim's do.
+        // The stroke is decomposed into two drivers:
         //
-        // The pivot is the hand group's own origin, which sits at the grip, so the
-        // weapon rotates about the wrist rather than about its own centre.
+        //   `hx` is horizontal travel, +1 meaning right-to-left across the view.
+        //   `vy` is vertical travel, +1 meaning high-to-low — a downcut.
         //
-        // The cut and the settle occupy the recovery window, where the visible
-        // motion belongs; the haul-back rides the tail of the wind-up so the blade
-        // is already travelling when the damage lands.
-        const side = this.swingDirection;
+        // A pure uppercut therefore has hx = 0 and contributes no yaw or roll at all,
+        // which is what stops it reading as a sideways swipe that happens to rise.
+        // Screen x points right and the animation's positive yaw sweeps left, hence
+        // the negation; screen y points up and a positive `vy` falls, hence the other.
+        const [screenX, screenY] = DIRECTION_VECTOR[this.swingStroke];
+        const hx = -screenX;
+        const vy = -screenY * SWING_VERTICAL_GAIN;
 
         if (input.phase === 'windup') {
           // Haul back behind the shoulder: out to the side, up a little, and back
           // towards the camera so the weapon partly leaves frame. Late, because
           // anticipation only reads if it happens just before the strike.
           const w = easeIn(Math.max(0, (input.progress - 0.45) / 0.55));
-          ry += w * SWING_WINDBACK * side;
-          rx += w * SWING_PITCH_RISE;
-          rz += w * SWING_ROLL * side;
-          ox += w * SWING_CROSS_X * 0.42 * side;
-          oy += w * SWING_RISE_Y;
+          ry += w * SWING_WINDBACK * hx;
+          rx += w * SWING_PITCH_RISE * vy;
+          rz += w * SWING_ROLL * hx;
+          ox += w * SWING_CROSS_X * 0.42 * hx;
+          oy += w * SWING_RISE_Y * vy;
           // Positive Z is towards the camera: the weapon is being cocked back.
           oz += w * SWING_REACH * 0.55;
           break;
@@ -529,11 +532,11 @@ export class ViewModel {
           // The cut. Fast, flat-ish, and driving forward — the arm extends into the
           // strike instead of the wrist merely rotating.
           const t = easeOut(input.progress / SWING_SWEEP_FRACTION);
-          ry += (SWING_WINDBACK - (SWING_WINDBACK + SWING_ARC) * t) * side;
-          rx += SWING_PITCH_RISE - SWING_PITCH_DROP * t;
-          rz += (SWING_ROLL - SWING_ROLL * 2 * t) * side;
-          ox += (SWING_CROSS_X * 0.42 - SWING_CROSS_X * 1.42 * t) * side;
-          oy += SWING_RISE_Y - (SWING_RISE_Y + SWING_DROP_Y) * t;
+          ry += (SWING_WINDBACK - (SWING_WINDBACK + SWING_ARC) * t) * hx;
+          rx += (SWING_PITCH_RISE - SWING_PITCH_DROP * t) * vy;
+          rz += (SWING_ROLL - SWING_ROLL * 2 * t) * hx;
+          ox += (SWING_CROSS_X * 0.42 - SWING_CROSS_X * 1.42 * t) * hx;
+          oy += (SWING_RISE_Y - (SWING_RISE_Y + SWING_DROP_Y) * t) * vy;
           // Cocked back, thrown forward past the carry position, then easing off as
           // the arm reaches the end of its travel.
           oz += SWING_REACH * 0.55 - SWING_REACH * 1.55 * Math.sin(t * 1.9);
@@ -542,13 +545,13 @@ export class ViewModel {
           // central guard rather than snapping straight to the carry pose.
           const t = easeInOut((input.progress - SWING_SWEEP_FRACTION) / (1 - SWING_SWEEP_FRACTION));
           const settle = 1 - t;
-          ry += -SWING_ARC * side * settle;
-          rx += (SWING_PITCH_RISE - SWING_PITCH_DROP) * settle;
-          rz += -SWING_ROLL * side * settle;
-          ox += -SWING_CROSS_X * side * settle;
+          ry += -SWING_ARC * hx * settle;
+          rx += (SWING_PITCH_RISE - SWING_PITCH_DROP) * vy * settle;
+          rz += -SWING_ROLL * hx * settle;
+          ox += -SWING_CROSS_X * hx * settle;
           // A hold at the end of the follow-through, which is what stops the
           // recovery looking like the cut played backwards.
-          oy += (SWING_GUARD_Y - SWING_DROP_Y) * settle;
+          oy += (SWING_GUARD_Y - SWING_DROP_Y) * vy * settle;
           oz += -SWING_REACH * 0.25 * settle;
         }
         break;
@@ -857,9 +860,9 @@ export class ViewModel {
     return this.embers.count;
   }
 
-  /** The diagonal each recent slash cut along, for tests. */
-  get recentSwingDirections(): readonly number[] {
-    return this.swingHistory;
+  /** The stroke the swing currently playing is travelling along, for tests. */
+  get activeStroke(): AttackDirection {
+    return this.swingStroke;
   }
 
   /**

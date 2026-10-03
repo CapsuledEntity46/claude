@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import type { HudCombatState } from '../combat/CombatSystem';
+import { DIRECTION_VECTOR as GESTURE_ARROW_VECTOR } from '../combat/types';
 import { item } from '../combat/items';
 import type { FloaterClass, LogClass } from '../core/Context';
 import { HOTBAR_SIZE } from '../player/Inventory';
@@ -53,6 +54,8 @@ export class Hud {
   private logHost = el<HTMLDivElement>('log');
   private floaterHost = el<HTMLDivElement>('floaters');
   private crosshair = el<HTMLDivElement>('crosshair');
+  private gesture = el<HTMLDivElement>('gesture');
+  private gestureArrow = el<HTMLDivElement>('gesture-arrow');
 
   private deathScreen = el<HTMLDivElement>('death');
   private deathDetail = el<HTMLParagraphElement>('death-detail');
@@ -129,6 +132,7 @@ export class Hud {
 
     // Crosshair turns gold while a bow is drawn, as the only draw-strength cue.
     this.crosshair.classList.toggle('charging', combat.draw > 0.05);
+    this.updateGesture(combat.gesture);
   }
 
   private updateSpellSlots(player: Player): void {
@@ -216,6 +220,33 @@ export class Hud {
     else if (combat.ammoReserve >= 0) bits.push(`${combat.ammoReserve} ${combat.ammoLabel}`);
     if (combat.actionLabel) bits.push(combat.actionLabel);
     this.activeMode.textContent = bits.join('  ·  ');
+  }
+
+  /**
+   * Draws the melee gesture arrow.
+   *
+   * Rotated to point along the stroke and pushed out from the crosshair in proportion
+   * to how charged the gesture is. A thrust has no direction to lean, so it is shown
+   * as a ring on the crosshair itself rather than an arrow pointing nowhere.
+   */
+  private updateGesture(gesture: HudCombatState['gesture']): void {
+    this.gesture.classList.toggle('active', gesture.active);
+    if (!gesture.active) return;
+
+    this.gesture.classList.toggle('committed', gesture.charge >= 1);
+
+    const [x, y] = GESTURE_ARROW_VECTOR[gesture.direction];
+    if (x === 0 && y === 0) {
+      // Straight ahead: no lean, just a mark that grows as the thrust charges.
+      this.gestureArrow.style.transform = `scale(${0.7 + gesture.charge * 0.5}) rotate(0deg)`;
+      return;
+    }
+
+    // Screen y points down in CSS, so the gesture's y-up vector is negated.
+    const distance = 14 + gesture.charge * 18;
+    const angle = (Math.atan2(x, y) * 180) / Math.PI;
+    this.gestureArrow.style.transform =
+      `translate(${x * distance}px, ${-y * distance}px) rotate(${angle}deg) scale(${0.8 + gesture.charge * 0.45})`;
   }
 
   private updateStatus(player: Player, combat: HudCombatState, info: HudEnvironment): void {

@@ -130,19 +130,27 @@ await shot('day-weapon-held');
 // Mid-swing and mid-thrust, to show the two motions differ.
 await g(() => {
   window.__voxelquest.debugSpawnEnemyInReach(2.6);
-  window.__voxelquest.debugSetAttackMode('swing');
 });
 // Sample several points through the swing, so the arc can be judged as a motion.
+// The stroke is requested outright rather than mimed with a mouse drag: synthetic
+// movement deltas are unusable under pointer lock, and these shots care about the
+// animation rather than the input path.
 await waitForIdle();
-await page.mouse.click(CENTER_X, CENTER_Y);
+await g(() => window.__voxelquest.debugMeleeGesture('left'));
 for (const [i, delay] of [140, 90, 90, 110].entries()) {
   await page.waitForTimeout(delay);
   await shot(`attack-swing-${i + 1}`);
 }
 
 await waitForIdle();
-await g(() => window.__voxelquest.debugSetAttackMode('thrust'));
-await page.mouse.click(CENTER_X, CENTER_Y);
+await g(() => window.__voxelquest.debugMeleeGesture('up'));
+for (const [i, delay] of [140, 100, 110].entries()) {
+  await page.waitForTimeout(delay);
+  await shot(`attack-uppercut-${i + 1}`);
+}
+
+await waitForIdle();
+await g(() => window.__voxelquest.debugMeleeGesture('thrust'));
 for (const [i, delay] of [150, 110, 120].entries()) {
   await page.waitForTimeout(delay);
   await shot(`attack-thrust-${i + 1}`);
@@ -344,7 +352,6 @@ await g(() => {
   game.debugSetTime('day');
   game.debugEquip('longsword');
   game.debugSelectHotbarByItem('longsword');
-  game.debugSetAttackMode('swing');
   game.debugFreezeEnemies(true);
   game.debugSpawnEnemyInReach(2.4);
 });
@@ -360,7 +367,7 @@ await page.waitForTimeout(1200);
   let captured = false;
   for (let i = 0; i < 25 && !captured; i++) {
     await g(() => window.__voxelquest.debugRefill());
-    await page.mouse.click(CENTER_X, CENTER_Y);
+    await g(() => window.__voxelquest.debugMeleeGesture('left'));
     for (let poll = 0; poll < 12; poll++) {
       await page.waitForTimeout(40);
       const count = await g(() => window.__voxelquest.debugParticleCount());

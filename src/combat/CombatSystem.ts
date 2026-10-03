@@ -7,10 +7,33 @@ import { facingFromYaw, makeMeta } from '../world/shapes';
 import type { RaycastHit } from '../world/World';
 import { PLAYER_HALF_WIDTH, PLAYER_HEIGHT } from '../player/Player';
 import { ammoItemFor, item, itemForBlock, type ItemDef } from './items';
-import { computeDamage, type AttackMode, type DamageInput, type MeleeAttack, type RangedProfile } from './types';
+import { GestureTracker, type GestureSnapshot } from './GestureTracker';
+import {
+  DIRECTION_LABEL,
+  DIRECTION_VECTOR,
+  availableModes,
+  computeDamage,
+  directionToMode,
+  hasMeleeMode,
+  resolveDirectionalAttack,
+  type AttackDirection,
+  type AttackMode,
+  type DamageInput,
+  type MeleeAttack,
+  type MeleeModes,
+  type RangedProfile,
+} from './types';
 import type { ViewAction, ViewPhase } from '../fx/ViewModel';
 
 const REACH = 5.2;
+/**
+ * How far the melee hit cone leans towards the stroke's direction, in degrees.
+ *
+ * Enough that choosing the right stroke for where the enemy stands is worth doing, and
+ * small enough that a well-aimed swing still connects with whatever is under the
+ * crosshair.
+ */
+const STROKE_BIAS_DEG = 18;
 const MAX_EXPLOSION_BLOCKS = 700;
 
 type ActionState = 'idle' | 'windup' | 'recovery' | 'casting' | 'reloading';
@@ -27,6 +50,13 @@ export interface HudCombatState {
   targetName: string | null;
   targetHpFraction: number;
   modeLabel: string;
+  /** The melee gesture being drawn right now, for the crosshair indicator. */
+  gesture: {
+    active: boolean;
+    direction: AttackDirection;
+    /** 0..1 towards committing the attack. */
+    charge: number;
+  };
 }
 
 /**
@@ -40,6 +70,8 @@ export class CombatSystem {
   private stateDuration = 0;
 
   private pendingMelee: MeleeAttack | null = null;
+  /** The stroke the pending attack will resolve with, for the hit-cone bias. */
+  private pendingDirection: AttackDirection = 'thrust';
   private pendingSpell: ItemDef | null = null;
 
   /** Bow draw strength, 0..1. */
@@ -70,8 +102,27 @@ export class CombatSystem {
   private toolSize = 3;
   private toolBlock: Block = Block.Cobble;
 
-  /** Which mode the current or just-finished melee attack used, for animation. */
-  private lastMeleeMode: AttackMode = 'swing';
+  /**
+   * Mouse-gesture melee: hold the attack button, move the mouse, and the direction of
+   * the movement chooses the stroke.
+   */
+  private readonly gesture = new GestureTracker();
+  /**
+   * True once a gesture has fired and the button has not yet come up.
+   *
+   * Without it one hold would attack twice — once when the movement crossed the commit
+   * threshold, and again when the button was released.
+   */
+  private awaitingRelease = false;
+  /**
+   * The stroke the current or just-finished attack used, for animation and the HUD.
+   *
+   * Seeded with a swing so the first wind-up has something to animate along; the HUD
+   * waits for `hasStruck` before naming it, or a fresh character would be told they
+   * had just thrust when they had done nothing at all.
+   */
+  private lastDirection: AttackDirection = 'right';
+  private hasStruck = false;
   /** Counts shots fired, so the view model can trigger a recoil kick. */
   private shotCounter = 0;
   /** Short timer driving the block-placement animation. */
@@ -82,6 +133,14 @@ export class CombatSystem {
   /** Counters for debugging why an attack did or did not land. */
   readonly diag = {
     attempts: 0,
+    /**
+     * Attacks that actually began, as opposed to attempts that were refused.
+     *
+     * `lastReason` cannot answer this: resolving a stroke that hits nothing, and
+     * mining whatever the miss landed on, both overwrite it before anyone can read
+     * it. A monotonic counter is immune to that race.
+     */
+    started: 0,
     resolved: 0,
     candidates: 0,
     hits: 0,
@@ -111,8 +170,13 @@ export class CombatSystem {
 
     const active = player.inventory.activeItem;
 
-    this.handleModeSwitch(input, ctx, active);
+    this.handleToolShapeKey(input, ctx, active);
     this.handleGuard(input, ctx, active);
+
+    // Before the busy check on purpose. The tracker still has to see the button come
+    // up while an attack is playing out, or the release that ends this swing would be
+    // read as the start of the next one.
+    this.updateMeleeGesture(dt, input, ctx, active);
 
     if (this.state !== 'idle') {
       if (input.mousePressed(0)) {
@@ -200,27 +264,26 @@ export class CombatSystem {
     progress: number;
     draw: number;
     attackMode: AttackMode;
+    /** The stroke driving the swing animation. */
+    attackDirection: AttackDirection;
     shotCounter: number;
   } {
     const phaseProgress = 1 - this.timer / Math.max(0.0001, this.stateDuration);
     const clamped = Math.max(0, Math.min(1, phaseProgress));
 
-    // The *currently selected* mode, which is what the idle stance should show.
-    // Reporting the last-used mode instead left the weapon carried in the old
-    // stance until the player attacked once after switching.
-    const selectedMode: AttackMode = ctx
-      ? this.currentMelee(ctx, ctx.player.inventory.activeItem)?.mode ?? this.lastMeleeMode
-      : this.lastMeleeMode;
+    // With no selected mode left, the idle stance follows the weapon's shape.
+    const resting: AttackMode = ctx ? this.restingMode(ctx.player.inventory.activeItem) : 'swing';
 
-    // Mid-attack the animation must follow the mode that attack started with,
-    // even if the selection has since changed.
+    // Mid-attack the animation follows the stroke the attack started with.
     if (this.state === 'windup' || this.state === 'recovery') {
+      const mode = directionToMode(this.lastDirection);
       return {
-        action: this.lastMeleeMode,
+        action: mode,
         phase: this.state === 'windup' ? 'windup' : 'recovery',
         progress: clamped,
         draw: this.draw,
-        attackMode: this.lastMeleeMode,
+        attackMode: mode,
+        attackDirection: this.lastDirection,
         shotCounter: this.shotCounter,
       };
     }
@@ -237,41 +300,130 @@ export class CombatSystem {
       phase: 'none',
       progress: action === 'place' ? 1 - this.placeTimer / 0.18 : clamped,
       draw: this.draw,
-      attackMode: selectedMode,
+      attackMode: resting,
+      attackDirection: this.lastDirection,
       shotCounter: this.shotCounter,
     };
   }
 
   // ------------------------------------------------------------------ modes
 
-  private handleModeSwitch(input: Input, ctx: GameContext, active: ItemDef | null): void {
+  /**
+   * X cycles the build tool's shape.
+   *
+   * It used to double as the swing/thrust switch for weapons. That selection is gone —
+   * the mouse gesture chooses the stroke — but the tool binding has to survive, which
+   * is the whole reason this stayed a separate handler.
+   */
+  private handleToolShapeKey(input: Input, ctx: GameContext, active: ItemDef | null): void {
     if (!input.wasPressed('KeyX')) return;
-
-    if (active?.kind === 'tool') {
-      this.cycleToolMode(ctx);
-      return;
-    }
-
-    const weapon = active?.weapon;
-    if (!weapon || weapon.melee.length <= 1) {
-      ctx.log('This weapon has only one way to strike.', 'info');
-      return;
-    }
-    const index = ctx.player.inventory.cycleAttackMode(active!.id, weapon.melee.length);
-    const mode = weapon.melee[index];
-    ctx.log(
-      `${active!.name}: ${mode.mode === 'swing' ? 'swinging' : 'thrusting'} — ${mode.damage} ${mode.type}, ` +
-        `${mode.reach.toFixed(1)}m reach, ${Math.round(mode.armorPierce * 100)}% armor pierce.`,
-      'info',
-    );
+    if (active?.kind === 'tool') this.cycleToolMode(ctx);
   }
 
-  /** The melee attack the active weapon will perform right now. */
-  private currentMelee(ctx: GameContext, active: ItemDef | null): MeleeAttack | null {
-    const weapon = active?.weapon ?? item('fists').weapon!;
-    if (weapon.melee.length === 0) return null;
-    const id = active?.id ?? 'fists';
-    return weapon.melee[ctx.player.inventory.attackModeIndex(id, weapon.melee.length)];
+  /** The melee modes the active item's shape allows, falling back to bare fists. */
+  private meleeModesFor(active: ItemDef | null): MeleeModes {
+    return active?.weapon?.melee ?? item('fists').weapon!.melee;
+  }
+
+  /**
+   * Whether the active item attacks by gesture.
+   *
+   * Mirrors the dispatch in `handlePrimary` exactly: anything that is not a placeable,
+   * a tool, a consumable, a spell, or a ranged weapon ends up swinging — which includes
+   * bare fists and oddities like a stack of armour on the hotbar.
+   */
+  private usesMeleeGestures(active: ItemDef | null): boolean {
+    if (!active) return true;
+    if (
+      active.kind === 'block' ||
+      active.kind === 'torch' ||
+      active.kind === 'tool' ||
+      active.kind === 'consumable' ||
+      active.kind === 'spell'
+    ) {
+      return false;
+    }
+    if (active.weapon?.ranged) return false;
+    return hasMeleeMode(this.meleeModesFor(active));
+  }
+
+  /**
+   * Accumulates mouse movement into a stroke and commits it.
+   *
+   * The attack fires on whichever comes first: the movement crossing the commit
+   * threshold, or the button coming up. Committing on the threshold is what makes it
+   * feel like a weapon rather than a menu — the blow lands while the player is still
+   * moving the mouse, instead of waiting for them to let go.
+   */
+  private updateMeleeGesture(dt: number, input: Input, ctx: GameContext, active: ItemDef | null): void {
+    if (!this.usesMeleeGestures(active)) {
+      this.gesture.reset();
+      this.awaitingRelease = false;
+      return;
+    }
+
+    // Claimed on the release frame as well. The frame the button comes up can still
+    // carry movement, and letting that last scrap through would snap the view just as
+    // the blow lands.
+    if (input.isMouseDown(0) || input.mouseReleased(0)) input.claimLook();
+
+    if (input.mouseReleased(0)) {
+      const spent = this.awaitingRelease;
+      this.awaitingRelease = false;
+      const direction = this.gesture.release();
+      this.gesture.reset();
+      // The gesture already fired when it crossed the threshold; this release just
+      // ends the hold.
+      if (!spent && this.state === 'idle') this.beginMelee(ctx, active, direction);
+      // Deliberately no early return. A release and a press can land on the same
+      // frame — a double-click, or simply re-pressing faster than one frame — and
+      // returning here would swallow the new hold: the button would read as down
+      // with no gesture capturing, so no stroke could be made until the player let
+      // go and pressed again. Falling through lets the press below open the next
+      // hold on the same frame it arrived.
+    }
+
+    if (!input.isMouseDown(0)) {
+      // The button is up, so nothing is being drawn. Checked before the press below
+      // on purpose: a quick click delivers its press and release on the same frame,
+      // and opening a hold that is already over would leave the tracker capturing
+      // with the button up — the crosshair would keep drawing a stroke nobody is
+      // making.
+      this.gesture.reset();
+      return;
+    }
+
+    if (input.mousePressed(0)) this.gesture.begin();
+
+    // The claim above covers the whole hold, including the tail after a stroke has
+    // already committed — otherwise the rest of the player's follow-through would
+    // whip the view around.
+    if (this.awaitingRelease) return;
+
+    const committed = this.gesture.sample(input.mouseDX, input.mouseDY, dt);
+    if (!committed || this.state !== 'idle') return;
+
+    this.gesture.reset();
+    this.awaitingRelease = true;
+    this.beginMelee(ctx, active, committed);
+  }
+
+  /** What the HUD draws around the crosshair while a gesture is being made. */
+  gestureState(ctx: GameContext): GestureSnapshot & { lastDirection: AttackDirection } {
+    const snapshot = this.gesture.snapshot();
+    void ctx;
+    return { ...snapshot, lastDirection: this.lastDirection };
+  }
+
+  /**
+   * The stance an idle weapon is carried in.
+   *
+   * There is no selected mode any more, so this follows the weapon's shape: anything
+   * with an edge is carried ready to cut, and a thrust-only weapon is held levelled.
+   */
+  private restingMode(active: ItemDef | null): AttackMode {
+    const modes = this.meleeModesFor(active);
+    return modes.swing ? 'swing' : 'thrust';
   }
 
   // ------------------------------------------------------------------ guarding
@@ -375,8 +527,9 @@ export class CombatSystem {
       return;
     }
 
-    // Melee (including bare fists when nothing is equipped).
-    if (input.mousePressed(0)) this.beginMelee(ctx, active);
+    // Melee is not handled here. A plain left-click no longer starts an attack: the
+    // button begins a gesture and `updateMeleeGesture` commits the stroke the mouse
+    // movement describes.
   }
 
   /**
@@ -551,27 +704,45 @@ export class CombatSystem {
 
   // ------------------------------------------------------------------ melee
 
-  private beginMelee(ctx: GameContext, active: ItemDef | null): void {
+  private beginMelee(ctx: GameContext, active: ItemDef | null, requested: AttackDirection): void {
     this.diag.attempts++;
     if (this.useCooldown > 0) {
       this.diag.lastReason = `cooldown ${this.useCooldown.toFixed(2)}`;
       return;
     }
-    const attack = this.currentMelee(ctx, active);
-    if (!attack) {
+
+    // The weapon's shape decides what it can actually do with this gesture.
+    const resolved = resolveDirectionalAttack(this.meleeModesFor(active), requested);
+    if (!resolved) {
       this.diag.lastReason = 'no melee mode on active item';
       return;
     }
+    const attack = resolved.attack;
 
     if (!ctx.player.stats.spendStamina(attack.stamina)) {
       this.diag.lastReason = `no stamina (${ctx.player.stats.stamina.toFixed(0)} < ${attack.stamina})`;
       ctx.log('Too winded to swing.', 'info');
       return;
     }
-    this.diag.lastReason = `began ${attack.mode}`;
+
+    // Teach the geometry rule at the moment it bites, not in a menu.
+    if (resolved.fellBack) {
+      const name = active?.name ?? 'Bare hands';
+      ctx.log(
+        resolved.mode === 'swing'
+          ? `${name} has no point to thrust with — ${DIRECTION_LABEL[resolved.direction].toLowerCase()} instead.`
+          : `${name} has no edge to cut with — thrusting instead.`,
+        'info',
+      );
+    }
+
+    this.diag.lastReason = `began ${resolved.direction}`;
+    this.diag.started++;
 
     this.pendingMelee = attack;
-    this.lastMeleeMode = attack.mode;
+    this.pendingDirection = resolved.direction;
+    this.lastDirection = resolved.direction;
+    this.hasStruck = true;
     this.state = 'windup';
     this.stateDuration = attack.windup;
     this.timer = attack.windup;
@@ -580,6 +751,33 @@ export class CombatSystem {
     // reads as the view glitching or clipping rather than as the weapon swinging;
     // all of the motion belongs to the weapon itself. Recoil remains on firearms,
     // where a shove is exactly what the player expects.
+  }
+
+  /**
+   * The axis the hit cone is tested against, leaned towards the stroke.
+   *
+   * Built from the camera basis so it follows wherever the player is looking: screen
+   * right and screen up are crossed out of the look direction, then the stroke's
+   * screen-space vector tilts the axis by `STROKE_BIAS_DEG`. A thrust has a zero
+   * vector and therefore no lean, which is exactly right — it goes where you point.
+   */
+  private strokeAxis(ctx: GameContext, direction: AttackDirection): THREE.Vector3 {
+    const look = ctx.player.lookDirection;
+    const [sx, sy] = DIRECTION_VECTOR[direction];
+    if (sx === 0 && sy === 0) return look;
+
+    const right = new THREE.Vector3().crossVectors(look, new THREE.Vector3(0, 1, 0));
+    // Looking straight up or down leaves no horizontal right vector to speak of.
+    if (right.lengthSq() < 1e-6) return look;
+    right.normalize();
+    const up = new THREE.Vector3().crossVectors(right, look).normalize();
+
+    const lean = Math.tan(THREE.MathUtils.degToRad(STROKE_BIAS_DEG));
+    return look
+      .clone()
+      .addScaledVector(right, sx * lean)
+      .addScaledVector(up, sy * lean)
+      .normalize();
   }
 
   private resolveMelee(ctx: GameContext): void {
@@ -598,6 +796,10 @@ export class CombatSystem {
     const eye = ctx.player.eyePosition;
     const look = ctx.player.lookDirection;
     const cosArc = Math.cos(THREE.MathUtils.degToRad(attack.arcDeg));
+    // The cone leans the way the stroke travelled, so a left slash favours enemies to
+    // the left of the crosshair and an uppercut favours one standing over you. Without
+    // this every stroke hit the same cone and the direction was pure decoration.
+    const axis = this.strokeAxis(ctx, this.pendingDirection);
 
     // Collect everything inside the attack cone, nearest first.
     const candidates: { enemy: Enemy; distance: number }[] = [];
@@ -607,7 +809,7 @@ export class CombatSystem {
       const distance = to.length() - enemy.radius;
       if (distance > attack.reach) continue;
       to.normalize();
-      if (to.dot(look) < cosArc) continue;
+      if (to.dot(axis) < cosArc) continue;
       // A wall between you and the target stops the blow.
       const blocked = ctx.world.raycast(eye, to, Math.max(0.1, distance), isSolid);
       if (blocked) continue;
@@ -620,7 +822,9 @@ export class CombatSystem {
     this.diag.candidates = candidates.length;
     this.diag.hits += hits.length;
     if (hits.length === 0) {
-      this.diag.lastReason = `resolved ${attack.mode}, no target in cone (reach ${attack.reach}, arc ${attack.arcDeg})`;
+      this.diag.lastReason =
+        `resolved ${this.pendingDirection}, no target in cone ` +
+        `(reach ${attack.reach.toFixed(1)}, arc ${attack.arcDeg.toFixed(0)})`;
     }
 
     for (const { enemy } of hits) {
@@ -1393,18 +1597,25 @@ export class CombatSystem {
       actionLabel = 'Casting';
       progress = 1 - this.timer / Math.max(0.01, this.stateDuration);
     } else if (this.state === 'windup') {
-      actionLabel = this.pendingMelee?.mode === 'thrust' ? 'Thrusting' : 'Swinging';
+      actionLabel = DIRECTION_LABEL[this.pendingDirection];
+      progress = 1 - this.timer / Math.max(0.01, this.stateDuration);
+    } else if (this.state === 'recovery') {
+      actionLabel = DIRECTION_LABEL[this.lastDirection];
       progress = 1 - this.timer / Math.max(0.01, this.stateDuration);
     } else if (this.miningTarget) {
       actionLabel = 'Mining';
       progress = this.miningProgress;
+    } else if (this.hasStruck && this.state === 'idle') {
+      // Keeps the stroke you just threw on screen, which is how the player learns
+      // which gesture produced which attack.
+      actionLabel = DIRECTION_LABEL[this.lastDirection];
     }
 
     // Only real weapons describe an attack mode. Without this guard a torch or a
     // stack of blocks inherits the bare-fists profile and the HUD claims you are
     // holding something that swings for blunt damage.
     const isWeapon = active?.kind === 'weapon' || active === null;
-    const melee = isWeapon ? this.currentMelee(ctx, active) : null;
+    const modes = isWeapon ? availableModes(this.meleeModesFor(active)) : [];
     let modeLabel = '';
     if (active?.kind === 'tool') {
       modeLabel = `${TOOL_MODE_LABEL[this.toolMode]} ${this.toolSize} · ${blockDef(this.toolBlock).name} · X shape · R sample`;
@@ -1424,13 +1635,15 @@ export class CombatSystem {
           ? `${spell.mana} mana${spell.sustained ? '/sec · hold to cast' : ''}`
           : `Tier ${spell.tier} · ${ctx.player.stats.slotsAvailable(spell.tier)} slots left`;
     } else if (profile && active?.weapon?.class !== 'melee') {
-      const modes = active?.weapon?.melee.length ?? 0;
-      modeLabel = `${profile.type} · ${Math.round(profile.armorPierce * 100)}% pierce${modes > 1 ? ' · X to switch' : ''}`;
-    } else if (melee) {
-      const count = active?.weapon?.melee.length ?? 1;
+      modeLabel = `${profile.type} · ${Math.round(profile.armorPierce * 100)}% pierce`;
+    } else if (modes.length > 0) {
+      // Describes what the weapon's shape allows, not a selection — there is none.
+      // The gesture chooses the stroke, so what the player needs to know is whether
+      // this thing can cut, can thrust, or both.
       modeLabel =
-        `${melee.mode === 'swing' ? 'Swing' : 'Thrust'} · ${melee.type} · ${Math.round(melee.armorPierce * 100)}% pierce` +
-        (count > 1 ? ' · X to switch' : ' · only mode');
+        modes
+          .map((m) => `${m.mode === 'swing' ? 'Cut' : 'Thrust'} ${m.damage} ${m.type}`)
+          .join(' · ') + ' · hold LMB and move the mouse';
     }
 
     return {
@@ -1443,7 +1656,30 @@ export class CombatSystem {
       targetName: this.target?.name ?? null,
       targetHpFraction: this.target ? Math.max(0, this.target.hp / this.target.maxHp) : 0,
       modeLabel,
+      gesture: (() => {
+        const g = this.gesture.snapshot();
+        return { active: g.active, direction: g.direction, charge: g.charge };
+      })(),
     };
+  }
+
+  /**
+   * Performs one gesture immediately, bypassing the mouse.
+   *
+   * Goes through `beginMelee`, so geometry fallbacks, direction modifiers, stamina and
+   * the cooldown all behave exactly as they do in play. Returns the stroke actually
+   * performed, or null if the attack was refused.
+   */
+  debugPerformGesture(ctx: GameContext, direction: AttackDirection): string | null {
+    if (this.state !== 'idle') return null;
+    const active = ctx.player.inventory.activeItem;
+    if (!this.usesMeleeGestures(active)) return null;
+    this.gesture.reset();
+    this.awaitingRelease = false;
+    this.beginMelee(ctx, active, direction);
+    // `pendingMelee` rather than the state field: TypeScript narrows `this.state` to
+    // 'idle' from the guard above and cannot see that `beginMelee` reassigns it.
+    return this.pendingMelee ? this.lastDirection : null;
   }
 
   /** Test hook: sets the build tool's shape mode directly. */
@@ -1457,6 +1693,18 @@ export class CombatSystem {
   }
 
   /**
+   * Seconds until another attack may begin.
+   *
+   * The state machine returning to 'idle' is not the same as being ready: a
+   * between-uses cooldown outlives the recovery phase, and `beginMelee` refuses while
+   * it runs. Tests that fire attacks back to back need to see this, otherwise they
+   * read a stale direction from the attack before and report a false mismatch.
+   */
+  debugUseCooldown(): number {
+    return this.useCooldown;
+  }
+
+  /**
    * Clears in-progress mining. A missed melee swing chips whatever block it
    * lands on, so tests that measure mining from zero need a clean slate.
    */
@@ -1465,6 +1713,9 @@ export class CombatSystem {
   }
 
   reset(): void {
+    this.gesture.reset();
+    this.awaitingRelease = false;
+    this.hasStruck = false;
     this.state = 'idle';
     this.timer = 0;
     this.draw = 0;

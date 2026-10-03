@@ -21,6 +21,65 @@ export const DAMAGE_TYPE_LABEL: Record<DamageType, string> = {
 /** The two melee motions. Which ones a weapon offers is a property of its shape. */
 export type AttackMode = 'swing' | 'thrust';
 
+/**
+ * The nine strokes a mouse gesture can describe.
+ *
+ * Melee is driven by moving the mouse while the attack button is held, as in
+ * Daggerfall and Ultima Underworld: the *direction* of the movement is the attack.
+ * Eight of these are swings; `thrust` is what a forward jab or a bare click means.
+ *
+ * A direction is not the same thing as an `AttackMode`. The mode is the damage
+ * family — which is a property of the weapon's shape — and the direction is how the
+ * player moved. Every direction resolves to a mode, and a weapon that cannot perform
+ * that mode falls back to one it can.
+ */
+export type AttackDirection =
+  | 'left'
+  | 'right'
+  | 'up'
+  | 'down'
+  | 'upLeft'
+  | 'upRight'
+  | 'downLeft'
+  | 'downRight'
+  | 'thrust';
+
+export const DIRECTION_LABEL: Record<AttackDirection, string> = {
+  left: 'Left slash',
+  right: 'Right slash',
+  up: 'Uppercut',
+  down: 'Downcut',
+  upLeft: 'Rising slash (left)',
+  upRight: 'Rising slash (right)',
+  downLeft: 'Falling slash (left)',
+  downRight: 'Falling slash (right)',
+  thrust: 'Thrust',
+};
+
+/** Every direction except `thrust` is a swing. */
+export function directionToMode(direction: AttackDirection): AttackMode {
+  return direction === 'thrust' ? 'thrust' : 'swing';
+}
+
+/**
+ * Screen-space travel of each stroke, with **y pointing up**.
+ *
+ * Shared by the hit-cone bias and the view model, so the blow lands where the
+ * animation shows it going. Mouse deltas arrive y-down and are flipped on the way in;
+ * everything downstream of the classifier works in this convention.
+ */
+export const DIRECTION_VECTOR: Record<AttackDirection, readonly [number, number]> = {
+  right: [1, 0],
+  upRight: [Math.SQRT1_2, Math.SQRT1_2],
+  up: [0, 1],
+  upLeft: [-Math.SQRT1_2, Math.SQRT1_2],
+  left: [-1, 0],
+  downLeft: [-Math.SQRT1_2, -Math.SQRT1_2],
+  down: [0, -1],
+  downRight: [Math.SQRT1_2, -Math.SQRT1_2],
+  thrust: [0, 0],
+};
+
 export type AmmoType = 'arrow' | 'bolt' | 'shot' | 'none';
 
 export const AMMO_LABEL: Record<AmmoType, string> = {
@@ -84,13 +143,195 @@ export interface RangedProfile {
   cooldown: number;
 }
 
+/**
+ * Which melee motions a weapon's shape permits, and the stats for each.
+ *
+ * A record rather than an ordered array. The array form carried an implicit "index 0
+ * is the default mode", which existed only to support cycling the selection with a
+ * key — and once the attack is chosen by a mouse gesture there is no selection and no
+ * default, so the ordering meant nothing. What matters is the question the geometry
+ * rule actually asks: *can* this weapon swing, and *can* it thrust.
+ */
+export interface MeleeModes {
+  swing?: MeleeAttack;
+  thrust?: MeleeAttack;
+}
+
 export interface WeaponDef {
   class: WeaponClass;
-  /** Available melee modes. Order matters: index 0 is the default. */
-  melee: MeleeAttack[];
+  /** The motions this weapon's shape allows. A mace has no thrust; a rapier no swing. */
+  melee: MeleeModes;
   ranged?: RangedProfile;
   /** Two-handed weapons cannot be paired with a shield. */
   twoHanded: boolean;
+}
+
+/** Collects attack definitions into the mode record, keyed by their own mode. */
+export function meleeModes(attacks: readonly MeleeAttack[]): MeleeModes {
+  const out: MeleeModes = {};
+  for (const attack of attacks) out[attack.mode] = attack;
+  return out;
+}
+
+export function hasMeleeMode(modes: MeleeModes | undefined): boolean {
+  return !!modes && (!!modes.swing || !!modes.thrust);
+}
+
+/** The modes a weapon offers, for display. */
+export function availableModes(modes: MeleeModes | undefined): MeleeAttack[] {
+  if (!modes) return [];
+  return [modes.swing, modes.thrust].filter((m): m is MeleeAttack => !!m);
+}
+
+// ------------------------------------------------------------- direction shaping
+
+/**
+ * How each stroke reshapes the weapon's base stats.
+ *
+ * Multipliers on top of the weapon's own `MeleeAttack`, so a new weapon needs no
+ * per-direction data and the relationships hold across the whole armoury: a warhammer
+ * uppercut is slow and brutal *relative to a warhammer*, not in absolute numbers.
+ *
+ * The flavour, deliberately: horizontal cuts are quick and sweep wide, so they are the
+ * answer to being surrounded. Vertical cuts are slow, narrow and heavy — committing,
+ * and worth it against a single target. Diagonals sit between the two. A thrust keeps
+ * the weapon's own precision and armour-piercing character untouched.
+ */
+export interface DirectionModifier {
+  damage: number;
+  windup: number;
+  recovery: number;
+  stamina: number;
+  reach: number;
+  arcDeg: number;
+  armorPierce: number;
+  knockback: number;
+}
+
+const NEUTRAL: DirectionModifier = {
+  damage: 1,
+  windup: 1,
+  recovery: 1,
+  stamina: 1,
+  reach: 1,
+  arcDeg: 1,
+  armorPierce: 1,
+  knockback: 1,
+};
+
+export const DIRECTION_MODIFIERS: Record<AttackDirection, DirectionModifier> = {
+  // Fast and wide: less damage per blow, but it sweeps.
+  left: { ...NEUTRAL, damage: 0.95, windup: 0.85, recovery: 0.9, stamina: 0.95, arcDeg: 1.25 },
+  right: { ...NEUTRAL, damage: 0.95, windup: 0.85, recovery: 0.9, stamina: 0.95, arcDeg: 1.25 },
+
+  // Slow, narrow, heavy. An uppercut lifts; a downcut comes through the guard.
+  up: { ...NEUTRAL, damage: 1.3, windup: 1.35, recovery: 1.2, stamina: 1.25, reach: 0.95, arcDeg: 0.6, knockback: 1.5 },
+  down: {
+    ...NEUTRAL,
+    damage: 1.35,
+    windup: 1.4,
+    recovery: 1.25,
+    stamina: 1.3,
+    reach: 1.05,
+    arcDeg: 0.55,
+    armorPierce: 1.15,
+    knockback: 1.2,
+  },
+
+  // Between the two, with the falling cuts carrying a little more weight.
+  upLeft: { ...NEUTRAL, damage: 1.05, knockback: 1.05, arcDeg: 0.95 },
+  upRight: { ...NEUTRAL, damage: 1.05, knockback: 1.05, arcDeg: 0.95 },
+  downLeft: { ...NEUTRAL, damage: 1.1, windup: 1.05, stamina: 1.05, armorPierce: 1.05, knockback: 1.1, arcDeg: 0.9 },
+  downRight: { ...NEUTRAL, damage: 1.1, windup: 1.05, stamina: 1.05, armorPierce: 1.05, knockback: 1.1, arcDeg: 0.9 },
+
+  thrust: { ...NEUTRAL },
+};
+
+/**
+ * A thrust gesture on a weapon with no point.
+ *
+ * Down rather than a side: a forward jab and an overhead chop are both "straight at
+ * it" with no lateral commitment, so a downcut preserves what the player meant better
+ * than arbitrarily picking left or right.
+ */
+export const THRUST_FALLBACK_DIRECTION: AttackDirection = 'down';
+
+export function applyDirectionModifiers(base: MeleeAttack, direction: AttackDirection): MeleeAttack {
+  const m = DIRECTION_MODIFIERS[direction];
+  return {
+    ...base,
+    damage: base.damage * m.damage,
+    windup: base.windup * m.windup,
+    recovery: base.recovery * m.recovery,
+    // Stamina is spent in whole points, and rounding down would make the heavy
+    // strokes free at low cost weapons.
+    stamina: Math.max(1, Math.round(base.stamina * m.stamina)),
+    reach: base.reach * m.reach,
+    arcDeg: base.arcDeg * m.arcDeg,
+    armorPierce: Math.min(1, base.armorPierce * m.armorPierce),
+    knockback: base.knockback * m.knockback,
+  };
+}
+
+export interface ResolvedAttack {
+  attack: MeleeAttack;
+  /** The stroke actually performed, after any geometry fallback. */
+  direction: AttackDirection;
+  /** What the player's gesture asked for, before the fallback. */
+  requested: AttackDirection;
+  mode: AttackMode;
+  /** True when the weapon's shape forced a different stroke. */
+  fellBack: boolean;
+}
+
+/**
+ * Turns a gesture into a concrete attack, honouring the weapon's geometry.
+ *
+ * This is where the README's central rule is enforced: a mace has no point, so asking
+ * it to thrust gets you a chop instead; a rapier has no edge, so every slash becomes a
+ * thrust. The player is told when that happens, which is the only way the rule teaches
+ * itself.
+ */
+export function resolveDirectionalAttack(
+  modes: MeleeModes | undefined,
+  requested: AttackDirection,
+): ResolvedAttack | null {
+  if (!modes) return null;
+  const wanted = directionToMode(requested);
+
+  const direct = modes[wanted];
+  if (direct) {
+    return {
+      attack: applyDirectionModifiers(direct, requested),
+      direction: requested,
+      requested,
+      mode: wanted,
+      fellBack: false,
+    };
+  }
+
+  if (wanted === 'thrust' && modes.swing) {
+    const direction = THRUST_FALLBACK_DIRECTION;
+    return {
+      attack: applyDirectionModifiers(modes.swing, direction),
+      direction,
+      requested,
+      mode: 'swing',
+      fellBack: true,
+    };
+  }
+
+  if (wanted === 'swing' && modes.thrust) {
+    return {
+      attack: applyDirectionModifiers(modes.thrust, 'thrust'),
+      direction: 'thrust',
+      requested,
+      mode: 'thrust',
+      fellBack: true,
+    };
+  }
+
+  return null;
 }
 
 export interface ArmorDef {

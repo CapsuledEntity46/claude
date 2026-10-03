@@ -30,7 +30,18 @@ import {
   tileRect,
   tryCreateBlockAtlas,
 } from '../src/world/textures';
-import { computeDamage, type DamageInput, type DefenseProfile } from '../src/combat/types';
+import {
+  DIRECTION_VECTOR,
+  THRUST_FALLBACK_DIRECTION,
+  applyDirectionModifiers,
+  availableModes,
+  computeDamage,
+  resolveDirectionalAttack,
+  type AttackDirection,
+  type DamageInput,
+  type DefenseProfile,
+} from '../src/combat/types';
+import { GESTURE_CONFIG, GestureTracker, classifyGesture } from '../src/combat/GestureTracker';
 import { ARCHETYPES, FISH, pickArchetype } from '../src/entities/archetypes';
 import { Inventory } from '../src/player/Inventory';
 import { PlayerStats, xpToReach } from '../src/player/Stats';
@@ -75,8 +86,8 @@ const plate = item('iron_plate').armor!;
 
 const asDefense = (a: typeof quilted): DefenseProfile => ({ armor: a.armor, resist: a.resist });
 
-function hit(weaponId: string, modeIndex: number, defense: DefenseProfile): number {
-  const attack = item(weaponId).weapon!.melee[modeIndex];
+function hit(weaponId: string, mode: 'swing' | 'thrust', defense: DefenseProfile): number {
+  const attack = item(weaponId).weapon!.melee[mode]!;
   const input: DamageInput = {
     amount: attack.damage,
     type: attack.type,
@@ -85,12 +96,12 @@ function hit(weaponId: string, modeIndex: number, defense: DefenseProfile): numb
   return computeDamage(input, defense, flatRng).damage;
 }
 
-const swordSwingVsPlate = hit('longsword', 0, asDefense(plate));
-const swordThrustVsPlate = hit('longsword', 1, asDefense(plate));
-const maceVsPlate = hit('mace', 0, asDefense(plate));
-const swordSwingVsQuilted = hit('longsword', 0, asDefense(quilted));
-const maceVsQuilted = hit('mace', 0, asDefense(quilted));
-const swordSwingVsLeather = hit('longsword', 0, asDefense(leather));
+const swordSwingVsPlate = hit('longsword', 'swing', asDefense(plate));
+const swordThrustVsPlate = hit('longsword', 'thrust', asDefense(plate));
+const maceVsPlate = hit('mace', 'swing', asDefense(plate));
+const swordSwingVsQuilted = hit('longsword', 'swing', asDefense(quilted));
+const maceVsQuilted = hit('mace', 'swing', asDefense(quilted));
+const swordSwingVsLeather = hit('longsword', 'swing', asDefense(leather));
 
 check(
   'a mace out-damages a longsword swing against iron plate',
@@ -104,8 +115,8 @@ check(
 );
 check(
   'swinging beats thrusting against unarmoured targets',
-  hit('longsword', 0, { armor: 0, resist: {} }) > hit('longsword', 1, { armor: 0, resist: {} }),
-  `swing ${hit('longsword', 0, { armor: 0, resist: {} })} vs thrust ${hit('longsword', 1, { armor: 0, resist: {} })}`,
+  hit('longsword', 'swing', { armor: 0, resist: {} }) > hit('longsword', 'thrust', { armor: 0, resist: {} }),
+  `swing ${hit('longsword', 'swing', { armor: 0, resist: {} })} vs thrust ${hit('longsword', 'thrust', { armor: 0, resist: {} })}`,
 );
 check(
   'plate protects against slashing better than quilted does',
@@ -146,7 +157,7 @@ check(
 
 section('weapon geometry determines attack modes');
 
-const modesOf = (id: string) => item(id).weapon!.melee.map((m) => m.mode);
+const modesOf = (id: string) => availableModes(item(id).weapon!.melee).map((m) => m.mode);
 
 check('a mace can only swing (no point to thrust with)', JSON.stringify(modesOf('mace')) === '["swing"]', modesOf('mace').join(','));
 check('a warhammer can only swing', JSON.stringify(modesOf('warhammer')) === '["swing"]', modesOf('warhammer').join(','));
@@ -157,18 +168,16 @@ check('a sword can do both', modesOf('shortsword').includes('swing') && modesOf(
 check('a halberd can do both (axe head plus spike)', modesOf('halberd').length === 2, modesOf('halberd').join(','));
 check(
   'thrusts always reach further than swings on the same weapon',
-  item('longsword').weapon!.melee[1].reach > item('longsword').weapon!.melee[0].reach,
+  item('longsword').weapon!.melee.thrust!.reach > item('longsword').weapon!.melee.swing!.reach,
 );
 check(
   'swings can hit more targets than thrusts',
-  item('longsword').weapon!.melee[0].maxTargets > item('longsword').weapon!.melee[1].maxTargets,
+  item('longsword').weapon!.melee.swing!.maxTargets > item('longsword').weapon!.melee.thrust!.maxTargets,
 );
 check(
   'every thrust pierces more armour than every swing',
   [...['shortsword', 'longsword', 'halberd', 'dagger']].every((id) => {
-    const modes = item(id).weapon!.melee;
-    const swing = modes.find((m) => m.mode === 'swing');
-    const thrust = modes.find((m) => m.mode === 'thrust');
+    const { swing, thrust } = item(id).weapon!.melee;
     return !swing || !thrust || thrust.armorPierce > swing.armorPierce;
   }),
 );
@@ -431,12 +440,6 @@ check(
 equipper.equip('longsword');
 check('equipping a two-handed weapon drops the shield', equipper.equipped.shield === null);
 
-const modes = new Inventory();
-check('attack mode starts at 0', modes.attackModeIndex('shortsword', 2) === 0);
-check('cycling attack mode advances it', modes.cycleAttackMode('shortsword', 2) === 1);
-check('cycling wraps around', modes.cycleAttackMode('shortsword', 2) === 0);
-check('single-mode weapons never cycle', modes.cycleAttackMode('mace', 1) === 0);
-
 const kit = Inventory.startingKit();
 check('starting kit equips a weapon, shield, and armour', !!kit.equipped.weapon && !!kit.equipped.shield && !!kit.equipped.armor);
 check('starting kit fills the hotbar', kit.hotbar.filter(Boolean).length >= 6, `${kit.hotbar.filter(Boolean).length} slots`);
@@ -458,7 +461,6 @@ tampered.restore({
   hotbar: ['also_fake'],
   equipped: { weapon: 'nope', shield: null, armor: null },
   selected: 99,
-  attackModes: [],
 });
 check(
   'a corrupt save is sanitised rather than trusted',
@@ -1721,6 +1723,286 @@ section('texture orientation');
     `${windings.size} distinct windings across ${[...windings].join(' ')}`,
   );
 }
+
+
+// ---------------------------------------------------------------- gesture melee
+
+section('melee gesture classifier');
+
+{
+  // The classifier works in y-up screen space. Every direction is checked at several
+  // magnitudes, because the sector it lands in must not depend on how hard the player
+  // flicked — only on where.
+  const cases: [number, number, AttackDirection][] = [
+    [1, 0, 'right'],
+    [1, 1, 'upRight'],
+    [0, 1, 'up'],
+    [-1, 1, 'upLeft'],
+    [-1, 0, 'left'],
+    [-1, -1, 'downLeft'],
+    [0, -1, 'down'],
+    [1, -1, 'downRight'],
+  ];
+  const magnitudes = [8, 26, 120, 1000];
+
+  let allCorrect = true;
+  const failures: string[] = [];
+  for (const [ux, uy, expected] of cases) {
+    const length = Math.hypot(ux, uy);
+    for (const magnitude of magnitudes) {
+      const got = classifyGesture((ux / length) * magnitude, (uy / length) * magnitude);
+      if (got !== expected) {
+        allCorrect = false;
+        failures.push(`${expected}@${magnitude}->${got}`);
+      }
+    }
+  }
+  check(
+    'all eight directions classify correctly at every magnitude',
+    allCorrect,
+    allCorrect ? `${cases.length * magnitudes.length} combinations` : failures.join(' '),
+  );
+}
+
+// The dead zone is what makes a plain click still mean something. Anything shorter
+// than a deliberate flick is a thrust, whichever way it happened to drift.
+check(
+  'movement inside the dead zone is a thrust',
+  [
+    [0, 0],
+    [1, 0],
+    [0, -3],
+    [GESTURE_CONFIG.deadZone - 0.01, 0],
+    [3, 3],
+  ].every(([x, y]) => classifyGesture(x, y) === 'thrust'),
+);
+check(
+  'movement just past the dead zone is a direction',
+  classifyGesture(GESTURE_CONFIG.deadZone + 0.5, 0) === 'right',
+);
+
+// Sector boundaries. Sectors are 45 degrees wide, so the edge between 'right' and
+// 'upRight' sits at 22.5; either side of it must resolve the obvious way.
+{
+  const atAngle = (deg: number, magnitude = 40): AttackDirection => {
+    const rad = (deg * Math.PI) / 180;
+    return classifyGesture(Math.cos(rad) * magnitude, Math.sin(rad) * magnitude);
+  };
+  check('just below a sector boundary stays in the lower sector', atAngle(21) === 'right', atAngle(21));
+  check('just above a sector boundary moves to the upper sector', atAngle(24) === 'upRight', atAngle(24));
+  check('the sector centres are exact', atAngle(45) === 'upRight' && atAngle(90) === 'up', `${atAngle(45)}/${atAngle(90)}`);
+  check(
+    'the wrap at 180 degrees is handled',
+    atAngle(179) === 'left' && atAngle(-179) === 'left',
+    `${atAngle(179)}/${atAngle(-179)}`,
+  );
+}
+
+// Hysteresis. A near-horizontal swing wobbles across the boundary into 'upLeft', and
+// without stickiness the attack chosen would be a coin toss frame to frame.
+{
+  const rad = (150 * Math.PI) / 180;
+  const x = Math.cos(rad) * 40;
+  const y = Math.sin(rad) * 40;
+  check(
+    'a wobble past the boundary keeps the latched direction',
+    classifyGesture(x, y, GESTURE_CONFIG, 'left') === 'left',
+    `150 degrees with 'left' latched -> ${classifyGesture(x, y, GESTURE_CONFIG, 'left')}`,
+  );
+  check(
+    'the same wobble with nothing latched follows the angle',
+    classifyGesture(x, y) === 'upLeft',
+    classifyGesture(x, y),
+  );
+  // Stickiness must not be unbreakable, or a genuine change of stroke is ignored.
+  check(
+    'a decisive change of direction overrides the latch',
+    classifyGesture(0, 40, GESTURE_CONFIG, 'left') === 'up',
+    classifyGesture(0, 40, GESTURE_CONFIG, 'left'),
+  );
+}
+
+section('melee gesture tracker');
+
+{
+  // Commits on the threshold, without waiting for the button to come up. This is the
+  // difference between a weapon and a menu.
+  const tracker = new GestureTracker();
+  tracker.begin();
+  const perFrame = GESTURE_CONFIG.commitThreshold / GESTURE_CONFIG.sensitivity / 4;
+  let committed: AttackDirection | null = null;
+  let frames = 0;
+  for (let i = 0; i < 10 && !committed; i++) {
+    committed = tracker.sample(-perFrame, 0, 1 / 60);
+    frames++;
+  }
+  check('a sustained flick commits before release', committed === 'left', `${committed} after ${frames} frames`);
+}
+
+{
+  // A quick click: button down, nothing moved, button up.
+  const tracker = new GestureTracker();
+  tracker.begin();
+  tracker.sample(0, 0, 1 / 60);
+  check('a click with no movement releases as a thrust', tracker.release() === 'thrust');
+}
+
+{
+  // Window expiry. Drifting the mouse slowly must never accumulate into an attack,
+  // or simply turning to look around during a fight would start swinging.
+  const tracker = new GestureTracker();
+  tracker.begin();
+  // Each step is deliberately smaller than the dead zone, so no single frame is a
+  // gesture — but forty of them summed would be four times the commit threshold. Each
+  // frame is longer than the whole sample window, so no two are ever counted together.
+  const drift = (GESTURE_CONFIG.deadZone / 2) / GESTURE_CONFIG.sensitivity;
+  let everCommitted = false;
+  for (let i = 0; i < 40; i++) {
+    if (tracker.sample(drift, 0, GESTURE_CONFIG.sampleWindow * 1.5)) everCommitted = true;
+  }
+  check('movement spread beyond the sample window never commits', !everCommitted);
+  check(
+    'and its accumulated magnitude stays inside the dead zone',
+    tracker.snapshot().magnitude < GESTURE_CONFIG.deadZone,
+    `magnitude ${tracker.snapshot().magnitude.toFixed(2)}`,
+  );
+  check('so releasing it is a thrust', tracker.release() === 'thrust');
+}
+
+{
+  // Raw deltas arrive y-down from the browser; the tracker flips them once on the way
+  // in. Getting this wrong silently inverts every vertical stroke.
+  const tracker = new GestureTracker();
+  tracker.begin();
+  const push = GESTURE_CONFIG.commitThreshold / GESTURE_CONFIG.sensitivity;
+  const committed = tracker.sample(0, -push, 1 / 60);
+  check('a negative mouse dy is an uppercut', committed === 'up', String(committed));
+}
+
+{
+  const tracker = new GestureTracker();
+  check('an idle tracker reports nothing', !tracker.active && tracker.snapshot().charge === 0);
+  tracker.begin();
+  tracker.sample(-GESTURE_CONFIG.deadZone / GESTURE_CONFIG.sensitivity - 1, 0, 1 / 60);
+  const snapshot = tracker.snapshot();
+  check(
+    'an in-progress gesture reports its direction and charge',
+    snapshot.active && snapshot.direction === 'left' && snapshot.charge > 0 && snapshot.charge < 1,
+    `${snapshot.direction} at ${snapshot.charge.toFixed(2)}`,
+  );
+  tracker.reset();
+  check('reset stops the capture', !tracker.active);
+}
+
+section('weapon geometry governs gestures');
+
+{
+  const sword = item('shortsword').weapon!.melee;
+  const mace = item('mace').weapon!.melee;
+  const rapier = item('rapier').weapon!.melee;
+  const fists = item('fists').weapon!.melee;
+  const grenade = item('grenade').weapon!.melee;
+
+  const left = resolveDirectionalAttack(sword, 'left')!;
+  check(
+    'a sword slashes when asked to slash',
+    left.mode === 'swing' && left.direction === 'left' && !left.fellBack,
+  );
+  const poke = resolveDirectionalAttack(sword, 'thrust')!;
+  check('a sword thrusts when asked to thrust', poke.mode === 'thrust' && !poke.fellBack);
+
+  // A mace has no point. Asking it to thrust gets a chop, and the player is told.
+  const maceThrust = resolveDirectionalAttack(mace, 'thrust')!;
+  check(
+    'a thrust with a mace falls back to a swing',
+    maceThrust.mode === 'swing' && maceThrust.fellBack && maceThrust.requested === 'thrust',
+    `${maceThrust.requested} -> ${maceThrust.direction}`,
+  );
+  check(
+    'and the fallback keeps the gesture pointing at the target',
+    maceThrust.direction === THRUST_FALLBACK_DIRECTION,
+    maceThrust.direction,
+  );
+
+  // A rapier has no edge, so every directional gesture becomes a thrust.
+  const rapierSlash = resolveDirectionalAttack(rapier, 'upLeft')!;
+  check(
+    'a slash with a rapier falls back to a thrust',
+    rapierSlash.mode === 'thrust' && rapierSlash.direction === 'thrust' && rapierSlash.fellBack,
+    `${rapierSlash.requested} -> ${rapierSlash.direction}`,
+  );
+  check(
+    'every direction still produces an attack on a thrust-only weapon',
+    (['left', 'right', 'up', 'down', 'upLeft', 'upRight', 'downLeft', 'downRight'] as AttackDirection[]).every(
+      (d) => resolveDirectionalAttack(rapier, d)?.mode === 'thrust',
+    ),
+  );
+
+  check(
+    'bare fists swing in every direction',
+    (['left', 'up', 'downRight', 'thrust'] as AttackDirection[]).every((d) => !!resolveDirectionalAttack(fists, d)),
+  );
+  check('a weapon with no melee modes at all resolves to nothing', resolveDirectionalAttack(grenade, 'left') === null);
+}
+
+section('direction modifiers');
+
+{
+  const base = item('longsword').weapon!.melee.swing!;
+  const left = applyDirectionModifiers(base, 'left');
+  const up = applyDirectionModifiers(base, 'up');
+  const down = applyDirectionModifiers(base, 'down');
+  const diagonal = applyDirectionModifiers(base, 'upRight');
+
+  check(
+    'horizontal cuts are faster than the base swing',
+    left.windup < base.windup && left.recovery < base.recovery,
+    `windup ${base.windup.toFixed(2)} -> ${left.windup.toFixed(2)}`,
+  );
+  check('horizontal cuts sweep wider', left.arcDeg > base.arcDeg, `${base.arcDeg} -> ${left.arcDeg}`);
+  check(
+    'vertical cuts hit harder but slower',
+    up.damage > left.damage && up.windup > left.windup && down.damage > left.damage && down.windup > left.windup,
+    `left ${left.damage.toFixed(1)}/${left.windup.toFixed(2)} vs up ${up.damage.toFixed(1)}/${up.windup.toFixed(2)}`,
+  );
+  check('vertical cuts are narrow', up.arcDeg < base.arcDeg && down.arcDeg < base.arcDeg);
+  check(
+    'diagonals sit between horizontal and vertical',
+    diagonal.damage > left.damage && diagonal.damage < up.damage,
+    `${left.damage.toFixed(1)} < ${diagonal.damage.toFixed(1)} < ${up.damage.toFixed(1)}`,
+  );
+  check(
+    'a thrust is left exactly as the weapon defines it',
+    (() => {
+      const thrustBase = item('longsword').weapon!.melee.thrust!;
+      const applied = applyDirectionModifiers(thrustBase, 'thrust');
+      return (
+        applied.damage === thrustBase.damage &&
+        applied.windup === thrustBase.windup &&
+        applied.armorPierce === thrustBase.armorPierce &&
+        applied.arcDeg === thrustBase.arcDeg
+      );
+    })(),
+  );
+  check('stamina stays a whole number', Number.isInteger(up.stamina) && up.stamina >= 1, String(up.stamina));
+  check(
+    'armour pierce never exceeds total',
+    (['down', 'downLeft', 'thrust'] as AttackDirection[]).every(
+      (d) => applyDirectionModifiers(item('rapier').weapon!.melee.thrust!, d).armorPierce <= 1,
+    ),
+  );
+}
+
+// Every stroke must have a screen vector, and only the thrust may be the zero vector —
+// the hit-cone bias and the view model both read this table.
+check(
+  'every direction has a screen vector, and only the thrust is centred',
+  (Object.keys(DIRECTION_VECTOR) as AttackDirection[]).every((d) => {
+    const [x, y] = DIRECTION_VECTOR[d];
+    const zero = x === 0 && y === 0;
+    return d === 'thrust' ? zero : !zero && Math.abs(Math.hypot(x, y) - 1) < 1e-9;
+  }),
+);
 
 
 console.log(`\n${passed} passed, ${failures.length} failed`);

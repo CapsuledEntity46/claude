@@ -44,6 +44,23 @@ import { GESTURE_CONFIG, GestureTracker, classifyGesture } from '../src/combat/G
 import { ARCHETYPES, FISH, pickArchetype } from '../src/entities/archetypes';
 import { Inventory } from '../src/player/Inventory';
 import { PlayerStats, xpToReach } from '../src/player/Stats';
+import {
+  ABILITY_KEYS,
+  POINT_BUY,
+  abilityModifier,
+  canDecrease,
+  canIncrease,
+  costOfScore,
+  costToRaise,
+  createPointBuyState,
+  decrease,
+  increase,
+  isComplete,
+  reset,
+  sanitizeScores,
+  suggestedAllocation,
+  validationIssues,
+} from '../src/player/PointBuy';
 import { Block, blockCollisionBoxes, blockDef, isLightSource, isTargetable } from '../src/world/blocks';
 import { facingFromYaw, makeMeta, metaIsOpen, metaIsUpper, shapeBoxes } from '../src/world/shapes';
 import { BAG_CAPACITY, tabForItem } from '../src/player/Inventory';
@@ -1593,6 +1610,222 @@ check(
   }),
 );
 
+
+
+// ------------------------------------------------------- point-buy creation
+
+section('point-buy character creation');
+
+{
+  const fresh = createPointBuyState();
+
+  check(
+    'every ability starts at the baseline of 8',
+    ABILITY_KEYS.every((key) => fresh.scores[key] === POINT_BUY.baseline) && POINT_BUY.baseline === 8,
+    JSON.stringify(fresh.scores),
+  );
+  check('a fresh build has the whole bank unspent', fresh.remaining === 27 && fresh.spent === 0, `${fresh.remaining} left`);
+  check('there are six abilities', ABILITY_KEYS.length === 6, ABILITY_KEYS.join(', '));
+
+  // The 5e cost table, asserted as totals from the baseline. These are the numbers
+  // the whole system turns on, so they are checked explicitly rather than inferred.
+  check(
+    'the scaled cost table matches 5e',
+    costOfScore(8) === 0 &&
+      costOfScore(9) === 1 &&
+      costOfScore(10) === 2 &&
+      costOfScore(11) === 3 &&
+      costOfScore(12) === 4 &&
+      costOfScore(13) === 5 &&
+      costOfScore(14) === 7 &&
+      costOfScore(15) === 9,
+    [8, 9, 10, 11, 12, 13, 14, 15].map((s) => `${s}:${costOfScore(s)}`).join(' '),
+  );
+  check(
+    'the steps up to 13 cost one point each',
+    [8, 9, 10, 11, 12].every((from) => costToRaise(from) === 1),
+    [8, 9, 10, 11, 12].map((f) => `${f}->${f + 1}:${costToRaise(f)}`).join(' '),
+  );
+  check('13 -> 14 costs two points', costToRaise(13) === 2);
+  check('14 -> 15 costs two points', costToRaise(14) === 2);
+  check('there is no step above 15', costToRaise(15) === null);
+
+  // Raising to 14 must take 2 out of the bank, not 1. An off-by-one here would let
+  // a player afford a spread the rules forbid.
+  check(
+    'raising a score to 14 draws two points from the bank',
+    (() => {
+      let s = createPointBuyState();
+      for (let i = 0; i < 5; i++) s = increase(s, 'str');
+      const at13 = s.remaining;
+      s = increase(s, 'str');
+      return s.scores.str === 14 && at13 - s.remaining === 2;
+    })(),
+  );
+
+  check(
+    'a score cannot be raised past 15 during creation',
+    (() => {
+      let s = createPointBuyState();
+      for (let i = 0; i < 12; i++) s = increase(s, 'dex');
+      return s.scores.dex === 15 && !canIncrease(s, 'dex') && POINT_BUY.manualMax === 15;
+    })(),
+  );
+
+  check(
+    'a score cannot be pushed below the baseline',
+    (() => {
+      const s = decrease(createPointBuyState(), 'con');
+      return s.scores.con === 8 && !canDecrease(createPointBuyState(), 'con');
+    })(),
+  );
+
+  check(
+    'spending is refused once the bank cannot cover the next step',
+    (() => {
+      // 15/15/14 is 25 points, leaving 2 — enough for a 9 and a 10, but not for a
+      // step that costs 2 on an ability already at 13.
+      let s = createPointBuyState();
+      for (let i = 0; i < 7; i++) s = increase(s, 'str');
+      for (let i = 0; i < 7; i++) s = increase(s, 'dex');
+      for (let i = 0; i < 5; i++) s = increase(s, 'con');
+      // str 15, dex 15, con 13 => 9 + 9 + 5 = 23, 4 left.
+      for (let i = 0; i < 4; i++) s = increase(s, 'int');
+      // int 12 costs 4 => bank empty.
+      return s.remaining === 0 && !canIncrease(s, 'wis') && increase(s, 'wis').scores.wis === 8;
+    })(),
+  );
+
+  check(
+    'an illegal move returns the state untouched',
+    (() => {
+      const s = createPointBuyState();
+      return decrease(s, 'cha') === s;
+    })(),
+  );
+
+  check(
+    'lowering refunds exactly what the step cost',
+    (() => {
+      let s = createPointBuyState();
+      for (let i = 0; i < 6; i++) s = increase(s, 'wis');
+      const at14 = s.remaining;
+      s = decrease(s, 'wis');
+      return s.scores.wis === 13 && s.remaining - at14 === 2;
+    })(),
+  );
+
+  check(
+    'increase and decrease are exact inverses',
+    (() => {
+      let s = createPointBuyState();
+      for (const key of ABILITY_KEYS) for (let i = 0; i < 4; i++) s = increase(s, key);
+      const spentMidway = s.spent;
+      for (const key of ABILITY_KEYS) for (let i = 0; i < 4; i++) s = decrease(s, key);
+      return spentMidway === 24 && s.spent === 0 && s.remaining === 27;
+    })(),
+  );
+
+  check('the state is immutable — a move returns a new object', (() => {
+    const before = createPointBuyState();
+    const after = increase(before, 'str');
+    return before.scores.str === 8 && after.scores.str === 9 && before !== after;
+  })());
+
+  // "Complete" means the bank is empty, since leftover points have nothing to buy.
+  check('a fresh build is not complete', !isComplete(fresh));
+  check(
+    'a build with points left over is incomplete',
+    (() => {
+      let s = createPointBuyState();
+      for (let i = 0; i < 5; i++) s = increase(s, 'str');
+      return !isComplete(s) && validationIssues(s).some((i) => i.kind === 'points-remaining');
+    })(),
+  );
+  check(
+    'spending all 27 points completes the build',
+    (() => {
+      // Three abilities at the cap: 9 + 9 + 9 = 27 exactly.
+      let s = createPointBuyState();
+      for (const key of ['str', 'dex', 'con'] as const) for (let i = 0; i < 7; i++) s = increase(s, key);
+      return s.scores.str === 15 && s.remaining === 0 && isComplete(s);
+    })(),
+  );
+
+  check(
+    'resetting returns to the baseline with a full bank',
+    (() => {
+      let s = createPointBuyState();
+      for (let i = 0; i < 7; i++) s = increase(s, 'int');
+      const back = reset();
+      return s.scores.int === 15 && back.scores.int === 8 && back.remaining === 27;
+    })(),
+  );
+
+  // The suggested spread is easy to get wrong by hand because of the doubled steps.
+  check(
+    'the suggested allocation spends the bank exactly',
+    (() => {
+      const s = suggestedAllocation('str', 'con', 'dex');
+      return s.remaining === 0 && isComplete(s) && s.scores.str === 15 && s.scores.con === 15 && s.scores.dex === 14;
+    })(),
+    `${JSON.stringify(suggestedAllocation('str', 'con', 'dex').scores)}`,
+  );
+  check(
+    'the suggested allocation refuses duplicate picks',
+    suggestedAllocation('str', 'str', 'dex').remaining === 27,
+  );
+
+  // 5e modifiers, which are what actually reach the rest of the game.
+  check(
+    'ability modifiers follow the 5e curve',
+    abilityModifier(8) === -1 &&
+      abilityModifier(9) === -1 &&
+      abilityModifier(10) === 0 &&
+      abilityModifier(11) === 0 &&
+      abilityModifier(12) === 1 &&
+      abilityModifier(13) === 1 &&
+      abilityModifier(14) === 2 &&
+      abilityModifier(15) === 2 &&
+      abilityModifier(20) === 5,
+    [8, 10, 12, 14, 15, 20].map((s) => `${s}:${abilityModifier(s)}`).join(' '),
+  );
+  check(
+    'an odd score buys no modifier over the even one below it',
+    abilityModifier(13) === abilityModifier(12) && abilityModifier(15) === abilityModifier(14),
+  );
+
+  // Loading untrusted scores must not produce NaN budgets.
+  check(
+    'corrupt scores are clamped rather than trusted',
+    (() => {
+      const s = sanitizeScores({ str: 900, dex: -40, con: 12.6, int: Number.NaN, wis: undefined });
+      return (
+        s.scores.str === 15 &&
+        s.scores.dex === 8 &&
+        s.scores.con === 13 &&
+        s.scores.int === 8 &&
+        s.scores.wis === 8 &&
+        s.scores.cha === 8 &&
+        Number.isFinite(s.remaining)
+      );
+    })(),
+  );
+  check(
+    'a missing allocation sanitises to the baseline',
+    (() => {
+      const s = sanitizeScores(null);
+      return s.remaining === 27 && ABILITY_KEYS.every((k) => s.scores[k] === 8);
+    })(),
+  );
+  check(
+    'an over-budget allocation is reported, not silently accepted',
+    (() => {
+      const s = sanitizeScores({ str: 15, dex: 15, con: 15, int: 15, wis: 15, cha: 15 });
+      return s.spent === 54 && !isComplete(s) && validationIssues(s).some((i) => i.kind === 'over-budget');
+    })(),
+  );
+}
 
 console.log(`\n${passed} passed, ${failures.length} failed`);
 if (failures.length > 0) {

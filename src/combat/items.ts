@@ -13,7 +13,7 @@ import type {
   WeaponDef,
 } from './types';
 
-export type ItemKind = 'weapon' | 'armor' | 'shield' | 'spell' | 'block' | 'consumable' | 'ammo' | 'torch' | 'tool';
+export type ItemKind = 'weapon' | 'armor' | 'shield' | 'spell' | 'block' | 'consumable' | 'ammo' | 'torch';
 
 export interface ItemDef {
   id: string;
@@ -514,19 +514,6 @@ defs.push(
     consumable: { heal: 6, restoreTier: 0, stamina: 60 },
   },
 );
-
-// --- Tools ------------------------------------------------------------------
-
-defs.push({
-  id: 'build_tool',
-  name: 'Mason\u2019s Gun',
-  kind: 'tool',
-  glyph: '\ud83d\udd28',
-  tier: 2,
-  stackable: false,
-  maxStack: 1,
-  blurb: 'Builds and clears in bulk. Left-click carves, right-click fills, X cycles the shape, R samples the block you are looking at.',
-});
 
 // --- Light sources ----------------------------------------------------------
 

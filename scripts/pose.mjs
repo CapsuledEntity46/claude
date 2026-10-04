@@ -73,7 +73,6 @@ const weapons = [
   'shortbow',
   'crossbow',
   'musket',
-  'build_tool',
   'torch',
 ];
 for (const id of weapons) {

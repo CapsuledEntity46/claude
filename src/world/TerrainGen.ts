@@ -1,7 +1,6 @@
 import { Block } from './blocks';
 import { CHUNK_SX, CHUNK_SY, CHUNK_SZ, Chunk, voxelIndex } from './Chunk';
 import { Noise, hash2i } from './noise';
-import { DungeonGenerator } from './Dungeon';
 
 export const SEA_LEVEL = 27;
 
@@ -33,9 +32,6 @@ export class TerrainGen {
   /** Column height cache — the mesher and tree pass query the same columns a lot. */
   private heightCache = new Map<number, number>();
 
-  /** Underground structures, carved after the natural terrain is laid down. */
-  readonly dungeons: DungeonGenerator;
-
   constructor(seed: number) {
     this.seed = seed | 0;
     this.elevation = new Noise(seed + 1);
@@ -45,10 +41,6 @@ export class TerrainGen {
     this.caveA = new Noise(seed + 5);
     this.caveB = new Noise(seed + 6);
     this.oreNoise = new Noise(seed + 7);
-    // The dungeon generator needs terrain heights to place itself relative to the
-    // ground. surfaceHeight is a pure function of seed and coordinates, so this
-    // stays deterministic and independent of chunk order.
-    this.dungeons = new DungeonGenerator(seed, (x, z) => this.surfaceHeight(x, z));
   }
 
   /** Highest terrain block (pre-cave, pre-tree) for a world column. */
@@ -154,10 +146,8 @@ export class TerrainGen {
 
     this.placeTrees(chunk);
 
-    // Dungeons are cut into the finished terrain, then player edits go on top so
-    // anything you have built or mined always wins.
-    this.dungeons.carve(chunk);
-
+    // Player edits go on top of the generated terrain, so anything you have built
+    // or mined always wins.
     chunk.applyEdits();
     chunk.recomputeHeightMap();
   }

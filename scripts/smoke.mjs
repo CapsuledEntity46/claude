@@ -642,23 +642,6 @@ try {
   const rapierSlash = await page.evaluate(() => window.__voxelquest.debugMeleeGesture('left'));
   check('a slash gesture with a rapier falls back to a thrust', rapierSlash === 'thrust', `performed ${rapierSlash}`);
 
-  // X must still cycle the build tool's shape, which shared the key with the old
-  // attack-mode switch.
-  await page.evaluate(() => {
-    const g = window.__voxelquest;
-    g.debugSelectHotbarByItem('build_tool');
-  });
-  await page.waitForTimeout(250);
-  const toolBefore = await page.evaluate(() => document.getElementById('active-mode').textContent);
-  await page.keyboard.press('KeyX');
-  await page.waitForTimeout(250);
-  const toolAfter = await page.evaluate(() => document.getElementById('active-mode').textContent);
-  check(
-    'X still cycles the build tool shape',
-    !!toolBefore && !!toolAfter && toolBefore !== toolAfter,
-    `${toolBefore?.slice(0, 28)} -> ${toolAfter?.slice(0, 28)}`,
-  );
-
   await page.evaluate(() => window.__voxelquest.debugSelectHotbarByItem('shortsword'));
   await page.waitForTimeout(250);
   await setupArena(2.6);
@@ -1309,7 +1292,7 @@ try {
     `raw ${cooked.raw}->${afterCook.raw}, cooked ${cooked.cooked}->${afterCook.cooked}`,
   );
 
-  console.log('\n[shaped blocks and the build tool]');
+  console.log('\n[shaped blocks]');
   await page.evaluate(() => {
     const g = window.__voxelquest;
     g.debugSetInvulnerable(true);
@@ -1364,44 +1347,12 @@ try {
     console.log('  note  door did not place at this spot; skipping door checks');
   }
 
-  // The build tool fills in bulk.
-  await page.evaluate(() => {
-    const g = window.__voxelquest;
-    g.debugGiveItem('block_cobblestone', 400);
-    g.debugSelectHotbarByItem('build_tool');
-    g.debugSetToolMode('floor');
-    g.debugLookDown();
-  });
-  await page.waitForTimeout(400);
-  const editsBeforeTool = await page.evaluate(() => window.__voxelquest.debugEditedBlockCount());
-  // Click until the fill lands, rather than once and hope.
-  //
-  // A single right-click behind a fixed wait can miss for reasons that have
-  // nothing to do with bulk placement: the tool may still be on cooldown from the
-  // preceding placements, or the aimed-at column may momentarily have no valid
-  // face. Retrying and polling tests that the tool fills in bulk, which is the
-  // actual claim, instead of testing that one particular click was well timed.
-  let editsAfterTool = editsBeforeTool;
-  for (let attempt = 0; attempt < 6 && editsAfterTool - editsBeforeTool < 4; attempt++) {
-    await page.mouse.click(CENTER_X, CENTER_Y, { button: 'right' });
-    for (let poll = 0; poll < 8; poll++) {
-      await page.waitForTimeout(100);
-      editsAfterTool = await page.evaluate(() => window.__voxelquest.debugEditedBlockCount());
-      if (editsAfterTool - editsBeforeTool >= 4) break;
-    }
-  }
-  check(
-    'the build tool places many blocks at once',
-    editsAfterTool - editsBeforeTool >= 4,
-    `${editsBeforeTool} -> ${editsAfterTool} edited voxels`,
-  );
-
   console.log('\n[mana spells]');
   await page.evaluate(() => {
     const g = window.__voxelquest;
     g.debugClearEnemies();
     g.debugSetMana(200);
-    // The build tool section left the camera aimed at the floor.
+    // The shaped-block section left the camera aimed at the floor.
     g.debugLook(0, 0);
     g.debugFlattenArena(8);
     g.debugSpawnEnemyInReach(3);
@@ -1453,44 +1404,6 @@ try {
   check('aiming draws a trajectory arc', whileAiming.arcVisible === true);
   check('releasing restores the view', afterAim.fov > whileAiming.fov, `fov back to ${afterAim.fov}`);
   check('the arc disappears when not aiming', afterAim.arcVisible === false);
-
-  console.log('\n[dungeons]');
-  const dungeonInfo = await page.evaluate(() => window.__voxelquest.debugDungeonInfo());
-  check('dungeons exist near the player', dungeonInfo.sitesNearby > 0, JSON.stringify(dungeonInfo));
-  check('dungeons have rooms and corridors', dungeonInfo.rooms > 0 && dungeonInfo.corridors > 0, `${dungeonInfo.rooms} rooms`);
-  check('every dungeon has a vault', dungeonInfo.vaults > 0, `${dungeonInfo.vaults} vaults`);
-  check('an entrance can be located', dungeonInfo.nearestEntranceDistance >= 0, `${dungeonInfo.nearestEntranceDistance} blocks away`);
-
-  const arrived = await page.evaluate(() => window.__voxelquest.debugGoToDungeon());
-  if (arrived) {
-    await page.waitForTimeout(3500);
-    const carved = await page.evaluate(() => window.__voxelquest.debugDungeonCarved());
-    check('the dungeon is actually carved into the world', carved.airBelow > 30, JSON.stringify(carved));
-    check('the dungeon is built from dungeon masonry', carved.masonry > 20, `${carved.masonry} brick blocks`);
-    check('the dungeon is lit', carved.torches > 0, `${carved.torches} torches`);
-
-    // The prop kit: furniture has to be in the room you are standing in, not merely
-    // somewhere in the site. The first version placed hundreds of props across a
-    // dungeon and none in any room the player could reach, because the clear-centre
-    // rule was wider than the commonest room.
-    await page.evaluate(() => window.__voxelquest.debugSurveyDungeonRoom());
-    await page.waitForTimeout(1500);
-    const props = await page.evaluate(() => window.__voxelquest.debugProps());
-    check('the dungeon is furnished', props.total > 20, `${props.total} props across ${props.kinds} kinds`);
-    check(
-      'furniture is in the room the player is in',
-      props.nearPlayer > 0,
-      `${props.nearPlayer} props within 24 blocks`,
-    );
-    check(
-      'props are instanced rather than drawn one by one',
-      props.drawCalls <= 24 && props.total > props.drawCalls,
-      `${props.total} props in ${props.drawCalls} draw calls`,
-    );
-    check('no prop kind overflowed its instance budget', props.overflowed === false, `overflowed ${props.overflowed}`);
-  } else {
-    console.log('  note  no dungeon within range; skipping carve checks');
-  }
 
   console.log('\n[minimap]');
   const minimapDrawn = await page.evaluate(() => {

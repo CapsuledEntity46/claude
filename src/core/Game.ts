@@ -12,8 +12,6 @@ import { LightManager } from '../fx/LightManager';
 import { Particles } from '../fx/Particles';
 import { Rain } from '../fx/Rain';
 import { Celestial } from '../fx/Celestial';
-import { propsForSite } from '../world/DungeonProps';
-import { PropManager } from '../fx/PropManager';
 import { Starfield } from '../fx/Starfield';
 import { Trail } from '../fx/Trail';
 import { TrajectoryArc } from '../fx/TrajectoryArc';
@@ -62,7 +60,6 @@ export class Game {
   private rain = new Rain();
   private stars = new Starfield();
   private celestial = new Celestial();
-  private props = new PropManager();
   private lights = new LightManager();
   private highlight = new BlockHighlight();
   private trails = new Trail();
@@ -118,7 +115,6 @@ export class Game {
     this.scene.add(
       this.stars.points,
       this.celestial.group,
-      this.props.group,
       this.rain.lines,
       this.lights.group,
       this.highlight.group,
@@ -247,10 +243,6 @@ export class Game {
 
     (this.scene.background as THREE.Color).copy(this.skyColor);
     this.renderer.setClearColor(this.skyColor);
-
-    // Dungeon furniture. Rebuilds only when the set of nearby sites changes, so
-    // this is a cheap comparison on almost every frame.
-    this.props.update(this.player.position, this.world.gen.dungeons);
 
     this.stars.update(eye, this.underwater ? 0 : this.time.starOpacity * (1 - dim));
     // Sun and moon ride the same shell as the stars. Hidden underwater, where the
@@ -649,16 +641,13 @@ export class Game {
     });
   }
 
-  /** Feeds the minimap the terrain, enemies, and the nearest dungeon entrance. */
+  /** Feeds the minimap the terrain and the enemies on it. */
   private updateMinimap(dt: number): void {
-    const markers: { x: number; z: number; kind: 'enemy' | 'dungeon' }[] = [];
+    const markers: { x: number; z: number; kind: 'enemy' }[] = [];
     for (const enemy of this.entities.enemies) {
       if (enemy.dead || enemy.archetype.passive) continue;
       markers.push({ x: enemy.position.x, z: enemy.position.z, kind: 'enemy' });
     }
-    const entrance = this.world.gen.dungeons.nearestEntrance(this.player.position.x, this.player.position.z);
-    if (entrance) markers.push({ x: entrance.x, z: entrance.z, kind: 'dungeon' });
-
     this.hud.minimap.update(dt, this.world, this.player.position, this.player.yaw, markers, this.time.daylight);
   }
 
@@ -1026,35 +1015,6 @@ export class Game {
     return this.world.debugAtlasStats();
   }
 
-  /** Dungeon prop counts by kind, for verifying the kit is being placed. */
-  debugProps(): Record<string, unknown> {
-    return this.props.debugState();
-  }
-
-  /** What the placement code produces for the nearest site, for diagnosis. */
-  debugPropSample(): Record<string, unknown> {
-    const dungeons = this.world.gen.dungeons;
-    const site = dungeons.sitesNear(
-      this.player.position.x - 200,
-      this.player.position.z - 200,
-      this.player.position.x + 200,
-      this.player.position.z + 200,
-    )[0];
-    if (!site) return { site: null };
-    const props = propsForSite(site, dungeons.seed);
-    const counts: Record<string, number> = {};
-    for (const p of props) counts[p.kind] = (counts[p.kind] ?? 0) + 1;
-    const room = site.rooms[0];
-    return {
-      site: `${site.gx},${site.gz}`,
-      rooms: site.rooms.length,
-      firstRoom: { w: room.width, d: room.depth, h: room.height, floorY: room.floorY },
-      total: props.length,
-      counts,
-      first: props.slice(0, 4),
-    };
-  }
-
   /** Block highlight state, for verifying the mining animation advances. */
   debugHighlight(): Record<string, unknown> | null {
     const state = this.combat.highlightState();
@@ -1065,57 +1025,6 @@ export class Game {
   /** Spawns fish in the nearest water, for testing the hunting loop. */
   debugSpawnFish(): number {
     return this.entities.debugSpawnFishNear(this.ctx);
-  }
-
-  /**
-   * Teleports to the nearest dungeon entrance, for testing.
-   *
-   * Lands a few blocks back from the mouth on solid ground. Dropping the player
-   * into the opening itself meant arriving mid-air over a stairwell.
-   */
-  debugGoToDungeon(): { x: number; y: number; z: number } | null {
-    const dungeons = this.world.gen.dungeons;
-    const entrance = dungeons.nearestEntrance(this.player.position.x, this.player.position.z, 600);
-    if (!entrance) return null;
-
-    const site = dungeons
-      .sitesNear(entrance.x - 2, entrance.z - 2, entrance.x + 2, entrance.z + 2)
-      .find((candidate) => candidate.entranceX === entrance.x && candidate.entranceZ === entrance.z);
-
-    // Stand back along the uphill side, facing the mouth.
-    const backX = Math.floor(entrance.x + (site?.entranceDirX ?? 0) * 4);
-    const backZ = Math.floor(entrance.z + (site?.entranceDirZ ?? 1) * 4);
-
-    this.world.ensureLoadedAround(backX, backZ, 2);
-    this.player.spawnAt(this.world, backX, backZ);
-    this.player.yaw = Math.atan2(-(entrance.x - backX), -(entrance.z - backZ));
-    this.player.pitch = -0.18;
-    return { x: this.player.position.x, y: this.player.position.y, z: this.player.position.z };
-  }
-
-  /** Dungeon layout summary near the player, for tests. */
-  debugDungeonInfo(): Record<string, unknown> {
-    const dungeons = this.world.gen.dungeons;
-    const nearest = dungeons.nearestEntrance(this.player.position.x, this.player.position.z, 600);
-    const sites = dungeons.sitesNear(
-      this.player.position.x - 300,
-      this.player.position.z - 300,
-      this.player.position.x + 300,
-      this.player.position.z + 300,
-    );
-    return {
-      sitesNearby: sites.length,
-      rooms: sites.reduce((sum, site) => sum + site.rooms.length, 0),
-      corridors: sites.reduce((sum, site) => sum + site.corridors.length, 0),
-      vaults: sites.reduce((sum, site) => sum + site.rooms.filter((r) => r.vault).length, 0),
-      nearestEntranceDistance: nearest ? Math.round(nearest.distance) : -1,
-      spawnPoints: dungeons.spawnPointsNear(this.player.position.x, this.player.position.z, 64).length,
-      insideDungeon: dungeons.isInsideDungeon(
-        this.player.position.x,
-        this.player.position.y,
-        this.player.position.z,
-      ),
-    };
   }
 
   /** Mana readouts for tests. */
@@ -1186,10 +1095,6 @@ export class Game {
     return this.world.toggleBlock(at.x, at.y, at.z);
   }
 
-  /** Sets the build tool's shape mode. */
-  debugSetToolMode(mode: 'single' | 'line' | 'wall' | 'box' | 'floor'): void {
-    this.combat.debugSetToolMode(mode);
-  }
 
   /** Builds a small structure showing off every shaped material, for screenshots. */
   debugBuildShowcase(): void {
@@ -1265,80 +1170,6 @@ export class Game {
     this.player.velocity.set(0, 0, 0);
     this.player.yaw = 0;
     this.player.pitch = -0.02;
-  }
-
-  /**
-   * Stands at one end of a furnished dungeon room, looking across it.
-   *
-   * `debugDescendDungeon` drops you in the middle of the room, which puts your face
-   * against whatever furniture is nearest. This backs off to the wall so the whole
-   * room — columns, braziers, banners — is in frame.
-   */
-  debugSurveyDungeonRoom(): boolean {
-    const dungeons = this.world.gen.dungeons;
-    const entrance = dungeons.nearestEntrance(this.player.position.x, this.player.position.z, 600);
-    if (!entrance) return false;
-    const sites = dungeons.sitesNear(entrance.x - 4, entrance.z - 4, entrance.x + 4, entrance.z + 4);
-    // The biggest room, which is the one most likely to have columns in it.
-    let room = sites[0]?.rooms[0];
-    for (const site of sites) {
-      for (const candidate of site.rooms) {
-        if (!room || candidate.width * candidate.depth > room.width * room.depth) room = candidate;
-      }
-    }
-    if (!room) return false;
-
-    const x = room.x + 0.5;
-    const z = room.z + room.depth / 2;
-    this.world.ensureLoadedAround(Math.floor(x), Math.floor(z), 2);
-    this.player.position.set(x, room.floorY + 0.05, z);
-    this.player.velocity.set(0, 0, 0);
-    // Forward is (-sin yaw, 0, -cos yaw), so yaw -pi/2 looks towards +X, across the
-    // room from the low-X wall.
-    this.player.yaw = -Math.PI / 2;
-    this.player.pitch = 0.04;
-    return true;
-  }
-
-  /** Drops the player into the nearest dungeon room, for screenshots. */
-  debugDescendDungeon(): boolean {
-    const dungeons = this.world.gen.dungeons;
-    const entrance = dungeons.nearestEntrance(this.player.position.x, this.player.position.z, 600);
-    if (!entrance) return false;
-    const sites = dungeons.sitesNear(entrance.x - 4, entrance.z - 4, entrance.x + 4, entrance.z + 4);
-    const room = sites[0]?.rooms[0];
-    if (!room) return false;
-
-    const x = room.x + Math.floor(room.width / 2);
-    const z = room.z + Math.floor(room.depth / 2);
-    this.world.ensureLoadedAround(x, z, 2);
-    this.player.position.set(x + 0.5, room.floorY + 0.05, z + 0.5);
-    this.player.velocity.set(0, 0, 0);
-    this.player.pitch = 0;
-    return true;
-  }
-
-  /** Counts dungeon features around the player, to confirm carving happened. */
-  debugDungeonCarved(): Record<string, number> {
-    let airBelow = 0;
-    let masonry = 0;
-    let torches = 0;
-    const centre = this.player.position;
-    // Every voxel, not every other one. Torches are isolated single blocks, so a
-    // strided sample only finds one when its coordinates happen to share the
-    // stride's parity — the count was a coin toss that moved whenever entrance
-    // geometry shifted by a block.
-    for (let y = Math.max(1, Math.floor(centre.y) - 40); y < Math.floor(centre.y) + 6; y++) {
-      for (let dz = -20; dz <= 20; dz += 1) {
-        for (let dx = -20; dx <= 20; dx += 1) {
-          const id = this.world.getBlock(Math.floor(centre.x) + dx, y, Math.floor(centre.z) + dz);
-          if (id === Block.Air && y < Math.floor(centre.y)) airBelow++;
-          else if (id === Block.DungeonBrick || id === Block.MossyBrick || id === Block.CrackedBrick) masonry++;
-          else if (id === Block.Torch) torches++;
-        }
-      }
-    }
-    return { airBelow, masonry, torches };
   }
 
   /** Which optional visual layers are currently drawing, for diagnosis. */

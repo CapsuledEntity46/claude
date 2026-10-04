@@ -7,7 +7,6 @@ import {
   MODEL_MAT,
   blockModel,
   bowModel,
-  buildToolModel,
   crossbowModel,
   firearmModel,
   fistModel,
@@ -324,9 +323,6 @@ export class ViewModel {
       const size = def.id === 'tower_shield' ? 1.25 : def.id === 'iron_kite_shield' ? 1.2 : 1.1;
       group = shieldModel(shape, size);
       rest.rotation.set(0.04, 0.34, 0.06);
-    } else if (def.kind === 'tool') {
-      group = buildToolModel();
-      rest.rotation.set(-0.05, 0.2, 0.05);
     } else if (def.kind === 'consumable' || def.kind === 'ammo' || def.kind === 'armor') {
       group = blockModel(0xa08050);
       rest.rotation.set(-0.2, 0.4, 0);

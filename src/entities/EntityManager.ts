@@ -267,10 +267,6 @@ export class EntityManager implements EnemyWorld {
       (level >= 4 && this.rng() < 0.22 * night ? 1 : 0) +
       (level >= 8 && this.rng() < 0.12 * night ? 1 : 0);
 
-    // Underground: populate the dungeon around the player instead of dropping
-    // enemies onto the surface far overhead.
-    if (this.trySpawnInDungeon(ctx)) return;
-
     const anchor = this.findSpawnPoint(ctx);
     if (!anchor) return;
 
@@ -282,38 +278,6 @@ export class EntityManager implements EnemyWorld {
       point.y = ground + 1.05;
       this.spawnAt(point, ctx.player.stats.level);
     }
-  }
-
-  /**
-   * Spawns dungeon inhabitants at the layout's own marked positions.
-   *
-   * Returns true when it handled the spawn, so the surface spawner stands down.
-   * Vault guards come in several levels above the player, which is what makes a
-   * vault worth the trip and worth being careful about.
-   */
-  private trySpawnInDungeon(ctx: GameContext): boolean {
-    const player = ctx.player.position;
-    const points = ctx.world.gen.dungeons.spawnPointsNear(player.x, player.z, 44);
-    if (points.length === 0) return false;
-
-    // Only spawn out of sight, and only where the room is actually loaded.
-    const candidates = points.filter((point) => {
-      const distance = Math.hypot(point.x - player.x, point.z - player.z);
-      if (distance < 12 || distance > 44) return false;
-      if (Math.abs(point.y - player.y) > 26) return false;
-      if (!ctx.world.isLoadedAt(Math.floor(point.x), Math.floor(point.z))) return false;
-      // The marker must still be open space — the player may have walled it up.
-      return !ctx.world.isSolidAt(point.x, point.y + 1, point.z);
-    });
-    if (candidates.length === 0) return false;
-
-    const chosen = candidates[Math.floor(this.rng() * candidates.length)];
-    const level = Math.max(1, ctx.player.stats.level + (chosen.elite ? 3 + Math.floor(this.rng() * 3) : 0));
-    const enemy = this.spawnAt(new THREE.Vector3(chosen.x, chosen.y, chosen.z), level);
-    if (enemy && chosen.elite) {
-      this.ctx.log('Something heavy stirs in the vault.', 'hurt');
-    }
-    return true;
   }
 
   /** Puts fish in nearby water so there is something to hunt. */

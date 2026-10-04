@@ -97,11 +97,6 @@ export class CombatSystem {
   /** True while the player is holding right-click to aim a ranged weapon. */
   private aiming = false;
 
-  /** Build tool state: shape mode, size, and the block it will place. */
-  private toolMode: BuildMode = 'single';
-  private toolSize = 3;
-  private toolBlock: Block = Block.Cobble;
-
   /**
    * Mouse-gesture melee: hold the attack button, move the mouse, and the direction of
    * the movement chooses the stroke.
@@ -170,7 +165,6 @@ export class CombatSystem {
 
     const active = player.inventory.activeItem;
 
-    this.handleToolShapeKey(input, ctx, active);
     this.handleGuard(input, ctx, active);
 
     // Before the busy check on purpose. The tracker still has to see the button come
@@ -308,18 +302,6 @@ export class CombatSystem {
 
   // ------------------------------------------------------------------ modes
 
-  /**
-   * X cycles the build tool's shape.
-   *
-   * It used to double as the swing/thrust switch for weapons. That selection is gone —
-   * the mouse gesture chooses the stroke — but the tool binding has to survive, which
-   * is the whole reason this stayed a separate handler.
-   */
-  private handleToolShapeKey(input: Input, ctx: GameContext, active: ItemDef | null): void {
-    if (!input.wasPressed('KeyX')) return;
-    if (active?.kind === 'tool') this.cycleToolMode(ctx);
-  }
-
   /** The melee modes the active item's shape allows, falling back to bare fists. */
   private meleeModesFor(active: ItemDef | null): MeleeModes {
     return active?.weapon?.melee ?? item('fists').weapon!.melee;
@@ -337,7 +319,6 @@ export class CombatSystem {
     if (
       active.kind === 'block' ||
       active.kind === 'torch' ||
-      active.kind === 'tool' ||
       active.kind === 'consumable' ||
       active.kind === 'spell'
     ) {
@@ -492,11 +473,6 @@ export class CombatSystem {
     }
     this.resetMining();
 
-    if (active?.kind === 'tool') {
-      this.handleBuildTool(input, ctx);
-      return;
-    }
-
     if (active?.kind === 'consumable') {
       if (input.mousePressed(0)) this.useConsumable(ctx, active);
       return;
@@ -530,171 +506,6 @@ export class CombatSystem {
     // Melee is not handled here. A plain left-click no longer starts an attack: the
     // button begins a gesture and `updateMeleeGesture` commits the stroke the mouse
     // movement describes.
-  }
-
-  /**
-   * The build tool.
-   *
-   * Left-click clears a region, right-click fills it, X cycles the shape, and R
-   * samples whatever you are looking at. Sampling matters more than it sounds:
-   * without it you would have to go to the inventory to change material, which is
-   * exactly the friction the tool exists to remove.
-   */
-  private handleBuildTool(input: Input, ctx: GameContext): void {
-    if (input.wasPressed('KeyR')) {
-      const hit = ctx.world.raycast(ctx.player.eyePosition, ctx.player.lookDirection, REACH * 3, isTargetable);
-      if (hit) {
-        this.toolBlock = hit.block as Block;
-        ctx.log(`Tool loaded with ${blockDef(hit.block).name}.`, 'info');
-      }
-      return;
-    }
-
-    if (this.useCooldown > 0) return;
-
-    const region = this.toolRegion(ctx);
-    if (!region) return;
-
-    if (input.mousePressed(0)) {
-      this.applyToolRegion(ctx, region, Block.Air);
-      this.useCooldown = 0.22;
-      this.placeTimer = 0.18;
-    } else if (input.mousePressed(2)) {
-      this.applyToolRegion(ctx, region, this.toolBlock);
-      this.useCooldown = 0.22;
-      this.placeTimer = 0.18;
-    }
-  }
-
-  /** Cycles the build tool's shape. Shares the X key with attack modes. */
-  private cycleToolMode(ctx: GameContext): void {
-    const order: BuildMode[] = ['single', 'line', 'wall', 'box', 'floor'];
-    this.toolMode = order[(order.indexOf(this.toolMode) + 1) % order.length];
-    ctx.log(`Mason\u2019s Gun: ${TOOL_MODE_LABEL[this.toolMode]} (${this.toolSize} blocks).`, 'info');
-  }
-
-  /**
-   * The block region the tool currently targets.
-   *
-   * Anchored on the face being looked at, and oriented by the player's facing so
-   * a wall goes up across your view and a floor lies flat.
-   */
-  private toolRegion(ctx: GameContext): { min: THREE.Vector3; max: THREE.Vector3 } | null {
-    const hit = ctx.world.raycast(ctx.player.eyePosition, ctx.player.lookDirection, REACH * 3, isTargetable);
-    if (!hit) return null;
-
-    // Build outward from the struck face; carve into the block itself.
-    const anchor = new THREE.Vector3(hit.x, hit.y, hit.z);
-    const outward = new THREE.Vector3(hit.nx, hit.ny, hit.nz);
-    const size = this.toolSize;
-    const half = Math.floor(size / 2);
-
-    const facing = ctx.player.facing;
-    const alongX = Math.abs(facing.x) > Math.abs(facing.z);
-
-    const min = anchor.clone();
-    const max = anchor.clone();
-
-    switch (this.toolMode) {
-      case 'single':
-        break;
-      case 'line': {
-        // A run straight ahead along the dominant horizontal axis.
-        const step = alongX ? new THREE.Vector3(Math.sign(facing.x), 0, 0) : new THREE.Vector3(0, 0, Math.sign(facing.z));
-        max.addScaledVector(step, size - 1);
-        break;
-      }
-      case 'wall': {
-        // Vertical panel across the view.
-        const across = alongX ? new THREE.Vector3(0, 0, 1) : new THREE.Vector3(1, 0, 0);
-        min.addScaledVector(across, -half);
-        max.addScaledVector(across, half);
-        max.y += size - 1;
-        break;
-      }
-      case 'floor':
-        min.x -= half;
-        min.z -= half;
-        max.x += half;
-        max.z += half;
-        break;
-      case 'box':
-        min.set(anchor.x - half, anchor.y - half, anchor.z - half);
-        max.set(anchor.x + half, anchor.y + half, anchor.z + half);
-        break;
-    }
-
-    // Filling places against the face; carving eats into the surface.
-    return {
-      min: min.clone().add(outward),
-      max: max.clone().add(outward),
-    };
-  }
-
-  /** Fills or clears a region, stopping when materials run out. */
-  private applyToolRegion(ctx: GameContext, region: { min: THREE.Vector3; max: THREE.Vector3 }, block: Block): void {
-    const clearing = block === Block.Air;
-    const item = clearing ? null : itemForBlock(block);
-    if (!clearing && !item) {
-      ctx.log('That material cannot be placed.', 'info');
-      return;
-    }
-
-    let changed = 0;
-    let exhausted = false;
-    const playerBox = ctx.player.position;
-
-    for (let y = region.min.y; y <= region.max.y && !exhausted; y++) {
-      for (let z = region.min.z; z <= region.max.z && !exhausted; z++) {
-        for (let x = region.min.x; x <= region.max.x && !exhausted; x++) {
-          if (clearing) {
-            const existing = ctx.world.getBlock(x, y, z);
-            if (existing === Block.Air || existing === Block.Bedrock) continue;
-            if (!ctx.world.setBlock(x, y, z, Block.Air)) continue;
-            const drop = blockDrop(existing);
-            if (drop !== null) {
-              const dropItem = itemForBlock(drop);
-              if (dropItem) ctx.player.inventory.add(dropItem.id, 1);
-            }
-            changed++;
-            continue;
-          }
-
-          // Never wall the player into their own build.
-          const overlapsPlayer =
-            x + 1 > playerBox.x - PLAYER_HALF_WIDTH &&
-            x < playerBox.x + PLAYER_HALF_WIDTH &&
-            z + 1 > playerBox.z - PLAYER_HALF_WIDTH &&
-            z < playerBox.z + PLAYER_HALF_WIDTH &&
-            y + 1 > playerBox.y &&
-            y < playerBox.y + PLAYER_HEIGHT;
-          if (overlapsPlayer) continue;
-          if (isSolid(ctx.world.getBlock(x, y, z))) continue;
-
-          if (!ctx.player.inventory.remove(item!.id, 1)) {
-            exhausted = true;
-            break;
-          }
-          if (!ctx.world.setBlock(x, y, z, block)) {
-            // Refund a block the world refused, e.g. an unloaded chunk.
-            ctx.player.inventory.add(item!.id, 1);
-            continue;
-          }
-          changed++;
-        }
-      }
-    }
-
-    if (exhausted) ctx.log(`Out of ${item!.name}.`, 'info');
-    if (changed > 0) {
-      ctx.log(clearing ? `Cleared ${changed} blocks.` : `Placed ${changed} blocks.`, 'good');
-      ctx.particles.burst(region.min.clone().add(region.max).multiplyScalar(0.5), 8, 3, {
-        color: clearing ? 0x9a8a78 : 0xd8c090,
-        size: 0.1,
-        life: 0.4,
-        gravity: 12,
-      });
-    }
   }
 
   private handleSecondary(input: Input, ctx: GameContext, active: ItemDef | null): void {
@@ -1617,9 +1428,7 @@ export class CombatSystem {
     const isWeapon = active?.kind === 'weapon' || active === null;
     const modes = isWeapon ? availableModes(this.meleeModesFor(active)) : [];
     let modeLabel = '';
-    if (active?.kind === 'tool') {
-      modeLabel = `${TOOL_MODE_LABEL[this.toolMode]} ${this.toolSize} · ${blockDef(this.toolBlock).name} · X shape · R sample`;
-    } else if (active && !isWeapon && active.kind !== 'spell') {
+    if (active && !isWeapon && active.kind !== 'spell') {
       modeLabel =
         active.kind === 'block'
           ? 'Left-click mines · right-click places'
@@ -1680,11 +1489,6 @@ export class CombatSystem {
     // `pendingMelee` rather than the state field: TypeScript narrows `this.state` to
     // 'idle' from the guard above and cannot see that `beginMelee` reassigns it.
     return this.pendingMelee ? this.lastDirection : null;
-  }
-
-  /** Test hook: sets the build tool's shape mode directly. */
-  debugSetToolMode(mode: BuildMode): void {
-    this.toolMode = mode;
   }
 
   /** The action state machine's current state, for diagnostics. */
@@ -1809,14 +1613,3 @@ function placementMeta(block: Block, hit: RaycastHit, playerYaw: number): number
 
   return makeMeta(facing, upper);
 }
-
-/** Build tool shapes. */
-export type BuildMode = 'single' | 'line' | 'wall' | 'box' | 'floor';
-
-const TOOL_MODE_LABEL: Record<BuildMode, string> = {
-  single: 'Single',
-  line: 'Line',
-  wall: 'Wall',
-  box: 'Box',
-  floor: 'Floor',
-};

@@ -36,7 +36,6 @@ export const BAG_CAPACITY: Record<BagTab, number> = {
 export function tabForItem(def: ItemDef): BagTab {
   if (def.kind === 'block') return 'materials';
   if (def.kind === 'weapon' || def.kind === 'shield' || def.kind === 'armor' || def.kind === 'torch') return 'tools';
-  if (def.kind === 'tool') return 'tools';
   return 'main';
 }
 
@@ -183,8 +182,7 @@ export class Inventory {
       def.kind === 'spell' ||
       def.kind === 'block' ||
       def.kind === 'consumable' ||
-      def.kind === 'torch' ||
-      def.kind === 'tool'
+      def.kind === 'torch'
     );
   }
 
@@ -334,7 +332,6 @@ export class Inventory {
     inv.add('block_cobblestone', 48);
     inv.add('block_planks', 32);
     inv.add('torch', 8);
-    inv.add('build_tool');
 
     inv.equip('shortsword');
     inv.equip('wooden_buckler');

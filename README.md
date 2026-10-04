@@ -160,95 +160,6 @@ a top or bottom half from where on the face you clicked, so you can run a
 staircase downwards without walking round to the other side. Doors open on
 right-click rather than stacking another door against themselves.
 
-### The Mason's Gun
-
-A build tool for working in bulk. Left-click clears the target region, right-click
-fills it, `X` cycles the shape, and `R` samples whatever you are looking at so you
-can change material without opening the inventory.
-
-| Mode | Shape |
-| --- | --- |
-| Single | one block |
-| Line | a run straight ahead |
-| Wall | a vertical panel across your view |
-| Floor | a flat square |
-| Box | a solid cube |
-
-It draws from your materials and stops when they run out, and it will not wall you
-into your own build.
-
-## Dungeons
-
-Stone complexes are cut into the rock across the world: connected rooms, corridors,
-wall torches, rubble, and a vault at the end holding the best loot and a guard
-several levels above you.
-
-Look for a **lit stone frame at ground level** — two braziers on the rim make it
-visible at night. Inside, a stairway descends one block per step down to the first
-room. The compass carries a pip for the nearest entrance.
-
-The entrance is carved in a deliberate order: the surface frame first, the tunnel
-second, the braziers last. Both of the ways of getting that wrong actually shipped.
-Carving the tunnel first let the frame's back wall land inside the stairway and
-seal the entrance shut. Fixing that by carving the frame first then put the
-tunnel's full-height wall pass straight over the braziers, leaving the mouth open
-but pitch dark. Anything written into a column that two passes share belongs in the
-pass that runs last.
-
-Stair treads face *uphill*, so descending steps you down onto the low half of each
-one. Facing them the other way — which is how they first shipped — puts a riser in
-front of every step and reads as a staircase built backwards.
-
-### The prop kit
-
-Rooms are furnished from a modular low-poly kit: standing braziers, fluted columns,
-voussoir archways over the corridors, stone sarcophagi in the vaults, hanging
-banners, barrels, rubble and bone piles. Columns come as a base, a stack of shafts
-and a capital so they reach any ceiling — a single fixed-height column scaled to fit
-drags its capital out of proportion with its shaft.
-
-**Props never carry collision.** Physics only knows the voxel grid, and teaching it
-about arbitrary prop geometry would be a large change for a decorative win. So props
-are decoration layered over voxels that already exist: a column is drawn over a real
-brick column, and a brazier over a real Glowstone block — solid, so you cannot walk
-through it, and emissive, so the world's existing light-source scan lights the room
-with no further wiring. Anything with no voxel behind it (rubble, bones, banners) is
-deliberately something you would expect to walk through or over.
-
-`world/DungeonProps.ts` is the single source of truth, read by both the renderer and
-the generator, so the decoration and the solid world cannot drift apart. Placement is
-a pure function of the site and the seed — the same rule the layout follows, for the
-same reason.
-
-They are drawn as one `InstancedMesh` per kind, rebuilt only when the set of nearby
-sites changes: 335 props in 10 draw calls in the smoke test. Self-lit pieces (flame,
-embers) are split into a separate unlit pass, because merging fire into the Lambert
-material makes it respond to light, which is backwards.
-
-Three mistakes in this, all found by looking at renders rather than test output:
-
-- **A clear-centre rule wider than the room.** Props avoid the middle of a room so
-  corridors can enter, but the exclusion was five tiles across and the *minimum* room
-  is 7×7, whose entire interior is that five-tile square. The commonest rooms in the
-  game came out completely bare. It is three tiles now, matching the corridor width.
-- **Decoration smaller than the block it decorates.** The column shaft had radius
-  0.38 and sat entirely inside the 1×1 voxel it was meant to dress, so it was
-  invisible. Anything decorating a full block has to be wider than 0.707 — the
-  distance to the block's corners — or bare brick shows through.
-- **Banners hung inside the wall.** A prop on a wall belongs on the wall's inner
-  *face*, not at the centre of the tile beside it; half a block of difference buried
-  the cloth in masonry.
-
-Layouts are generated per *site* from the world seed and the site's grid position,
-never from neighbouring chunks. That matters because chunks stream in an
-unpredictable order — a dungeon that depended on its neighbours already existing
-would come out differently every time you approached it from a new direction.
-
-Depth is measured from the terrain above, not from a fixed altitude. An earlier
-version put rooms at a fixed y and ran the entrance a fixed height upward, so
-wherever the ground happened to sit lower it stood proud of the landscape as a
-hollow tower with no way in.
-
 ## Enemies
 
 Each archetype has its own silhouette. Goblins are hunched and spindly, with swept
@@ -383,11 +294,11 @@ of a voxel game, and taxing it would make building feel like a penalty.
 ```
 src/
   core/        Game loop, input, and the service interface entities talk through
-  world/       Blocks and shapes, chunks, AO mesher, terrain, dungeons, time, weather
+  world/       Blocks and shapes, chunks, AO mesher, terrain, time, weather
   player/      Physics and collision, stats and levelling, tabbed inventory
   combat/      Damage model, item registry, player actions, the build tool
   entities/    Enemy AI, fish, projectiles, orbs, loot tables
-  fx/          Low-poly item, creature and dungeon-prop models, particles,
+  fx/          Low-poly item and creature models, particles,
                view model, trails, rain, stars, sun and moon, lights, cracks, arc
   ui/          HUD, minimap and compass, character sheet, icon fallback
   save/        IndexedDB persistence
@@ -637,9 +548,7 @@ The unit checks assert the *design*, not just the code: that a sword is not buil
 out of boxes and converges on a real point, that a tower shield is big enough to be
 cover, that torch embers are anchored inside the flame, that a placed torch is a
 slim post rather than a cube, that an open door has no collision, that mana never
-regenerates on its own, that materials add no carry weight, that dungeon layouts
-are deterministic and chunk-order independent, that a dungeon entrance is both
-open *and* lit at the mouth, that stair treads face uphill, that a mace beats plate,
+regenerates on its own, that materials add no carry weight, that a mace beats plate,
 that thrusts beat swings against armour, that a weapon's attacks follow from
 its shape, that every mouse direction classifies into the stroke you would expect
 and slow drift never commits one, that the mesher culls shared faces and bakes AO, that terrain is
@@ -732,13 +641,10 @@ streaming, spawning, or aim.
 - Single player, no networking. Adding it later means revisiting who owns state.
 - No pathfinding — enemies steer straight at you, step up one block, and hop at
   walls. Fine in the open; they can get stuck on complex structures.
-- Terrain is one continuous overworld. There are no hand-authored dungeons yet,
-  which is the most obvious thing to build next.
+- Terrain is one continuous overworld, with no authored structures in it.
 - Lighting is direct only. Placed torches light their surroundings through a small
   pool of point lights rather than a propagating light level, so deep caves stay
   dark no matter how many torches are in them, and only the nearest few planted
   torches actually cast light.
-- Dungeon rooms are rectangles connected by axis-aligned corridors. There are no
-  hand-authored layouts, traps, or puzzles yet.
 - Doors are a single block tall; stack two for a full doorway.
 - No audio.

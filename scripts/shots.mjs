@@ -265,15 +265,6 @@ await g(() => {
 await page.waitForTimeout(3500);
 await shot('building-materials');
 
-// The build tool in hand, with its readout.
-await g(() => {
-  const game = window.__voxelquest;
-  game.debugSelectHotbarByItem('build_tool');
-  game.debugSetToolMode('wall');
-});
-await page.waitForTimeout(1200);
-await shot('build-tool');
-
 // ---------------------------------------------------------------- sky
 
 // The sun low and reddened at dusk. At noon it sits almost straight overhead, so a
@@ -304,45 +295,6 @@ await g(() => {
   game.debugSetTime('day');
   game.debugLook(0, 0);
 });
-
-// ---------------------------------------------------------------- dungeon
-
-const wentUnderground = await g(() => window.__voxelquest.debugGoToDungeon());
-if (wentUnderground) {
-  await g(() => {
-    const game = window.__voxelquest;
-    game.debugRevive();
-    game.debugSetTime('day');
-    game.debugEquip('longsword');
-    game.debugSelectHotbarByItem('longsword');
-    game.debugEquip('torch');
-  });
-  // The mouth is a hole in the ground a few blocks ahead, so a near-level gaze
-  // looks straight over it at the horizon — which is what the first version of
-  // this shot did. Tip the camera down far enough to put the opening in frame.
-  await g(() => window.__voxelquest.debugPitch(-0.42));
-  await page.waitForTimeout(5000);
-  await shot('dungeon-entrance');
-
-  // Drop into the first room.
-  await g(() => {
-    window.__voxelquest.debugDescendDungeon();
-    window.__voxelquest.debugRevive();
-  });
-  await page.waitForTimeout(4500);
-  await shot('dungeon-interior');
-
-  // And a wide view across the largest room, where the prop kit reads: columns,
-  // braziers, banners, sarcophagi. Standing in the middle of the room puts your face
-  // against the nearest piece of furniture instead.
-  await g(() => {
-    window.__voxelquest.debugSurveyDungeonRoom();
-    window.__voxelquest.debugRevive();
-  });
-  await page.waitForTimeout(4000);
-  await shot('dungeon-props');
-  console.log(`  props ${JSON.stringify(await g(() => window.__voxelquest.debugProps()))}`);
-}
 
 // ---------------------------------------------------------------- death burst
 

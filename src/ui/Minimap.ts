@@ -45,7 +45,7 @@ export class Minimap {
     world: World,
     playerPosition: THREE.Vector3,
     yaw: number,
-    markers: { x: number; z: number; kind: 'enemy' | 'dungeon' }[],
+    markers: { x: number; z: number; kind: 'enemy' }[],
     daylight: number,
   ): void {
     this.refreshTimer -= dt;
@@ -54,7 +54,7 @@ export class Minimap {
       this.drawTerrain(world, playerPosition, daylight);
     }
     this.drawOverlay(playerPosition, yaw, markers);
-    this.drawCompass(yaw, playerPosition, markers);
+    this.drawCompass(yaw);
   }
 
   private drawTerrain(world: World, playerPosition: THREE.Vector3, daylight: number): void {
@@ -103,7 +103,7 @@ export class Minimap {
   private drawOverlay(
     playerPosition: THREE.Vector3,
     yaw: number,
-    markers: { x: number; z: number; kind: 'enemy' | 'dungeon' }[],
+    markers: { x: number; z: number; kind: 'enemy' }[],
   ): void {
     const ctx = this.ctx;
     const scale = SIZE / SPAN;
@@ -113,9 +113,9 @@ export class Minimap {
       const dx = (marker.x - playerPosition.x) * scale;
       const dz = (marker.z - playerPosition.z) * scale;
       if (Math.abs(dx) > centre - 4 || Math.abs(dz) > centre - 4) continue;
-      ctx.fillStyle = marker.kind === 'enemy' ? '#ff5a4a' : '#ffd050';
+      ctx.fillStyle = '#ff5a4a';
       ctx.beginPath();
-      ctx.arc(centre + dx, centre + dz, marker.kind === 'enemy' ? 2.6 : 3.4, 0, Math.PI * 2);
+      ctx.arc(centre + dx, centre + dz, 2.6, 0, Math.PI * 2);
       ctx.fill();
     }
 
@@ -136,11 +136,7 @@ export class Minimap {
     ctx.stroke();
   }
 
-  private drawCompass(
-    yaw: number,
-    playerPosition: THREE.Vector3,
-    markers: { x: number; z: number; kind: 'enemy' | 'dungeon' }[],
-  ): void {
+  private drawCompass(yaw: number): void {
     const ctx = this.compassCtx;
     const width = this.compass.width;
     ctx.clearRect(0, 0, width, 20);
@@ -176,23 +172,6 @@ export class Minimap {
       ctx.fillStyle = major ? '#ffe0a0' : 'rgba(232, 226, 212, 0.6)';
       ctx.fillText(label, x, 11);
       ctx.fillRect(x - 0.5, 0, 1, major ? 4 : 2);
-    }
-
-    // A pip for the nearest dungeon, so the compass has a purpose beyond bearing.
-    const dungeon = markers.find((m) => m.kind === 'dungeon');
-    if (dungeon) {
-      const bearing = ((Math.atan2(dungeon.x - playerPosition.x, -(dungeon.z - playerPosition.z)) * 180) / Math.PI + 360) % 360;
-      let delta = ((bearing - heading + 540) % 360) - 180;
-      const x = width / 2 + delta / degreesPerPixel;
-      if (x > 3 && x < width - 3) {
-        ctx.fillStyle = '#ffd050';
-        ctx.beginPath();
-        ctx.moveTo(x, 20);
-        ctx.lineTo(x - 3.5, 15);
-        ctx.lineTo(x + 3.5, 15);
-        ctx.closePath();
-        ctx.fill();
-      }
     }
 
     // Centre marker.

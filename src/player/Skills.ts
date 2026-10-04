@@ -118,6 +118,8 @@ export interface SkillNode {
   requires?: string;
   /** A minimum ability score, in the spirit of 5e multiclass requirements. */
   minAbility?: { ability: AbilityKey; score: number };
+  /** Glyph drawn inside the node's disc on the sheet. */
+  icon: string;
   /** What one rank contributes. Ranks multiply this. */
   perRank: Partial<SkillModifiers>;
 }
@@ -135,6 +137,7 @@ export const SKILL_NODES: readonly SkillNode[] = [
   // ---------------------------------------------------------------- blade
   {
     id: 'blade_edge',
+    icon: '⚔',
     branch: 'blade',
     name: 'Keen Edge',
     blurb: '+6% melee damage per rank.',
@@ -145,6 +148,7 @@ export const SKILL_NODES: readonly SkillNode[] = [
   },
   {
     id: 'blade_sweep',
+    icon: '🌀',
     branch: 'blade',
     name: 'Wide Sweep',
     blurb: '+10% swing arc per rank, so a cut catches more of what is in front of you.',
@@ -155,6 +159,7 @@ export const SKILL_NODES: readonly SkillNode[] = [
   },
   {
     id: 'blade_vigour',
+    icon: '💪',
     branch: 'blade',
     name: 'Tireless Arm',
     blurb: 'Attacks cost 12% less stamina per rank.',
@@ -166,6 +171,7 @@ export const SKILL_NODES: readonly SkillNode[] = [
   },
   {
     id: 'blade_sunder',
+    icon: '🔨',
     branch: 'blade',
     name: 'Sunder',
     blurb: '+8% armour pierce and +15% knockback per rank.',
@@ -178,6 +184,7 @@ export const SKILL_NODES: readonly SkillNode[] = [
   },
   {
     id: 'blade_executioner',
+    icon: '☠',
     branch: 'blade',
     name: 'Executioner',
     blurb: '+10% melee damage and +5% critical chance.',
@@ -192,6 +199,7 @@ export const SKILL_NODES: readonly SkillNode[] = [
   // ---------------------------------------------------------------- hunt
   {
     id: 'hunt_aim',
+    icon: '🎯',
     branch: 'hunt',
     name: 'Steady Aim',
     blurb: '+6% ranged damage per rank.',
@@ -202,6 +210,7 @@ export const SKILL_NODES: readonly SkillNode[] = [
   },
   {
     id: 'hunt_draw',
+    icon: '🏹',
     branch: 'hunt',
     name: 'Quick Draw',
     blurb: 'Bows come to full draw 12% faster per rank.',
@@ -212,6 +221,7 @@ export const SKILL_NODES: readonly SkillNode[] = [
   },
   {
     id: 'hunt_footwork',
+    icon: '👣',
     branch: 'hunt',
     name: 'Footwork',
     blurb: '+4% movement speed per rank.',
@@ -223,6 +233,7 @@ export const SKILL_NODES: readonly SkillNode[] = [
   },
   {
     id: 'hunt_precision',
+    icon: '◉',
     branch: 'hunt',
     name: 'Precision',
     blurb: '+4% critical chance per rank.',
@@ -235,6 +246,7 @@ export const SKILL_NODES: readonly SkillNode[] = [
   },
   {
     id: 'hunt_deadeye',
+    icon: '👁',
     branch: 'hunt',
     name: 'Deadeye',
     blurb: '+12% ranged damage and +10% armour pierce.',
@@ -249,6 +261,7 @@ export const SKILL_NODES: readonly SkillNode[] = [
   // ---------------------------------------------------------------- arcana
   {
     id: 'arcana_power',
+    icon: '✨',
     branch: 'arcana',
     name: 'Focused Will',
     blurb: '+7% spell damage per rank.',
@@ -259,6 +272,7 @@ export const SKILL_NODES: readonly SkillNode[] = [
   },
   {
     id: 'arcana_reservoir',
+    icon: '🔮',
     branch: 'arcana',
     name: 'Deep Reservoir',
     blurb: '+15 maximum mana per rank.',
@@ -269,6 +283,7 @@ export const SKILL_NODES: readonly SkillNode[] = [
   },
   {
     id: 'arcana_thrift',
+    icon: '💧',
     branch: 'arcana',
     name: 'Thrift',
     blurb: 'Spells cost 10% less mana per rank.',
@@ -280,6 +295,7 @@ export const SKILL_NODES: readonly SkillNode[] = [
   },
   {
     id: 'arcana_recovery',
+    icon: '♻',
     branch: 'arcana',
     name: 'Second Wind',
     blurb: 'Spell slots return 20% faster per rank.',
@@ -292,6 +308,7 @@ export const SKILL_NODES: readonly SkillNode[] = [
   },
   {
     id: 'arcana_archmage',
+    icon: '🌟',
     branch: 'arcana',
     name: 'Archmage',
     blurb: '+12% spell damage and +4% critical chance.',
@@ -306,6 +323,7 @@ export const SKILL_NODES: readonly SkillNode[] = [
   // ---------------------------------------------------------------- endurance
   {
     id: 'end_vitality',
+    icon: '❤',
     branch: 'endurance',
     name: 'Vitality',
     blurb: '+8 maximum health per rank.',
@@ -316,6 +334,7 @@ export const SKILL_NODES: readonly SkillNode[] = [
   },
   {
     id: 'end_wind',
+    icon: '🌬',
     branch: 'endurance',
     name: 'Long Wind',
     blurb: '+10 stamina and 15% faster stamina recovery per rank.',
@@ -326,6 +345,7 @@ export const SKILL_NODES: readonly SkillNode[] = [
   },
   {
     id: 'end_hide',
+    icon: '🛡',
     branch: 'endurance',
     name: 'Thick Hide',
     blurb: '+1 armour per rank.',
@@ -337,6 +357,7 @@ export const SKILL_NODES: readonly SkillNode[] = [
   },
   {
     id: 'end_landing',
+    icon: '🪶',
     branch: 'endurance',
     name: 'Sure Footing',
     blurb: 'Fall damage reduced by 25% per rank.',
@@ -348,6 +369,7 @@ export const SKILL_NODES: readonly SkillNode[] = [
   },
   {
     id: 'end_resurgence',
+    icon: '♾',
     branch: 'endurance',
     name: 'Resurgence',
     blurb: 'Health recovers twice as fast, and +10 maximum health.',

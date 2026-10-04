@@ -64,16 +64,31 @@
       <div class="sheet-inner">
         <header>
           <h1>Character</h1>
+          <nav class="sheet-tabs">
+            <button id="tab-gear" class="sheet-tab active">Equipment &amp; Inventory</button>
+            <button id="tab-skills" class="sheet-tab">Skills and Stats</button>
+          </nav>
           <button id="sheet-close" title="Close (Tab)">&times;</button>
         </header>
-        <div class="sheet-cols">
-          <section id="sheet-stats"></section>
-          <section id="sheet-equip"></section>
-          <section id="sheet-skills"></section>
-          <section id="sheet-bag"></section>
+
+        <div id="pane-gear" class="sheet-pane">
+          <div class="gear-cols">
+            <section id="sheet-equip"></section>
+            <section id="sheet-bag"></section>
+          </div>
+          <section id="sheet-hotbar"></section>
         </div>
+
+        <div id="pane-skills" class="sheet-pane hidden">
+          <div class="skills-cols">
+            <section id="sheet-stats"></section>
+            <section id="sheet-abilities"></section>
+            <section id="sheet-skills"></section>
+          </div>
+        </div>
+
         <footer>
-          <span class="hint">Click a bag item to equip or assign it to the highlighted hotbar slot. Shift-click to drop.</span>
+          <span class="hint">Drag an item onto an equipment slot or a hotbar slot. Click to equip, shift-click to drop.</span>
         </footer>
       </div>
     </div>
@@ -95,8 +110,8 @@
         <button id="play">Click to Play</button>
         <div class="controls">
           <div><b>WASD</b> move &middot; <b>Space</b> jump &middot; <b>Shift</b> sprint</div>
-          <div><b>LMB</b> use / attack &middot; <b>RMB</b> block, aim, or place</div>
-          <div><b>X</b> switch swing / thrust &middot; <b>R</b> reload</div>
+          <div><b>LMB</b> hold and move the mouse to attack &middot; <b>RMB</b> block, aim, or place</div>
+          <div><b>R</b> reload</div>
           <div><b>1–8</b> hotbar &middot; <b>Wheel</b> cycle &middot; <b>Tab</b> character sheet</div>
           <div><b>F5</b> save &middot; <b>F9</b> load &middot; <b>Esc</b> pause</div>
         </div>

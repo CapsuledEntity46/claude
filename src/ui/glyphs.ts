@@ -114,3 +114,24 @@ export function applyGlyph(node: HTMLElement, def: ItemDef): void {
   node.textContent = itemGlyph(def);
   node.classList.toggle('glyph-text', !supportsColorEmoji());
 }
+
+/**
+ * An icon for something that is not an inventory item — a skill node.
+ *
+ * Shares the emoji probe with items, because the failure is the same: without a
+ * colour emoji font every skill disc renders as an identical tofu box, which is
+ * worse than no icon at all since the discs become indistinguishable. Falls back
+ * to initials taken from the node's own name.
+ */
+export function iconOrInitials(glyph: string, name: string): string {
+  if (supportsColorEmoji()) return glyph;
+  const words = name.split(/\s+/).filter(Boolean);
+  if (words.length >= 2) return words.map((w) => w[0]!).join('').toUpperCase().slice(0, 2);
+  return name.replace(/[^A-Za-z]/g, '').slice(0, 2).toUpperCase();
+}
+
+/** Writes a non-item icon into a node, shrinking the letter fallback to fit. */
+export function applyIcon(node: HTMLElement, glyph: string, name: string): void {
+  node.textContent = iconOrInitials(glyph, name);
+  node.classList.toggle('glyph-text', !supportsColorEmoji());
+}

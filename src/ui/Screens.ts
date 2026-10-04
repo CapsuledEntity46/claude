@@ -2,7 +2,7 @@ import { describeMode, item } from '../combat/items';
 import { availableModes } from '../combat/types';
 import { BAG_CAPACITY, type BagTab, type EquipSlot } from '../player/Inventory';
 import type { Player } from '../player/Player';
-import { ABILITY_INFO, ABILITY_KEYS, abilityModifier } from '../player/PointBuy';
+import { ABILITY_INFO, ABILITY_KEYS, abilityModifier, type AbilityScores } from '../player/PointBuy';
 import { ABILITY_MAX } from '../player/Stats';
 import {
   BRANCH_INFO,
@@ -16,7 +16,7 @@ import {
   totalSkillPoints,
   type SkillBranch,
 } from '../player/Skills';
-import { applyGlyph, itemGlyph } from './glyphs';
+import { applyGlyph, applyIcon, itemGlyph } from './glyphs';
 
 function el<T extends HTMLElement>(id: string): T {
   const node = document.getElementById(id);
@@ -35,6 +35,24 @@ export class Screens {
   private statsHost = el<HTMLElement>('sheet-stats');
   private equipHost = el<HTMLElement>('sheet-equip');
   private skillHost = el<HTMLElement>('sheet-skills');
+  private hotbarHost = el<HTMLElement>('sheet-hotbar');
+  private abilityHost = el<HTMLElement>('sheet-abilities');
+  private gearPane = el<HTMLDivElement>('pane-gear');
+  private skillsPane = el<HTMLDivElement>('pane-skills');
+  private gearTab = el<HTMLButtonElement>('tab-gear');
+  private skillsTab = el<HTMLButtonElement>('tab-skills');
+
+  /** Which top-level tab is showing. Remembered across openings. */
+  private pane: 'gear' | 'skills' = 'gear';
+
+  /**
+   * The bag slot being dragged, if any.
+   *
+   * Held here rather than in the drag event's dataTransfer because the drop
+   * targets need the item's *kind* to decide whether they will accept it, and
+   * reading dataTransfer during dragover is not permitted.
+   */
+  private dragging: { itemId: string; index: number; tab: BagTab } | null = null;
   private bagHost = el<HTMLElement>('sheet-bag');
 
   private player: Player | null = null;
@@ -47,6 +65,8 @@ export class Screens {
   constructor(onChange: () => void) {
     this.onChange = onChange;
     el<HTMLButtonElement>('sheet-close').addEventListener('click', () => this.close());
+    this.gearTab.addEventListener('click', () => this.showPane('gear'));
+    this.skillsTab.addEventListener('click', () => this.showPane('skills'));
   }
 
   get isOpen(): boolean {
@@ -75,6 +95,8 @@ export class Screens {
     this.renderEquipment(this.player);
     this.renderSkills(this.player);
     this.renderBag(this.player);
+    this.renderHotbar(this.player);
+    this.applyPane();
   }
 
   // ---------------------------------------------------------------- stats
@@ -114,12 +136,17 @@ export class Screens {
       }
     }
 
-    this.statsHost.append(heading('Abilities'));
+    // Abilities get their own column. Stacked under the stats they made the left
+    // column taller than the viewport, so the cards and the radar — the part the
+    // player actually interacts with — sat below the fold.
+    this.abilityHost.replaceChildren();
+    this.abilityHost.append(heading('Abilities'));
+    this.abilityHost.append(abilityRadar(stats.abilities));
     if (stats.unspent > 0) {
       const note = document.createElement('div');
       note.className = 'points';
       note.textContent = `${stats.unspent} ability point${stats.unspent === 1 ? '' : 's'} available`;
-      this.statsHost.append(note);
+      this.abilityHost.append(note);
     }
 
     for (const key of ABILITY_KEYS) {
@@ -153,18 +180,128 @@ export class Screens {
       });
 
       row.append(name, value, plus);
-      this.statsHost.append(row);
+      this.abilityHost.append(row);
     }
 
     const slots = stats.maxSlots();
-    this.statsHost.append(heading('Spell Slots'));
+    this.abilityHost.append(heading('Spell Slots'));
     slots.forEach((count, i) => {
       if (count <= 0) {
-        this.statsHost.append(statRow(`Tier ${i + 1}`, i === 1 ? 'unlocks at level 4' : 'unlocks at level 8'));
+        this.abilityHost.append(statRow(`Tier ${i + 1}`, i === 1 ? 'unlocks at level 4' : 'unlocks at level 8'));
         return;
       }
-      this.statsHost.append(statRow(`Tier ${i + 1}`, `${count - stats.slotsUsed[i]} / ${count}`));
+      this.abilityHost.append(statRow(`Tier ${i + 1}`, `${count - stats.slotsUsed[i]} / ${count}`));
     });
+  }
+
+  // ---------------------------------------------------------------- panes
+
+  private showPane(pane: 'gear' | 'skills'): void {
+    this.pane = pane;
+    this.applyPane();
+  }
+
+  /**
+   * Shows the active pane and lays out the tree.
+   *
+   * The connector geometry is measured from the DOM, and a hidden pane measures
+   * as zero — so the branches have to be drawn *after* the pane is made visible,
+   * not when its nodes were created.
+   */
+  private applyPane(): void {
+    const skills = this.pane === 'skills';
+    this.gearPane.classList.toggle('hidden', skills);
+    this.skillsPane.classList.toggle('hidden', !skills);
+    this.gearTab.classList.toggle('active', !skills);
+    this.skillsTab.classList.toggle('active', skills);
+    if (skills) requestAnimationFrame(() => this.layoutBranches());
+  }
+
+  /**
+   * Draws the curved connectors between skill nodes.
+   *
+   * Real geometry rather than CSS borders: a tree drawn with straight rules reads
+   * as a list with a line down the side. Each branch gets a trunk up its centre,
+   * limbs curving out to the tier-1 nodes, and a bezier from every node to its
+   * prerequisite — so the shape of the dependency graph is the shape on screen.
+   *
+   * Positions are measured after layout rather than computed from constants,
+   * which means the curves stay attached when the panel is resized or the font
+   * metrics differ.
+   */
+  private layoutBranches(): void {
+    const svgNs = 'http://www.w3.org/2000/svg';
+    for (const branch of Array.from(this.skillHost.querySelectorAll<HTMLElement>('.skill-branch'))) {
+      const canvas = branch.querySelector<SVGSVGElement>('.branch-canvas');
+      if (!canvas) continue;
+      const box = branch.getBoundingClientRect();
+      if (box.width < 2) continue;
+      canvas.setAttribute('viewBox', `0 0 ${box.width} ${box.height}`);
+      canvas.replaceChildren();
+
+      const centre = (node: Element): { x: number; y: number } => {
+        const r = node.getBoundingClientRect();
+        return { x: r.left - box.left + r.width / 2, y: r.top - box.top + r.height / 2 };
+      };
+
+      const nodes = Array.from(branch.querySelectorAll<HTMLElement>('.skill-node'));
+      const byId = new Map<string, HTMLElement>();
+      for (const node of nodes) byId.set(node.dataset.skill ?? '', node);
+
+      const line = (d: string, cls: string): void => {
+        const path = document.createElementNS(svgNs, 'path');
+        path.setAttribute('d', d);
+        path.setAttribute('class', cls);
+        canvas.append(path);
+      };
+
+      // A short root stub above the first row, which the tier-1 limbs spring
+      // from. Deliberately not a full-height trunk: run a line from the top to
+      // the deepest row and it passes straight through any centred disc, which
+      // looked like a pole skewering the capstone.
+      const tops = nodes.map((n) => centre(n));
+      if (tops.length > 0) {
+        const shallowest = Math.min(...tops.map((t) => t.y));
+        const anyOwned = nodes.some((n) => n.classList.contains('owned'));
+        line(
+          `M ${box.width / 2} ${shallowest - 40} L ${box.width / 2} ${shallowest - 30}`,
+          `trunk${anyOwned ? ' grown' : ''}`,
+        );
+      }
+
+      for (const node of nodes) {
+        const id = node.dataset.skill ?? '';
+        const parentId = node.dataset.requires ?? '';
+        const here = centre(node);
+        const grown = node.classList.contains('owned') ? ' grown' : '';
+
+        if (!parentId) {
+          // A tier-1 node hangs off the trunk, so the limb starts at the centre
+          // line a little above it and curves outward.
+          const trunkX = box.width / 2;
+          const startY = here.y - 30;
+          // Leaves the root heading straight down, then sweeps out and drops into
+          // the disc from above — the shape a real limb makes off a trunk.
+          line(
+            `M ${trunkX} ${startY} C ${trunkX} ${here.y - 12}, ${here.x} ${here.y - 30}, ${here.x} ${here.y}`,
+            `limb${grown}`,
+          );
+          continue;
+        }
+
+        const parent = byId.get(parentId);
+        if (!parent) continue;
+        const from = centre(parent);
+        // An S-curve: leaves the parent heading down, arrives at the child
+        // heading down, bowing out sideways in between.
+        const midY = (from.y + here.y) / 2;
+        line(
+          `M ${from.x} ${from.y} C ${from.x} ${midY}, ${here.x} ${midY}, ${here.x} ${here.y}`,
+          `limb${node.classList.contains('owned') && parent.classList.contains('owned') ? ' grown' : ''}`,
+        );
+        void id;
+      }
+    }
   }
 
   // ---------------------------------------------------------------- skills
@@ -172,9 +309,9 @@ export class Screens {
   /**
    * The four-branch skill tree, plus the respec button.
    *
-   * Nodes are indented by tier so the prerequisite chain is visible without
-   * drawing connectors, and a blocked node states its reason in the tooltip —
-   * "needs Strength 14" is a goal, whereas a greyed-out button is a mystery.
+   * Nodes are discs grouped into tier rows, with the prerequisite chain drawn as
+   * curved limbs by `layoutBranches`. A blocked node states its reason in the
+   * tooltip — "needs Strength 14" is a goal, whereas a dimmed disc is a mystery.
    */
   private renderSkills(player: Player): void {
     const stats = player.stats;
@@ -188,9 +325,12 @@ export class Screens {
     points.textContent = `${available} skill point${available === 1 ? '' : 's'} available`;
     this.skillHost.append(points);
 
+    const grove = document.createElement('div');
+    grove.className = 'skill-grove';
     for (const branch of SKILL_BRANCHES) {
-      this.skillHost.append(this.renderBranch(player, branch, available));
+      grove.append(this.renderBranch(player, branch, available));
     }
+    this.skillHost.append(grove);
 
     // What the whole build currently adds up to, so the player can see the tree's
     // effect without totalling tooltips by hand.
@@ -235,56 +375,91 @@ export class Screens {
     title.textContent = info.name;
     const blurb = document.createElement('p');
     blurb.textContent = info.blurb;
-    wrap.append(title, blurb);
 
-    for (const node of nodesInBranch(branch)) {
-      const rank = rankOf(stats.skills, node.id);
-      const block = blockOnPurchase(stats.skills, node.id, stats.level, stats.abilities);
+    // The connector layer, filled in by layoutBranches once this is on screen.
+    const canvas = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    canvas.setAttribute('class', 'branch-canvas');
+    canvas.setAttribute('preserveAspectRatio', 'none');
 
+    wrap.append(title, blurb, canvas);
+
+    // Grouped into rows by tier, so depth in the tree is depth down the panel.
+    const nodes = nodesInBranch(branch);
+    const tiers = Array.from(new Set(nodes.map((n) => n.tier))).sort((a, b) => a - b);
+
+    for (const tier of tiers) {
       const row = document.createElement('div');
-      row.className = `skill-node skill-tier-${node.tier}`;
-      if (node.tier > 1) row.classList.add('skill-tier');
-      if (rank > 0) row.classList.add('owned');
-      // "Maxed" and "cannot afford" are not the same as locked: a maxed node is a
-      // success and a node you are saving up for is a plan, so neither is dimmed.
-      if (block && block.kind !== 'maxed' && block.kind !== 'not-enough-points') row.classList.add('locked');
+      row.className = 'skill-tier-row';
 
-      const name = document.createElement('span');
-      name.className = 'sn';
-      name.textContent = node.name;
+      for (const node of nodes.filter((n) => n.tier === tier)) {
+        const rank = rankOf(stats.skills, node.id);
+        const block = blockOnPurchase(stats.skills, node.id, stats.level, stats.abilities);
 
-      const rankLabel = document.createElement('span');
-      rankLabel.className = 'sr';
-      rankLabel.textContent = `${rank}/${node.maxRank}`;
+        const disc = document.createElement('div');
+        disc.className = 'skill-node';
+        // The ids the connector pass walks to find parents and children.
+        disc.dataset.skill = node.id;
+        if (node.requires) disc.dataset.requires = node.requires;
 
-      const plus = document.createElement('button');
-      plus.textContent = '+';
-      plus.disabled = block !== null;
+        if (rank > 0) disc.classList.add('owned');
+        if (rank >= node.maxRank) disc.classList.add('maxed');
+        // Three states, not two. "Maxed" is a success and "saving up" is a plan,
+        // so neither should look like the locked discs the player cannot use.
+        if (block === null) disc.classList.add('available');
+        else if (block.kind !== 'maxed' && block.kind !== 'not-enough-points') disc.classList.add('locked');
 
-      const reason = ((): string => {
-        if (!block) return `${node.blurb} Costs ${node.cost} point${node.cost === 1 ? '' : 's'}.`;
-        switch (block.kind) {
-          case 'maxed':
-            return `${node.name} is fully ranked. ${node.blurb}`;
-          case 'requires-node':
-            return `Requires ${block.node.name} first. ${node.blurb}`;
-          case 'requires-ability':
-            return `Requires ${ABILITY_INFO[block.ability].name} ${block.score}. ${node.blurb}`;
-          case 'not-enough-points':
-            return `Needs ${block.needed} skill point${block.needed === 1 ? '' : 's'}; you have ${block.available}.`;
-          default:
-            return node.blurb;
+        const icon = document.createElement('span');
+        applyIcon(icon, node.icon, node.name);
+
+        // Kept for the tests and for screen readers; the disc shows the icon.
+        const name = document.createElement('span');
+        name.className = 'sn';
+        name.textContent = node.name;
+
+        const rankLabel = document.createElement('span');
+        rankLabel.className = 'sr';
+        rankLabel.textContent = `${rank}/${node.maxRank}`;
+
+        const caption = document.createElement('span');
+        caption.className = 'sl';
+        caption.textContent = node.name;
+
+        const reason = ((): string => {
+          if (!block) return `${node.name}\n${node.blurb}\nCosts ${node.cost} point${node.cost === 1 ? '' : 's'}.`;
+          switch (block.kind) {
+            case 'maxed':
+              return `${node.name} — fully ranked.\n${node.blurb}`;
+            case 'requires-node':
+              return `${node.name}\nRequires ${block.node.name} first.\n${node.blurb}`;
+            case 'requires-ability':
+              return `${node.name}\nRequires ${ABILITY_INFO[block.ability].name} ${block.score}.\n${node.blurb}`;
+            case 'not-enough-points':
+              return `${node.name}\nNeeds ${block.needed} skill point${block.needed === 1 ? '' : 's'}; you have ${block.available}.`;
+            default:
+              return node.blurb;
+          }
+        })();
+        disc.title = reason;
+
+        if (block === null) {
+          // The whole disc is the button now, which is a much larger target than
+          // the 20px "+" it replaces.
+          disc.addEventListener('click', () => {
+            if (!player.buySkill(node.id)) return;
+            this.refresh();
+          });
         }
-      })();
-      row.title = reason;
-      plus.title = reason;
 
-      plus.addEventListener('click', () => {
-        if (!player.buySkill(node.id)) return;
-        this.refresh();
-      });
+        disc.append(icon, name, rankLabel);
+        // The caption is a sibling in a fixed-width column rather than absolutely
+        // positioned under the disc: positioned captions overlapped each other,
+        // because two 76px labels do not fit in the 62px between two 50px discs.
+        const cell = document.createElement('div');
+        cell.className = 'skill-cell';
+        cell.append(disc, caption);
+        row.append(cell);
+      }
 
-      row.append(name, rankLabel, plus);
       wrap.append(row);
     }
 
@@ -328,6 +503,21 @@ export class Screens {
         sub.textContent = this.describeEquipped(def, slot);
         value.append(sub);
       }
+
+      // Dropping onto the slot equips, which is the fast path the old flow
+      // lacked: click the item, hope it went to the right place.
+      this.makeDropTarget(
+        row,
+        (itemId) => this.acceptsInSlot(itemId, slot),
+        (itemId) => {
+          player.inventory.equip(itemId);
+          if (item(itemId).kind === 'weapon' && !player.inventory.hotbar.includes(itemId)) {
+            player.inventory.assignToHotbar(player.inventory.selected, itemId);
+          }
+          player.syncEquipmentDerived();
+          this.refresh();
+        },
+      );
 
       row.append(left, value);
       this.equipHost.append(row);
@@ -388,6 +578,158 @@ export class Screens {
     return '';
   }
 
+  // ------------------------------------------------------- drag and drop
+
+  /**
+   * Whether a dragged item can be dropped on an equipment slot.
+   *
+   * Checked on dragover so the slot can light up, which is why the dragged item
+   * is held on the instance: `dataTransfer` cannot be read during dragover, only
+   * on drop.
+   */
+  private acceptsInSlot(itemId: string, slot: EquipSlot): boolean {
+    const def = item(itemId);
+    if (slot === 'weapon') return def.kind === 'weapon';
+    if (slot === 'shield') return def.kind === 'shield';
+    if (slot === 'armor') return def.kind === 'armor';
+    if (slot === 'torch') return def.kind === 'torch';
+    return false;
+  }
+
+  /** Marks a bag cell as a drag source. */
+  private makeDraggable(cell: HTMLElement, itemId: string, index: number, tab: BagTab): void {
+    cell.draggable = true;
+    cell.addEventListener('dragstart', (event) => {
+      this.dragging = { itemId, index, tab };
+      cell.classList.add('dragging');
+      // Some payload has to be set or Firefox refuses to start the drag at all.
+      event.dataTransfer?.setData('text/plain', itemId);
+      if (event.dataTransfer) event.dataTransfer.effectAllowed = 'move';
+    });
+    cell.addEventListener('dragend', () => {
+      this.dragging = null;
+      cell.classList.remove('dragging');
+      // Clear any highlight left behind if the drag ended outside a target.
+      for (const node of Array.from(this.root.querySelectorAll('.drop-ok, .drop-bad'))) {
+        node.classList.remove('drop-ok', 'drop-bad');
+      }
+    });
+  }
+
+  /** Wires a drop target that accepts an item and runs `onDrop`. */
+  private makeDropTarget(
+    target: HTMLElement,
+    accepts: (itemId: string) => boolean,
+    onDrop: (itemId: string) => void,
+  ): void {
+    target.addEventListener('dragover', (event) => {
+      const held = this.dragging;
+      if (!held) return;
+      const ok = accepts(held.itemId);
+      // preventDefault is what actually permits the drop; without it the browser
+      // treats the target as inert and the cursor stays a "no entry" sign.
+      if (ok) event.preventDefault();
+      target.classList.toggle('drop-ok', ok);
+      target.classList.toggle('drop-bad', !ok);
+    });
+    target.addEventListener('dragleave', () => target.classList.remove('drop-ok', 'drop-bad'));
+    target.addEventListener('drop', (event) => {
+      event.preventDefault();
+      target.classList.remove('drop-ok', 'drop-bad');
+      const held = this.dragging;
+      this.dragging = null;
+      if (!held || !accepts(held.itemId)) return;
+      onDrop(held.itemId);
+    });
+  }
+
+  // ---------------------------------------------------------------- hotbar
+
+  /**
+   * The hotbar, repeated inside the sheet as a row of drop targets.
+   *
+   * It exists because assigning a slot used to be a round trip: leave the sheet,
+   * scroll the hotbar to the slot you wanted, reopen the sheet, then click the
+   * item. Showing the eight slots next to the bag turns that into one drag.
+   */
+  private renderHotbar(player: Player): void {
+    this.hotbarHost.replaceChildren();
+    this.hotbarHost.append(heading('Hotbar  (drag an item onto a slot)'));
+
+    const strip = document.createElement('div');
+    strip.className = 'hotbar-strip';
+
+    player.inventory.hotbar.forEach((id, slot) => {
+      const cell = document.createElement('div');
+      cell.className = `hotbar-slot${slot === player.inventory.selected ? ' selected' : ''}`;
+
+      const num = document.createElement('span');
+      num.className = 'num';
+      num.textContent = String(slot + 1);
+      cell.append(num);
+
+      if (id) {
+        const def = item(id);
+        const glyph = document.createElement('span');
+        applyGlyph(glyph, def);
+        cell.append(glyph);
+        const count = player.inventory.count(id);
+        if (count > 1) {
+          const qty = document.createElement('span');
+          qty.className = 'qty';
+          qty.textContent = String(count);
+          cell.append(qty);
+        }
+        cell.title = `${def.name}\nClick to select this slot. Right-click to clear it.`;
+      } else {
+        cell.title = 'Empty slot. Drag an item here.';
+      }
+
+      cell.addEventListener('click', () => {
+        player.inventory.select(slot);
+        player.syncEquipmentDerived();
+        this.refresh();
+      });
+      // Right-click clears, so a slot can be freed without finding a replacement.
+      cell.addEventListener('contextmenu', (event) => {
+        event.preventDefault();
+        player.inventory.assignToHotbar(slot, null);
+        this.refresh();
+      });
+
+      // Anything with a hotbar use is droppable here.
+      this.makeDropTarget(
+        cell,
+        (itemId) => {
+          const def = item(itemId);
+          return (
+            def.kind === 'weapon' ||
+            def.kind === 'spell' ||
+            def.kind === 'block' ||
+            def.kind === 'consumable' ||
+            def.kind === 'torch'
+          );
+        },
+        (itemId) => {
+          player.inventory.assignToHotbar(slot, itemId);
+          // Dropping a weapon on a slot means "I want to hold this", so select it
+          // too — otherwise the player assigns it and then has to go and pick it.
+          const def = item(itemId);
+          if (def.kind === 'weapon') {
+            player.inventory.equip(itemId);
+            player.inventory.select(slot);
+          }
+          player.syncEquipmentDerived();
+          this.refresh();
+        },
+      );
+
+      strip.append(cell);
+    });
+
+    this.hotbarHost.append(strip);
+  }
+
   // ---------------------------------------------------------------- bag
 
   private renderBag(player: Player): void {
@@ -437,8 +779,13 @@ export class Screens {
 
       if (stack) {
         const def = item(stack.itemId);
+        // The id on the element, so a drop target or a test can identify the
+        // item without parsing the tooltip — display names are not unique
+        // enough for that: the Healing spell and the Healing Draught both
+        // begin "Healing".
+        cell.dataset.item = stack.itemId;
         applyGlyph(cell, def);
-        cell.title = `${def.name}\n${def.blurb}\n\nClick: ${equipVerb(def.kind)}\nShift-click: drop`;
+        cell.title = `${def.name}\n${def.blurb}\n\nDrag onto an equipment or hotbar slot\nClick: ${equipVerb(def.kind)}\nShift-click: drop`;
         if (stack.qty > 1) {
           const qty = document.createElement('span');
           qty.className = 'qty';
@@ -447,6 +794,7 @@ export class Screens {
         }
         const tab = this.activeTab;
         cell.addEventListener('click', (event) => this.onBagClick(player, i, event.shiftKey, tab));
+        this.makeDraggable(cell, stack.itemId, i, tab);
       }
 
       grid.append(cell);
@@ -518,4 +866,88 @@ function equipVerb(kind: string): string {
     default:
       return 'assign to selected hotbar slot';
   }
+}
+
+/**
+ * A radar chart of the five ability scores.
+ *
+ * Five numbers in a column tell you what you have; the polygon tells you what
+ * *shape* your character is, which is the thing a player actually wants to see
+ * when deciding where the next point goes. A pentagon because there are five
+ * abilities — the axis count is derived from `ABILITY_KEYS`, so dropping or
+ * adding an ability reshapes it rather than breaking it.
+ *
+ * Plain SVG rather than a canvas: it scales with the panel, needs no redraw on
+ * resize, and the rings can be styled from the stylesheet with everything else.
+ */
+function abilityRadar(scores: Readonly<AbilityScores>): SVGSVGElement {
+  const ns = 'http://www.w3.org/2000/svg';
+  const size = 240;
+  const centre = size / 2;
+  // Generous room for the labels outside the outer ring. At 34px the leftmost
+  // label was clipped by the viewBox and "WIS 11" rendered as "S 11".
+  const radius = centre - 52;
+  const svg = document.createElementNS(ns, 'svg');
+  svg.setAttribute('id', 'ability-radar');
+  svg.setAttribute('width', String(size));
+  svg.setAttribute('height', String(size));
+  svg.setAttribute('viewBox', `0 0 ${size} ${size}`);
+
+  const axes = ABILITY_KEYS.length;
+  // Scored against the 5e ceiling of 20, so the polygon fills the chart only at
+  // a maximal character and a starting 8 reads as the small core it is.
+  const scale = (score: number): number => Math.max(0.08, Math.min(1, score / 20));
+  const point = (index: number, r: number): { x: number; y: number } => {
+    // Start at the top and go clockwise, which is how the reference reads.
+    const angle = -Math.PI / 2 + (index / axes) * Math.PI * 2;
+    return { x: centre + Math.cos(angle) * r, y: centre + Math.sin(angle) * r };
+  };
+  const polygon = (points: { x: number; y: number }[], cls: string): SVGPolygonElement => {
+    const node = document.createElementNS(ns, 'polygon');
+    node.setAttribute('points', points.map((p) => `${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(' '));
+    node.setAttribute('class', cls);
+    return node;
+  };
+
+  for (const fraction of [0.25, 0.5, 0.75, 1]) {
+    svg.append(polygon(ABILITY_KEYS.map((_, i) => point(i, radius * fraction)), 'ring'));
+  }
+
+  for (let i = 0; i < axes; i++) {
+    const spoke = document.createElementNS(ns, 'line');
+    const end = point(i, radius);
+    spoke.setAttribute('x1', String(centre));
+    spoke.setAttribute('y1', String(centre));
+    spoke.setAttribute('x2', end.x.toFixed(1));
+    spoke.setAttribute('y2', end.y.toFixed(1));
+    spoke.setAttribute('class', 'spoke');
+    svg.append(spoke);
+  }
+
+  const shapePoints = ABILITY_KEYS.map((key, i) => point(i, radius * scale(scores[key])));
+  svg.append(polygon(shapePoints, 'shape'));
+
+  for (const p of shapePoints) {
+    const dot = document.createElementNS(ns, 'circle');
+    dot.setAttribute('cx', p.x.toFixed(1));
+    dot.setAttribute('cy', p.y.toFixed(1));
+    dot.setAttribute('r', '2.8');
+    dot.setAttribute('class', 'dot');
+    svg.append(dot);
+  }
+
+  ABILITY_KEYS.forEach((key, i) => {
+    const at = point(i, radius + 20);
+    const label = document.createElementNS(ns, 'text');
+    label.setAttribute('x', at.x.toFixed(1));
+    label.setAttribute('y', at.y.toFixed(1));
+    // Anchored by which side of the centre the axis sits on, so labels never
+    // overlap the outer ring.
+    label.setAttribute('text-anchor', at.x > centre + 6 ? 'start' : at.x < centre - 6 ? 'end' : 'middle');
+    label.setAttribute('dominant-baseline', 'middle');
+    label.textContent = `${ABILITY_INFO[key].abbr} ${scores[key]}`;
+    svg.append(label);
+  });
+
+  return svg;
 }

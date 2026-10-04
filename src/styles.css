@@ -228,7 +228,10 @@ canvas#game { display: block; width: 100vw; height: 100vh; }
   border-bottom: 5px solid transparent;
 }
 .sheet-inner {
-  width: min(940px, 94vw); max-height: 88vh; overflow: auto;
+  /* Much wider and taller than the old 940px box. With four columns crammed into
+     it the text was at the smallest readable size and still clipped; the sheet is
+     a full-screen overlay, so there is no reason to be shy with the space. */
+  width: min(1480px, 96vw); max-height: 94vh; overflow: auto;
   /* Opaque on purpose: a translucent panel lets the hotbar and the 3D scene
      show through behind the text, which reads as visual noise. */
   background: #14121a;
@@ -236,41 +239,77 @@ canvas#game { display: block; width: 100vw; height: 100vh; }
   padding: 18px 20px;
 }
 .sheet-inner header { display: flex; justify-content: space-between; align-items: center; }
-.sheet-inner h1 { font-size: 18px; margin: 0 0 4px; color: var(--gold); letter-spacing: 1px; }
+.sheet-inner h1 { font-size: 22px; margin: 0; color: var(--gold); letter-spacing: 1px; }
 #sheet-close {
   background: none; border: 1px solid var(--edge); color: var(--ink);
   font-size: 18px; width: 30px; height: 30px; cursor: pointer;
 }
-.sheet-cols { display: grid; grid-template-columns: 0.85fr 0.9fr 1.1fr 1.1fr; gap: 18px; margin-top: 14px; }
-.sheet-cols h2 {
-  font-size: 12px; text-transform: uppercase; letter-spacing: 1.4px;
-  opacity: 0.6; margin: 0 0 8px; border-bottom: 1px solid var(--edge); padding-bottom: 5px;
+/* ---- tabs ------------------------------------------------------------- */
+
+.sheet-tabs { display: flex; gap: 6px; }
+.sheet-tab {
+  font-family: inherit; font-size: 12px; letter-spacing: 0.6px;
+  padding: 8px 18px; cursor: pointer;
+  background: rgba(0, 0, 0, 0.35); color: var(--ink);
+  border: 1px solid var(--edge); border-radius: 4px;
 }
-.stat { display: flex; justify-content: space-between; font-size: 12px; padding: 3px 0; }
+.sheet-tab:hover { border-color: var(--gold); }
+.sheet-tab.active { border-color: var(--gold); color: var(--gold); background: rgba(216, 178, 90, 0.14); }
+
+.gear-cols { display: grid; grid-template-columns: 1fr 1.25fr; gap: 22px; margin-top: 16px; }
+.skills-cols { display: grid; grid-template-columns: 0.62fr 0.7fr 2.1fr; gap: 20px; margin-top: 16px; }
+.sheet-pane h2 {
+  font-size: 13px; text-transform: uppercase; letter-spacing: 1.4px;
+  opacity: 0.65; margin: 0 0 10px; border-bottom: 1px solid var(--edge); padding-bottom: 6px;
+}
+.stat { display: flex; justify-content: space-between; font-size: 13px; padding: 4px 0; }
 .stat span:last-child { color: var(--gold); }
-.attr { display: flex; align-items: center; gap: 6px; font-size: 12px; padding: 3px 0; }
-.attr .an { flex: 1; }
-.attr .av { color: var(--gold); min-width: 22px; text-align: right; }
+
+/* ---- ability cards ---------------------------------------------------- */
+
+/* Cards rather than the old one-line rows: the score, its modifier and the
+   spend button all have to be readable at a glance, which they were not when
+   three of them shared a 12px line. */
+.attr {
+  display: grid; grid-template-columns: 1fr auto auto; align-items: center; gap: 10px;
+  font-size: 14px; padding: 9px 11px; margin-bottom: 6px;
+  border: 1px solid var(--edge); border-radius: 4px; background: rgba(0, 0, 0, 0.35);
+}
+.attr .an { font-size: 13px; letter-spacing: 0.8px; opacity: 0.85; }
+.attr .av { color: var(--gold); font-size: 17px; text-align: right; min-width: 64px; }
 .attr button {
   background: #2a2a1e; border: 1px solid var(--edge); color: var(--gold);
-  width: 20px; height: 20px; cursor: pointer; font-size: 13px; line-height: 1;
+  width: 28px; height: 28px; cursor: pointer; font-size: 16px; line-height: 1; border-radius: 3px;
 }
 .attr button:disabled { opacity: 0.25; cursor: default; }
-.points { font-size: 11px; color: #9ce8a8; margin: 6px 0; }
+.points { font-size: 12px; color: #9ce8a8; margin: 8px 0; }
+
+/* ---- ability radar ---------------------------------------------------- */
+
+#ability-radar { display: block; margin: 2px auto 10px; }
+#ability-radar .ring { fill: none; stroke: var(--edge); stroke-width: 1; }
+#ability-radar .spoke { stroke: var(--edge); stroke-width: 1; opacity: 0.6; }
+#ability-radar .shape { fill: rgba(110, 140, 240, 0.33); stroke: #8aa2f0; stroke-width: 2; }
+#ability-radar .dot { fill: #8aa2f0; }
+#ability-radar text { fill: var(--ink); font-size: 10px; opacity: 0.75; }
 
 .eq-slot {
-  display: flex; justify-content: space-between; gap: 8px;
-  font-size: 12px; padding: 7px 8px; margin-bottom: 5px;
-  border: 1px solid var(--edge); background: rgba(0,0,0,0.35);
+  display: flex; justify-content: space-between; gap: 10px;
+  font-size: 13px; padding: 10px 11px; margin-bottom: 7px;
+  border: 1px solid var(--edge); background: rgba(0,0,0,0.35); border-radius: 4px;
 }
-.eq-slot .eq-label { opacity: 0.55; font-size: 10px; text-transform: uppercase; }
+.eq-slot .eq-label { opacity: 0.55; font-size: 11px; text-transform: uppercase; letter-spacing: 0.8px; }
 .eq-slot .eq-val { color: var(--gold); text-align: right; }
-.eq-slot .eq-sub { display: block; font-size: 10px; opacity: 0.6; color: var(--ink); }
+.eq-slot .eq-sub { display: block; font-size: 11px; opacity: 0.6; color: var(--ink); }
+/* A slot lights up while something droppable is over it, so the target is never
+   in doubt mid-drag. */
+.eq-slot.drop-ok { border-color: var(--gold); background: rgba(216, 178, 90, 0.16); }
+.eq-slot.drop-bad { border-color: #b4555a; background: rgba(180, 85, 90, 0.12); }
 
 /* Tabs keep the panel a fixed size; the grid inside scrolls. */
-.bag-tabs { display: flex; gap: 4px; margin-bottom: 8px; }
+.bag-tabs { display: flex; gap: 5px; margin-bottom: 10px; }
 .bag-tab {
-  flex: 1; padding: 5px 4px; font-family: inherit; font-size: 10px;
+  flex: 1; padding: 7px 6px; font-family: inherit; font-size: 11.5px;
   background: rgba(0, 0, 0, 0.35); color: var(--ink);
   border: 1px solid var(--edge); cursor: pointer;
 }
@@ -278,25 +317,26 @@ canvas#game { display: block; width: 100vw; height: 100vh; }
 .bag-tab.active { border-color: var(--gold); color: var(--gold); background: rgba(216, 178, 90, 0.12); }
 
 #sheet-bag .bag-scroll {
-  max-height: 264px; overflow-y: auto; overflow-x: hidden;
+  max-height: 46vh; overflow-y: auto; overflow-x: hidden;
   padding-right: 4px;
   scrollbar-width: thin;
   scrollbar-color: var(--edge) transparent;
 }
 #sheet-bag .bag-scroll::-webkit-scrollbar { width: 8px; }
 #sheet-bag .bag-scroll::-webkit-scrollbar-thumb { background: var(--edge); }
-#sheet-bag .bag-grid { display: grid; grid-template-columns: repeat(6, 1fr); gap: 5px; }
+#sheet-bag .bag-grid { display: grid; grid-template-columns: repeat(8, 1fr); gap: 7px; }
 .bag-item {
-  position: relative; aspect-ratio: 1; cursor: pointer;
-  border: 1px solid var(--edge); background: rgba(0,0,0,0.35);
-  display: flex; align-items: center; justify-content: center; font-size: 19px;
+  position: relative; aspect-ratio: 1; cursor: grab;
+  border: 1px solid var(--edge); background: rgba(0,0,0,0.35); border-radius: 4px;
+  display: flex; align-items: center; justify-content: center; font-size: 23px;
 }
+.bag-item.dragging { opacity: 0.4; cursor: grabbing; }
 .bag-item:hover { border-color: var(--gold); background: rgba(216,178,90,0.12); }
-.bag-item .qty { position: absolute; bottom: 1px; right: 3px; font-size: 10px; color: var(--gold); }
+.bag-item .qty { position: absolute; bottom: 1px; right: 4px; font-size: 11px; color: var(--gold); }
 .bag-item.empty { cursor: default; opacity: 0.3; }
 .bag-item.empty:hover { border-color: var(--edge); background: rgba(0,0,0,0.35); }
 .sheet-inner footer { margin-top: 14px; }
-.hint { font-size: 10px; opacity: 0.5; }
+.hint { font-size: 11.5px; opacity: 0.5; }
 
 /* ---------- death ---------- */
 #death {
@@ -348,39 +388,104 @@ button#play:hover, button#respawn:hover { background: var(--gold); color: #14110
 
 /* ---- skill tree ------------------------------------------------------- */
 
-/* The tree is the tallest column, so it scrolls on its own rather than
-   stretching the whole sheet past the viewport. */
-#sheet-skills { max-height: 56vh; overflow-y: auto; padding-right: 4px; }
-.skill-branch { margin-bottom: 12px; }
+#sheet-skills { padding-right: 4px; }
+.skill-grove { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; }
+
+/* Each branch is its own positioning context: the connector SVG is absolutely
+   placed over it and the node discs sit on top. */
+.skill-branch {
+  position: relative; padding: 8px 6px 10px;
+  border: 1px solid var(--edge); border-radius: 6px;
+  background: linear-gradient(180deg, rgba(255,255,255,0.025), rgba(0,0,0,0.3));
+}
 .skill-branch > h3 {
-  font-size: 11px; text-transform: uppercase; letter-spacing: 1.2px;
-  margin: 0 0 2px; color: var(--gold); opacity: 0.85;
+  font-size: 12px; text-transform: uppercase; letter-spacing: 1.2px;
+  margin: 0 0 3px; color: var(--gold); text-align: center;
 }
-.skill-branch > p { margin: 0 0 6px; font-size: 10.5px; opacity: 0.5; line-height: 1.35; }
+.skill-branch > p {
+  margin: 0 0 10px; font-size: 10.5px; opacity: 0.45;
+  line-height: 1.35; text-align: center; min-height: 28px;
+}
+
+/* The connectors. Behind the nodes, and ignoring pointer events so the discs
+   above stay clickable. */
+.branch-canvas { position: absolute; inset: 0; pointer-events: none; z-index: 0; }
+.branch-canvas path { fill: none; stroke-linecap: round; }
+.branch-canvas path.limb { stroke: #4a4330; stroke-width: 3; stroke-dasharray: 3 4; }
+.branch-canvas path.limb.grown { stroke: var(--gold); stroke-width: 4.5; stroke-dasharray: none; opacity: 0.85; }
+.branch-canvas path.trunk { stroke: #4a4330; stroke-width: 5; }
+.branch-canvas path.trunk.grown { stroke: var(--gold); stroke-width: 6.5; opacity: 0.8; }
+
+.skill-tier-row {
+  position: relative; z-index: 1;
+  display: flex; justify-content: center; gap: 6px; margin-bottom: 14px;
+}
+.skill-tier-row:last-child { margin-bottom: 2px; }
+/* Headroom above the first row so the limbs springing from the root have room
+   to actually curve, rather than being squeezed into a bracket. */
+.skill-tier-row:first-of-type { margin-top: 14px; }
+
+/* A fixed-width column per node, so the caption below it has room of its own
+   and two adjacent captions cannot run into each other. */
+.skill-cell {
+  display: flex; flex-direction: column; align-items: center; gap: 5px;
+  width: 74px;
+}
+
+/* A node is a disc, as in the reference: icon in the middle, rank badge on the
+   shoulder. Round because a tree of rectangles reads as a table. */
 .skill-node {
-  display: flex; align-items: center; gap: 6px;
-  font-size: 11.5px; padding: 3px 0 3px 8px;
-  /* A left rule reads as the branch's spine, which is cheaper and clearer than
-     drawing real connector lines between absolutely positioned nodes. */
-  border-left: 2px solid var(--edge);
+  position: relative; width: 50px; height: 50px; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 21px; cursor: pointer;
+  border: 2px solid var(--edge); background: #191620;
+  transition: border-color 0.12s, box-shadow 0.12s, transform 0.12s;
 }
-.skill-node.owned { border-left-color: var(--gold); }
-.skill-node.locked { opacity: 0.42; }
-.skill-node .sn { flex: 1; }
-.skill-node .sr { color: var(--gold); min-width: 30px; text-align: right; }
-.skill-node button {
-  background: rgba(255, 255, 255, 0.06); color: var(--ink);
-  border: 1px solid var(--edge); border-radius: 3px;
-  width: 20px; height: 18px; line-height: 1; cursor: pointer; font-size: 12px;
+.skill-node:hover { transform: scale(1.07); }
+.skill-node.available { border-color: #7f7049; }
+.skill-node.available:hover { border-color: var(--gold); box-shadow: 0 0 10px rgba(216, 178, 90, 0.4); }
+.skill-node.owned {
+  border-color: var(--gold); background: radial-gradient(circle at 50% 35%, #3a3016, #191620 72%);
+  box-shadow: 0 0 12px rgba(216, 178, 90, 0.3);
 }
-.skill-node button:disabled { opacity: 0.3; cursor: default; }
-.skill-tier { padding-left: 10px; }
-.skill-tier-3 { padding-left: 20px; }
+.skill-node.maxed { box-shadow: 0 0 16px rgba(216, 178, 90, 0.55); }
+.skill-node.locked { opacity: 0.4; cursor: not-allowed; }
+.skill-node .sn { display: none; }
+.skill-node .sr {
+  position: absolute; top: -4px; right: -4px;
+  min-width: 19px; height: 19px; padding: 0 3px;
+  border-radius: 10px; background: #14121a; border: 1px solid var(--edge);
+  color: var(--ink); font-size: 10px; line-height: 17px; text-align: center;
+}
+.skill-node.owned .sr { border-color: var(--gold); color: var(--gold); }
+.skill-cell .sl {
+  font-size: 9.5px; text-align: center; opacity: 0.6; line-height: 1.2;
+  /* Two short lines rather than one clipped one. */
+  min-height: 22px;
+}
+
 #respec {
-  margin-top: 8px; width: 100%; padding: 5px;
+  margin-top: 14px; width: 100%; padding: 10px;
   background: rgba(255, 203, 61, 0.1); color: var(--gold);
-  border: 1px solid var(--gold); border-radius: 3px;
-  cursor: pointer; font-size: 11px; letter-spacing: 0.4px;
+  border: 1px solid var(--gold); border-radius: 4px;
+  cursor: pointer; font-size: 13px; letter-spacing: 0.4px; font-family: inherit;
 }
 #respec:disabled { opacity: 0.35; cursor: default; border-color: var(--edge); color: var(--ink); }
-.skill-mods { margin-top: 8px; font-size: 10.5px; opacity: 0.6; line-height: 1.45; }
+.skill-mods { margin-top: 12px; font-size: 11.5px; opacity: 0.65; line-height: 1.5; }
+
+/* ---- hotbar strip in the sheet ---------------------------------------- */
+
+/* The hotbar is repeated inside the sheet purely as a drop target. Assigning a
+   hotbar slot used to mean closing the sheet, scrolling to the slot, reopening
+   the sheet and clicking — the slot had to be reachable from where the items are. */
+#sheet-hotbar { margin-top: 18px; }
+.hotbar-strip { display: flex; gap: 8px; }
+.hotbar-slot {
+  position: relative; width: 56px; height: 56px; border-radius: 4px;
+  border: 1px solid var(--edge); background: rgba(0, 0, 0, 0.4);
+  display: flex; align-items: center; justify-content: center; font-size: 24px;
+}
+.hotbar-slot .num { position: absolute; top: 2px; left: 4px; font-size: 10px; opacity: 0.5; }
+.hotbar-slot .qty { position: absolute; bottom: 1px; right: 4px; font-size: 11px; color: var(--gold); }
+.hotbar-slot.selected { border-color: var(--gold); box-shadow: 0 0 8px rgba(216, 178, 90, 0.35); }
+.hotbar-slot.drop-ok { border-color: var(--gold); background: rgba(216, 178, 90, 0.18); }

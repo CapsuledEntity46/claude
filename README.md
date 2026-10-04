@@ -297,6 +297,34 @@ Dropping an ability score takes the skills it gated with it, and the prune
 cascades: clearing a tier-1 node invalidates tier 2, which invalidates tier 3. A
 single sweep in definition order would leave the deepest node standing on nothing.
 
+### The character sheet
+
+`Tab` opens a two-tab sheet. **Equipment & Inventory** holds the equipped slots,
+the bag and a copy of the hotbar; **Skills and Stats** holds the stats, the five
+ability cards with a radar chart, and the tree.
+
+**The inventory is drag and drop.** Drag an item onto an equipment slot to equip
+it, or onto a hotbar slot to bind it — dropping a weapon on a slot selects it too,
+since "put this on the bar" almost always means "and draw it". Clicking still
+equips, and shift-click still drops. The hotbar is repeated inside the sheet
+purely as a drop target: binding a slot used to be a round trip out of the sheet,
+scroll the bar to the slot you wanted, back into the sheet, then click.
+
+Slots highlight while a compatible item is over them and show a refusal tint when
+it is not, so the target is never in doubt mid-drag.
+
+The tree is drawn from measured geometry rather than CSS rules: each branch has a
+root, limbs curving out to its first tier, and a bezier from every node to its
+prerequisite, so the shape of the dependency graph is the shape on screen. Grown
+limbs are solid gold and unbought ones dashed. Positions are read from the DOM
+after layout, which is why the connectors stay attached at any panel width — and
+why they are drawn when the tab becomes visible, since a hidden panel measures as
+zero.
+
+Three node states, not two: available, owned, and locked. "Maxed" is a success
+and "saving up for it" is a plan, so neither is dimmed like the nodes a character
+cannot use at all.
+
 ### Respeccing, and gold
 
 Hostile kills sometimes drop coin, scaled by both the archetype's own worth and

@@ -1550,21 +1550,53 @@ try {
     `${earned.start} -> ${goldAfterKills?.gold ?? earned.start} gold over 24 kills`,
   );
 
-  // The sheet must render all four branches and the respec button.
-  const sheet = await page.evaluate(() => {
-    window.__voxelquest.debugOpenSheet();
-    return null;
-  });
-  void sheet;
+  // The sheet must render all four branches, the connectors, and the respec button.
+  await page.evaluate(() => window.__voxelquest.debugOpenSheet());
   await page.waitForTimeout(400);
+  // Skills live behind their own tab now, so it has to be activated first.
+  await page.evaluate(() => document.getElementById('tab-skills')?.click());
+  await page.waitForTimeout(500);
   const sheetDom = await page.evaluate(() => ({
+    skillsVisible: !document.getElementById('pane-skills')?.classList.contains('hidden'),
+    gearHidden: document.getElementById('pane-gear')?.classList.contains('hidden'),
+    tabLabel: document.getElementById('tab-skills')?.textContent ?? '',
     branches: document.querySelectorAll('#sheet-skills .skill-branch').length,
     nodes: document.querySelectorAll('#sheet-skills .skill-node').length,
+    // The curved connectors are generated from measured geometry, so an empty
+    // SVG means the layout pass never ran or measured a hidden panel as zero.
+    limbs: document.querySelectorAll('#sheet-skills .branch-canvas path.limb').length,
+    trunks: document.querySelectorAll('#sheet-skills .branch-canvas path.trunk').length,
+    curved: Array.from(document.querySelectorAll('#sheet-skills .branch-canvas path.limb')).filter((p) =>
+      (p.getAttribute('d') ?? '').includes('C'),
+    ).length,
+    radarAxes: document.querySelectorAll('#ability-radar .spoke').length,
+    radarShape: document.querySelectorAll('#ability-radar .shape').length,
     respec: document.getElementById('respec')?.textContent ?? '',
-    abilities: Array.from(document.querySelectorAll('#sheet-stats .attr .an')).map((n) => n.textContent),
+    abilities: Array.from(document.querySelectorAll('#sheet-abilities .attr .an')).map((n) => n.textContent),
   }));
+  check('the skills tab is named "Skills and Stats"', sheetDom.tabLabel.trim() === 'Skills and Stats', sheetDom.tabLabel);
+  check(
+    'activating the tab shows skills and hides the gear pane',
+    sheetDom.skillsVisible === true && sheetDom.gearHidden === true,
+    `skills ${sheetDom.skillsVisible}, gear hidden ${sheetDom.gearHidden}`,
+  );
   check('the sheet shows four skill branches', sheetDom.branches === 4, `${sheetDom.branches} branches`);
   check('every skill node is rendered', sheetDom.nodes === 20, `${sheetDom.nodes} nodes`);
+  check(
+    'each node is joined to the tree by a limb',
+    sheetDom.limbs === 20 && sheetDom.trunks === 4,
+    `${sheetDom.limbs} limbs, ${sheetDom.trunks} trunks`,
+  );
+  check(
+    'the limbs are curves, not straight lines',
+    sheetDom.curved === sheetDom.limbs && sheetDom.curved > 0,
+    `${sheetDom.curved} of ${sheetDom.limbs} use bezier segments`,
+  );
+  check(
+    'the ability radar is drawn with one axis per ability',
+    sheetDom.radarAxes === 5 && sheetDom.radarShape === 1,
+    `${sheetDom.radarAxes} axes`,
+  );
   check(
     'the respec button shows its gold price',
     sheetDom.respec.toLowerCase().includes('gold'),
@@ -1575,6 +1607,92 @@ try {
     sheetDom.abilities.join(',') === 'STR,DEX,CON,INT,WIS',
     sheetDom.abilities.join(','),
   );
+
+  // Dragging an item onto an equipment slot must equip it, and onto a hotbar
+  // slot must assign it. This is the loop the player complained about: the old
+  // flow was leave the sheet, scroll the hotbar, reopen, click.
+  const dragResult = await page.evaluate(async () => {
+    const g = window.__voxelquest;
+    g.debugGiveItem('longsword', 1);
+    document.getElementById('tab-gear')?.click();
+    await new Promise((r) => setTimeout(r, 250));
+
+    // Weapons live in the Tools bag tab, so it has to be the active one before
+    // the cell exists in the DOM at all.
+    const pickBagTab = async (label) => {
+      const tab = Array.from(document.querySelectorAll('#sheet-bag .bag-tab')).find((b) =>
+        (b.textContent ?? '').startsWith(label),
+      );
+      tab?.click();
+      await new Promise((r) => setTimeout(r, 250));
+    };
+    await pickBagTab('Tools');
+
+    const cells = Array.from(document.querySelectorAll('#sheet-bag .bag-item'));
+    const sword = cells.find((c) => c.dataset.item === 'longsword');
+    const weaponSlot = document.querySelector('#sheet-equip .eq-slot');
+    if (!sword || !weaponSlot) {
+      return { ok: false, why: `sword ${!!sword} slot ${!!weaponSlot}` };
+    }
+
+    // A real HTML5 drag needs a DataTransfer shared across the three events;
+    // Playwright's dragTo cannot reach elements inside this overlay reliably.
+    const fire = (target, type, dt) => {
+      const event = new DragEvent(type, { bubbles: true, cancelable: true, dataTransfer: dt });
+      target.dispatchEvent(event);
+      return event;
+    };
+    const dt = new DataTransfer();
+    fire(sword, 'dragstart', dt);
+    const over = fire(weaponSlot, 'dragover', dt);
+    const highlighted = weaponSlot.classList.contains('drop-ok');
+    fire(weaponSlot, 'drop', dt);
+    fire(sword, 'dragend', dt);
+    await new Promise((r) => setTimeout(r, 250));
+    const equipped = g.debugEquipped();
+
+    // And onto a hotbar slot. Potions are in the Main tab.
+    await pickBagTab('Main');
+    const cells2 = Array.from(document.querySelectorAll('#sheet-bag .bag-item'));
+    const potion = cells2.find((c) => c.dataset.item === 'healing_draught');
+    let hotbarAssigned = null;
+    // Re-queried, not reused: the sheet rebuilds itself after every change, so the
+    // slot captured before the first drop is a detached node and events sent to
+    // it reach nothing.
+    const hotbarSlot = document.querySelectorAll('#sheet-hotbar .hotbar-slot')[5];
+    let diag = {};
+    if (potion && hotbarSlot) {
+      const dt2 = new DataTransfer();
+      fire(potion, 'dragstart', dt2);
+      const over2 = fire(hotbarSlot, 'dragover', dt2);
+      diag = { dragged: potion.dataset.item, over2: over2.defaultPrevented };
+      fire(hotbarSlot, 'drop', dt2);
+      fire(potion, 'dragend', dt2);
+      await new Promise((r) => setTimeout(r, 250));
+      hotbarAssigned = g.debugHotbar()[5];
+    } else {
+      diag = { potionFound: !!potion, slotFound: !!hotbarSlot };
+    }
+
+    return { ok: true, overPrevented: over.defaultPrevented, highlighted, equipped, hotbarAssigned, diag };
+  });
+  check('the bag and slots are present to drag between', dragResult.ok === true, dragResult.why ?? '');
+  check(
+    'an equipment slot accepts a dragged weapon',
+    dragResult.overPrevented === true && dragResult.highlighted === true,
+    `dragover accepted ${dragResult.overPrevented}, highlighted ${dragResult.highlighted}`,
+  );
+  check(
+    'dropping a weapon on the weapon slot equips it',
+    dragResult.equipped?.weapon === 'longsword',
+    JSON.stringify(dragResult.equipped),
+  );
+  check(
+    'dropping an item on a hotbar slot assigns it',
+    dragResult.hotbarAssigned === 'healing_draught',
+    `slot 6 holds ${dragResult.hotbarAssigned} | ${JSON.stringify(dragResult.diag)}`,
+  );
+
   await page.evaluate(() => window.__voxelquest.debugCloseSheet());
   await page.waitForTimeout(300);
 

@@ -1384,6 +1384,16 @@ export class Game {
     this.openSheet();
   }
 
+  /** What is currently equipped, by slot. */
+  debugEquipped(): Record<string, string | null> {
+    return { ...this.player.inventory.equipped };
+  }
+
+  /** The hotbar's item ids, for verifying an assignment landed. */
+  debugHotbar(): (string | null)[] {
+    return [...this.player.inventory.hotbar];
+  }
+
   debugCloseSheet(): void {
     this.screens.close();
   }

@@ -31,6 +31,10 @@ export class Player {
 
   onGround = false;
   inWater = false;
+  /** True while any part of the player is inside lava. */
+  inLava = false;
+  /** Seconds of lava contact not yet billed as damage. */
+  private lavaBurn = 0;
   /** Camera roll/pitch kick applied by attacks and recoil. */
   viewKick = new THREE.Vector2();
 
@@ -142,6 +146,21 @@ export class Player {
       Math.floor(this.position.z),
     );
     this.inWater = feetBlock === Block.Water || eyeBlock === Block.Water;
+    // Lava swims like water — you sink into it rather than stand on it — and
+    // burns for as long as you are in it. Without the damage the deep tunnels
+    // would be a scenic hazard that costs nothing to wade through.
+    this.inLava = feetBlock === Block.Lava || eyeBlock === Block.Lava;
+    if (this.inLava) {
+      this.lavaBurn += dt;
+      // Billed in whole points about three times a second rather than as a
+      // fractional trickle, so the damage floaters stay readable.
+      while (this.lavaBurn >= 0.34) {
+        this.lavaBurn -= 0.34;
+        this.onLavaDamage?.(4);
+      }
+    } else {
+      this.lavaBurn = 0;
+    }
 
     this.applyMovement(dt, input);
     this.integrate(dt, world);
@@ -306,6 +325,8 @@ export class Player {
 
   /** Set by the game so fall damage can route through the normal damage pipeline. */
   onFallDamage?: (amount: number) => void;
+  /** Set by the Game, so lava damage passes the same guards as any other source. */
+  onLavaDamage?: (amount: number) => void;
 
   // ---------------------------------------------------------------- placement
 

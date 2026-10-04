@@ -11,7 +11,9 @@
     "typecheck": "tsc --noEmit",
     "test": "npm run typecheck && npm run test:unit",
     "test:unit": "esbuild scripts/unit.ts --bundle --platform=node --format=esm --outfile=node_modules/.cache/unit.mjs --log-level=error && node node_modules/.cache/unit.mjs",
-    "test:smoke": "npm run build && node scripts/smoke.mjs"
+    "test:smoke": "npm run build && node scripts/smoke.mjs",
+    "survey": "esbuild scripts/terrain.ts --bundle --platform=node --format=esm --outfile=node_modules/.cache/terrain.mjs --log-level=error && node node_modules/.cache/terrain.mjs",
+    "shots:terrain": "npm run build && node scripts/terrainshots.mjs"
   },
   "dependencies": {
     "three": "^0.180.0"

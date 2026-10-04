@@ -213,7 +213,35 @@ export function meshChunk(chunk: Chunk, neighbor: NeighborLookup): MeshResult {
 
   const occluded = (x: number, y: number, z: number): number => (isOpaque(at(x, y, z)) ? 1 : 0);
 
-  for (let y = 0; y < CHUNK_SY; y++) {
+  /**
+   * Stop scanning above the tallest voxel in this chunk.
+   *
+   * Chunks are full-height columns, and in a world with a raised ceiling most of
+   * that column is empty sky — visiting it costs a read and a branch per voxel
+   * for nothing. Skipping it is what pays for the taller world: the mesher does
+   * *less* work at height 160 than it used to at 72.
+   *
+   * Derived from the voxel data rather than from `heightMap`, deliberately. The
+   * height map is a cache maintained by the generator and by edits, and reading
+   * it here would make meshing silently wrong whenever it is stale — a chunk
+   * assembled voxel by voxel (as the unit tests do) has an all-zero map and
+   * would mesh as empty. The layout is y-major, so the last non-air byte in the
+   * flat array gives the top row directly, and the scan breaks the moment it
+   * finds it.
+   *
+   * The +1 matters: the row above the highest block has to be visited so that
+   * block's top face is still emitted.
+   */
+  let scanTop = 0;
+  const layer = CHUNK_SX * CHUNK_SZ;
+  for (let i = vox.length - 1; i >= 0; i--) {
+    if (vox[i] !== Block.Air) {
+      scanTop = Math.min(CHUNK_SY - 1, Math.floor(i / layer) + 1);
+      break;
+    }
+  }
+
+  for (let y = 0; y <= scanTop; y++) {
     for (let z = 0; z < CHUNK_SZ; z++) {
       for (let x = 0; x < CHUNK_SX; x++) {
         const index = voxelIndex(x, y, z);

@@ -4,9 +4,17 @@ import { Block } from './blocks';
  * Chunks are vertical columns: 16x16 footprint, full world height.
  * A column keeps streaming logic 2D (only cx/cz matter) at the cost of meshing
  * a taller volume — a fine trade at this world height.
+ *
+ * The ceiling was raised from 72 to 160 to make room for real terrain relief:
+ * mountain ranges that tower, oceans deep enough to swim down into, and canyons
+ * you can lose the horizon inside. None of that fits in 72 blocks with a
+ * waterline at 27. The mesher pays for the extra height by skipping the empty
+ * sky above each chunk's tallest voxel, which it previously scanned in full.
+ *
+ * 160 is also the practical ceiling for the height map, which is a Uint8Array.
  */
 export const CHUNK_SX = 16;
-export const CHUNK_SY = 72;
+export const CHUNK_SY = 160;
 export const CHUNK_SZ = 16;
 export const CHUNK_VOLUME = CHUNK_SX * CHUNK_SY * CHUNK_SZ;
 

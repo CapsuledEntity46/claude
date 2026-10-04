@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { CombatSystem } from '../combat/CombatSystem';
 import { blockCollisionBoxes, blockDef } from '../world/blocks';
+import { CHUNK_SY } from '../world/Chunk';
 import { makeMeta, shapeBoxes } from '../world/shapes';
 import { ITEMS, item, tryItem } from '../combat/items';
 import { availableModes, type AttackDirection } from '../combat/types';
@@ -25,7 +26,7 @@ import { readSave, writeSave, type SaveData, SAVE_VERSION } from '../save/Save';
 import { Hud } from '../ui/Hud';
 import { Screens } from '../ui/Screens';
 import { Block } from '../world/blocks';
-import { SEA_LEVEL } from '../world/TerrainGen';
+import { Biome, SEA_LEVEL } from '../world/TerrainGen';
 import { TimeOfDay } from '../world/TimeOfDay';
 import { Weather } from '../world/Weather';
 import { World } from '../world/World';
@@ -36,7 +37,16 @@ const SKY_COLOR = 0x8fb6d8;
 /** Stepped ember palette for torch flames. */
 const EMBER_COLORS = [0xfff0c0, 0xffc050, 0xff8a28, 0xd8541a] as const;
 
-const RENDER_DISTANCE = 6;
+/**
+ * View radius in chunks.
+ *
+ * Raised from 6 once the terrain gained real relief. At 6 chunks the far plane
+ * sat around 75 blocks, which is less than the height of a single mountain —
+ * ranges were something you stood on rather than something you saw, and the
+ * whole point of the taller world was lost to fog. The mesher's sky-skipping
+ * pays for most of the extra chunks.
+ */
+const RENDER_DISTANCE = 9;
 const MAX_FRAME_DT = 1 / 20;
 
 type Mode = 'menu' | 'playing' | 'sheet' | 'dead';
@@ -111,7 +121,7 @@ export class Game {
     this.scene.background = new THREE.Color(SKY_COLOR);
     // Fog hides chunk pop-in at the streaming frontier.
     const viewDistance = RENDER_DISTANCE * 16;
-    this.scene.fog = new THREE.Fog(SKY_COLOR, viewDistance * 0.45, viewDistance * 0.95);
+    this.scene.fog = new THREE.Fog(SKY_COLOR, viewDistance * 0.34, viewDistance * 0.97);
 
     this.viewModel = new ViewModel(78, window.innerWidth / window.innerHeight);
     this.setupLights();
@@ -164,6 +174,11 @@ export class Game {
     // system directly meant falling ignored invulnerability entirely.
     this.player.onFallDamage = (amount) =>
       this.ctx.damagePlayer({ amount, type: 'blunt', canCrit: false }, this.player.position, 'The fall');
+    // Routed through the context like every other damage source, so lava
+    // respects invulnerability, armour and the death path rather than being a
+    // second way to subtract health.
+    this.player.onLavaDamage = (amount) =>
+      this.ctx.damagePlayer({ amount, type: 'fire', canCrit: false }, this.player.position, 'Lava');
 
     this.bindUi();
     this.spawnPlayer();
@@ -244,8 +259,8 @@ export class Game {
       // Night is hazier than day, which is both atmospheric and useful: it shortens
       // how far you can see trouble coming once it gets dark.
       const nightHaze = 1 - daylight;
-      fog.near = viewDistance * (0.2 - tighten * 0.17 - nightHaze * 0.08);
-      fog.far = viewDistance * (0.78 - tighten * 0.56 - nightHaze * 0.16);
+      fog.near = viewDistance * (0.34 - tighten * 0.28 - nightHaze * 0.12);
+      fog.far = viewDistance * (0.97 - tighten * 0.7 - nightHaze * 0.2);
     }
 
     (this.scene.background as THREE.Color).copy(this.skyColor);
@@ -372,7 +387,10 @@ export class Game {
         const x = Math.round(Math.cos((angle / 8) * Math.PI * 2) * radius);
         const z = Math.round(Math.sin((angle / 8) * Math.PI * 2) * radius);
         const height = this.world.gen.surfaceHeight(x, z);
-        if (height > SEA_LEVEL + 2 && height < 50) {
+        // Relative to the waterline, not an absolute height. Hard-coding "below
+        // 50" meant nothing could match once the sea rose to 62, so the search
+        // silently fell through to the origin every time.
+        if (height > SEA_LEVEL + 2 && height < SEA_LEVEL + 26) {
           spawnX = x;
           spawnZ = z;
           break search;
@@ -1377,6 +1395,235 @@ export class Game {
       0,
     );
     return true;
+  }
+
+  /**
+   * Finds a column matching a terrain predicate and stands the player on it.
+   *
+   * Searches outward in a spiral from the origin rather than scanning a block at
+   * a time, so a feature that occupies a few percent of the world is found in
+   * well under a second. Returns where it landed, or null if nothing matched.
+   */
+  debugFindTerrain(
+    want: 'mountain' | 'canyon' | 'deep-ocean' | 'island' | 'plateau' | 'jungle' | 'desert',
+    maxRadius = 4000,
+  ): { x: number; y: number; z: number; biome: number; height: number } | null {
+    const gen = this.world.gen;
+    const matches = (x: number, z: number): boolean => {
+      const h = gen.surfaceHeight(x, z);
+      const biome = gen.biomeAt(x, z);
+      switch (want) {
+        case 'mountain':
+          // A broad massif, not merely a tall column: without the neighbour
+          // tests this happily matched a lone badlands spire and photographed a
+          // canyon while claiming to have found a mountain range.
+          return (
+            h > 120 &&
+            gen.surfaceHeight(x + 60, z) > 96 &&
+            gen.surfaceHeight(x, z + 60) > 96 &&
+            gen.biomeAt(x, z) === Biome.Mountains
+          );
+        case 'canyon':
+          // A canyon is badlands next to a big drop, not merely badlands.
+          return biome === Biome.Badlands && Math.abs(h - gen.surfaceHeight(x + 24, z)) > 26;
+        case 'deep-ocean':
+          return h < SEA_LEVEL - 30;
+        case 'island':
+          return gen.isOceanRegion(x, z) && h > SEA_LEVEL + 4;
+        case 'plateau':
+          return (
+            h > SEA_LEVEL + 14 &&
+            gen.surfaceHeight(x + 12, z) === h &&
+            gen.surfaceHeight(x, z + 12) === h &&
+            Math.abs(h - gen.surfaceHeight(x + 40, z)) > 9
+          );
+        case 'jungle':
+          return biome === Biome.Jungle && h > SEA_LEVEL + 20;
+        case 'desert':
+          return biome === Biome.Desert;
+      }
+    };
+
+    for (let radius = 0; radius <= maxRadius; radius += 24) {
+      const steps = Math.max(8, Math.floor(radius / 12));
+      for (let i = 0; i < steps; i++) {
+        const angle = (i / steps) * Math.PI * 2;
+        const x = Math.round(Math.cos(angle) * radius);
+        const z = Math.round(Math.sin(angle) * radius);
+        if (!matches(x, z)) continue;
+        this.world.ensureLoadedAround(x, z, 2);
+        this.player.spawnAt(this.world, x, z);
+        this.player.applyToCamera(this.camera);
+        return {
+          x,
+          y: Math.round(this.player.position.y),
+          z,
+          biome: gen.biomeAt(x, z),
+          height: gen.surfaceHeight(x, z),
+        };
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Finds a feature, then stands back from it and looks at it.
+   *
+   * Standing *on* a mountain shows you a rock face at arm's length, which is how
+   * the first set of terrain screenshots came out. A landscape has to be viewed
+   * from outside itself, so this backs off around the feature until it finds a
+   * vantage point that is both lower than the target and not inside it, then
+   * aims the camera back.
+   */
+  debugViewFeature(
+    want: 'mountain' | 'canyon' | 'deep-ocean' | 'island' | 'plateau' | 'jungle' | 'desert',
+    distance = 90,
+    rise = 8,
+  ): { x: number; z: number; height: number; fromX: number; fromZ: number; drop: number } | null {
+    const found = this.debugFindTerrain(want, 5000);
+    if (!found) return null;
+
+    const gen = this.world.gen;
+    let best: { x: number; z: number; drop: number } | null = null;
+    // Try a ring of vantage points and keep the one with the best drop to the
+    // target, so the feature stands above the horizon rather than level with it.
+    for (let i = 0; i < 16; i++) {
+      const angle = (i / 16) * Math.PI * 2;
+      const vx = Math.round(found.x + Math.cos(angle) * distance);
+      const vz = Math.round(found.z + Math.sin(angle) * distance);
+      const vh = gen.surfaceHeight(vx, vz);
+      // A vantage point under water is no use: the camera would be submerged.
+      if (vh <= SEA_LEVEL) continue;
+      const drop = found.height - vh;
+      if (!best || drop > best.drop) best = { x: vx, z: vz, drop };
+    }
+    // Nowhere dry to stand: shoot from above the target instead of giving up.
+    const from = best ?? { x: found.x, z: found.z, drop: 0 };
+
+    this.world.ensureLoadedAround(from.x, from.z, 2);
+    this.player.spawnAt(this.world, from.x, from.z);
+    this.player.position.y += rise;
+    this.player.velocity.set(0, 0, 0);
+
+    // Forward is (-sin yaw, 0, -cos yaw), so this yaw points at the feature.
+    this.player.yaw = Math.atan2(-(found.x - from.x), -(found.z - from.z));
+    // Pitch from the actual geometry: the angle to the top of the feature.
+    const horizontal = Math.max(1, Math.hypot(found.x - from.x, found.z - from.z));
+    this.player.pitch = Math.atan2(found.height - this.player.position.y, horizontal) * 0.7;
+    this.player.applyToCamera(this.camera);
+
+    return { x: found.x, z: found.z, height: found.height, fromX: from.x, fromZ: from.z, drop: from.drop };
+  }
+
+  /**
+   * Puts the game back into play if it has slipped out of it.
+   *
+   * Losing the pointer lock pauses to the menu, which is right for a player
+   * pressing Esc but ruinous for a test: `step` stops running, so combat,
+   * mining and aiming all go silently dead while debug readouts that do not
+   * depend on the mode carry on answering. A browser can drop the lock on its
+   * own after a long run of synthetic input, which made whole sections of the
+   * suite fail in a cluster with no obvious cause.
+   */
+  debugEnsurePlaying(): string {
+    if (this.mode === 'menu' || this.mode === 'dead') {
+      this.debugRevive();
+      this.startPlaying();
+    }
+    return this.mode;
+  }
+
+  /** What fluid the player is standing in, for diagnosing the lava path. */
+  debugPlayerFluid(): Record<string, unknown> {
+    return {
+      inWater: this.player.inWater,
+      inLava: this.player.inLava,
+      dead: this.player.dead,
+      mode: this.mode,
+      invulnerable: this.invulnerable,
+      y: Number(this.player.position.y.toFixed(2)),
+      feet: this.world.getBlock(
+        Math.floor(this.player.position.x),
+        Math.floor(this.player.position.y + 0.4),
+        Math.floor(this.player.position.z),
+      ),
+    };
+  }
+
+  /** Returns the player to open ground above sea level, after a test dropped them. */
+  debugReturnToSurface(): number {
+    const x = Math.floor(this.player.position.x);
+    const z = Math.floor(this.player.position.z);
+    this.world.ensureLoadedAround(x, z, 2);
+    this.player.spawnAt(this.world, x, z);
+    this.player.applyToCamera(this.camera);
+    return Math.round(this.player.position.y);
+  }
+
+  /** The current top-level mode, for diagnosing a stalled suite. */
+  debugMode(): string {
+    return this.mode;
+  }
+
+  /** Terrain shape around the player, for tests. */
+  debugTerrainReport(): Record<string, unknown> {
+    const gen = this.world.gen;
+    let low = Infinity;
+    let high = -Infinity;
+    const biomes = new Set<number>();
+    for (let dz = -300; dz <= 300; dz += 20) {
+      for (let dx = -300; dx <= 300; dx += 20) {
+        const x = Math.floor(this.player.position.x) + dx;
+        const z = Math.floor(this.player.position.z) + dz;
+        const h = gen.surfaceHeight(x, z);
+        if (h < low) low = h;
+        if (h > high) high = h;
+        biomes.add(gen.biomeAt(x, z));
+      }
+    }
+    return {
+      worldHeight: CHUNK_SY,
+      seaLevel: SEA_LEVEL,
+      low,
+      high,
+      relief: high - low,
+      biomes: biomes.size,
+      playerY: Math.round(this.player.position.y),
+    };
+  }
+
+  /**
+   * Drops the player into the nearest lava, to prove it burns.
+   *
+   * Searches the loaded world rather than the generator, so it only succeeds
+   * where lava has actually been meshed into the chunk the player is standing
+   * over — which is the state the damage path has to work in.
+   */
+  debugStandInLava(): boolean {
+    const px = Math.floor(this.player.position.x);
+    const pz = Math.floor(this.player.position.z);
+    for (let radius = 0; radius < 60; radius += 2) {
+      for (let angle = 0; angle < 16; angle++) {
+        const x = px + Math.round(Math.cos((angle / 16) * Math.PI * 2) * radius);
+        const z = pz + Math.round(Math.sin((angle / 16) * Math.PI * 2) * radius);
+        for (let y = 6; y < 20; y++) {
+          if (this.world.getBlock(x, y, z) !== Block.Lava) continue;
+          this.player.position.set(x + 0.5, y + 0.1, z + 0.5);
+          this.player.velocity.set(0, 0, 0);
+          this.player.applyToCamera(this.camera);
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  /** Lifts the player straight up, for a wide view of the terrain below. */
+  debugRise(blocks: number): number {
+    this.player.position.y += blocks;
+    this.player.velocity.set(0, 0, 0);
+    this.player.applyToCamera(this.camera);
+    return Math.round(this.player.position.y);
   }
 
   /** Opens the character sheet, for inspecting what it renders. */

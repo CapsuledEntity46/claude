@@ -156,6 +156,21 @@ async function waitForIdle(timeoutMs = 20_000) {
  * gesture helpers compare this counter across an attempt so they can retry rather
  * than assert against the previous stroke's direction.
  */
+/**
+ * Puts the game back into play if the browser has dropped the pointer lock.
+ *
+ * Losing the lock pauses to the menu and stops the simulation, so every
+ * input-driven check after that point fails while the debug readouts keep
+ * answering normally — mining, the thrust animation and bow aiming all went down
+ * together with nothing to say why. Called at the top of each section that
+ * drives the mouse or keyboard.
+ */
+async function ensurePlaying() {
+  const mode = await page.evaluate(() => window.__voxelquest.debugEnsurePlaying());
+  if (mode !== 'playing') console.log(`  note  game is in '${mode}' mode, not playing`);
+  await page.mouse.move(CENTER_X, CENTER_Y);
+}
+
 async function attacksStarted() {
   const d = await diagnostics();
   return d.started ?? 0;
@@ -529,6 +544,7 @@ try {
   check('orbs are collected into XP', (collected?.xp ?? 0) > 0, `xp ${collected?.xp}`);
 
   console.log('\n[melee gestures]');
+  await ensurePlaying();
   // Melee is driven by mouse gestures now: hold the button, move the mouse, and the
   // direction chooses the attack. The X key no longer switches swing and thrust.
   await setupArena(2.6);
@@ -663,6 +679,7 @@ try {
   );
 
   console.log('\n[ranged and spells]');
+  await ensurePlaying();
   await page.evaluate(() => {
     window.__voxelquest.debugRefill();
     window.__voxelquest.debugSelectHotbarByItem('shortbow');
@@ -719,6 +736,7 @@ try {
   });
 
   console.log('\n[mining and building]');
+  await ensurePlaying();
   // Stable arena and no attackers: mining progress resets whenever the targeted
   // block changes, so a jostled player would never finish a block.
   await page.evaluate(() => {
@@ -787,6 +805,7 @@ try {
   await page.evaluate(() => window.__voxelquest.debugSetInvulnerable(false));
 
   console.log('\n[view model]');
+  await ensurePlaying();
   // The held item must be visible and, crucially, animate *differently* for a
   // swing than for a thrust — that was the whole point of the feedback.
   await setupArena(2.4);
@@ -1319,6 +1338,7 @@ try {
   );
 
   console.log('\n[shaped blocks]');
+  await ensurePlaying();
   await page.evaluate(() => {
     const g = window.__voxelquest;
     g.debugSetInvulnerable(true);
@@ -1374,6 +1394,7 @@ try {
   }
 
   console.log('\n[mana spells]');
+  await ensurePlaying();
   await page.evaluate(() => {
     const g = window.__voxelquest;
     g.debugClearEnemies();
@@ -1415,6 +1436,7 @@ try {
   check('mana spells do not consume spell slots', (await page.evaluate(() => window.__voxelquest.debugSpellSlots()))[0] > 0);
 
   console.log('\n[aim down sights]');
+  await ensurePlaying();
   await page.evaluate(() => window.__voxelquest.debugSelectHotbarByItem('shortbow'));
   await page.waitForTimeout(300);
   const beforeAim = await page.evaluate(() => window.__voxelquest.debugAim());
@@ -1432,6 +1454,7 @@ try {
   check('the arc disappears when not aiming', afterAim.arcVisible === false);
 
   console.log('\n[character, skills and gold]');
+  await ensurePlaying();
   const character = await page.evaluate(() => {
     const g = window.__voxelquest;
     // A build that can actually reach a capstone: Strength 15 clears the gate.
@@ -1696,6 +1719,73 @@ try {
   await page.evaluate(() => window.__voxelquest.debugCloseSheet());
   await page.waitForTimeout(300);
 
+  console.log('\n[terrain]');
+  await ensurePlaying();
+  const terrain = await page.evaluate(() => window.__voxelquest.debugTerrainReport());
+  check(
+    'the world is tall enough for real relief',
+    terrain.worldHeight >= 140 && terrain.seaLevel > 50,
+    `height ${terrain.worldHeight}, sea level ${terrain.seaLevel}`,
+  );
+  check(
+    'terrain around the player varies by tens of blocks',
+    terrain.relief > 20,
+    `${terrain.relief} blocks between the lowest and highest column nearby`,
+  );
+  check('more than one biome is reachable nearby', terrain.biomes > 1, `${terrain.biomes} biomes within 300 blocks`);
+
+  // Features have to be findable in a real world, not just in the generator.
+  const found = await page.evaluate(() => {
+    const g = window.__voxelquest;
+    const out = {};
+    for (const want of ['mountain', 'canyon', 'deep-ocean', 'island', 'plateau', 'jungle', 'desert']) {
+      const at = g.debugFindTerrain(want, 3000);
+      out[want] = at ? at.height : null;
+    }
+    return out;
+  });
+  for (const [want, height] of Object.entries(found)) {
+    check(`a ${want} exists within 3000 blocks`, height !== null, height === null ? 'not found' : `height ${height}`);
+  }
+
+  // Lava has to hurt, or the deep tunnels are scenery with no stakes.
+  const lava = await page.evaluate(async () => {
+    const g = window.__voxelquest;
+    // The seven feature searches above teleport the player repeatedly and run
+    // long evaluations; make sure the simulation is still running before timing
+    // anything, or the damage simply never ticks.
+    g.debugEnsurePlaying();
+    g.debugSetInvulnerable(false);
+    g.debugRevive();
+    g.debugRefill();
+    const before = g.debugSnapshot().hp;
+    const standing = g.debugStandInLava();
+    if (!standing) return { standing: false };
+    // Sampled over the wait rather than only at the end: the lowest reading is
+    // what matters, since health regenerates and could mask the burn.
+    let lowest = before;
+    let fluid = null;
+    for (let i = 0; i < 16; i++) {
+      await new Promise((r) => setTimeout(r, 120));
+      if (i === 1) fluid = g.debugPlayerFluid();
+      lowest = Math.min(lowest, g.debugSnapshot().hp);
+    }
+    g.debugSetInvulnerable(true);
+    g.debugRevive();
+    g.debugReturnToSurface();
+    return { standing: true, before, lowest, fluid };
+  });
+  if (lava.standing) {
+    check(
+      'standing in lava burns the player',
+      lava.lowest < lava.before,
+      `hp ${lava.before} -> ${lava.lowest} | ${JSON.stringify(lava.fluid)}`,
+    );
+  } else {
+    console.log('  note  no lava reachable from this spawn; skipping the burn check');
+  }
+  await page.waitForTimeout(400);
+
   console.log('\n[minimap]');
   const minimapDrawn = await page.evaluate(() => {
     const canvas = document.querySelector('.minimap-canvas');
@@ -1713,6 +1803,7 @@ try {
   check('the compass is present', compassDrawn);
 
   console.log('\n[save/load]');
+  await ensurePlaying();
   await page.keyboard.press('F5');
   await page.waitForTimeout(900);
   await page.keyboard.press('F9');
@@ -1721,6 +1812,7 @@ try {
   check('world still alive after save/load', loaded.chunks > 0 && loaded.triangles > 1000, `${loaded.chunks} chunks, ${loaded.triangles} tris`);
 
   console.log('\n[character sheet]');
+  await ensurePlaying();
   await page.keyboard.press('Tab');
   await page.waitForTimeout(400);
   const sheetVisible = await page.evaluate(() => !document.getElementById('sheet').classList.contains('hidden'));
@@ -1744,6 +1836,21 @@ try {
   // equipped slots, and run mid-suite it silently broke the bow checks that followed
   // by swapping the weapon out from under them.
   console.log('\n[enemy AI]');
+  await ensurePlaying();
+  // Level ground first. These checks are about whether the AI commits to an
+  // attack, not about whether it can climb; the preceding save/load section
+  // leaves the player wherever that world put them, and on real terrain that is
+  // often a slope with an enemy spawned halfway inside it. Before the terrain
+  // had relief this happened to work.
+  await page.evaluate(() => {
+    const g = window.__voxelquest;
+    g.debugSetInvulnerable(true);
+    g.debugClearEnemies();
+    g.debugFlattenArena(12);
+    g.debugLook(0, 0);
+    g.debugRevive();
+  });
+  await page.waitForTimeout(600);
 
   // A melee enemy that has closed to reach must actually swing.
   //
@@ -1834,6 +1941,7 @@ try {
   });
 
   console.log('\n[full loadout]');
+  await ensurePlaying();
   const loadout = await page.evaluate(() => window.__voxelquest.debugGiveAll());
   check(
     'the full loadout hands over every item',

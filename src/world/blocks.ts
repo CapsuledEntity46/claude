@@ -44,6 +44,14 @@ export const enum Block {
   MossyBrick = 28,
   CrackedBrick = 29,
   Rubble = 30,
+
+  // --- Tectonic terrain ---
+  /** Deep-earth lava, filling the tunnels below the cave layer. */
+  Lava = 31,
+  /** Banded canyon rock, the badlands' surface and strata. */
+  Terracotta = 32,
+  /** A paler band, so canyon walls read as layered rather than flat. */
+  PaleTerracotta = 33,
 }
 
 export type RGB = readonly [number, number, number];
@@ -169,6 +177,20 @@ export const BLOCKS: readonly BlockDef[] = (() => {
   put(def(Block.CrackedBrick, 'Cracked Brick', '🧱', 1.8, [0.38, 0.36, 0.34]));
   put(def(Block.Rubble, 'Rubble', '🪨', 0.9, [0.4, 0.38, 0.36]));
 
+  // Lava behaves like water for movement — you fall into it, not onto it — but
+  // lights its own tunnels. Emissive so the caves it fills are visible without
+  // the player carrying a torch into them.
+  put(
+    def(Block.Lava, 'Lava', '\u{1F525}', 0, [0.95, 0.38, 0.09], [1, 0.52, 0.12], [0.7, 0.24, 0.05], {
+      solid: false,
+      opaque: false,
+      material: false,
+      emissive: 0.85,
+    }),
+  );
+  put(def(Block.Terracotta, 'Terracotta', '\u{1F9F1}', 1.4, [0.69, 0.34, 0.19], [0.72, 0.37, 0.21], [0.62, 0.3, 0.16]));
+  put(def(Block.PaleTerracotta, 'Pale Terracotta', '\u{1F3FA}', 1.4, [0.82, 0.58, 0.36], [0.85, 0.62, 0.4], [0.76, 0.52, 0.31]));
+
   // Fill any accidental gaps so lookups never return undefined.
   for (let i = 0; i < list.length; i++) if (!list[i]) list[i] = AIR;
   return list;
@@ -197,7 +219,7 @@ export function isAir(id: number): boolean {
  * must still be minable, and water blocks nothing and must not be.
  */
 export function isTargetable(id: number): boolean {
-  return id !== Block.Air && id !== Block.Water;
+  return id !== Block.Air && id !== Block.Water && id !== Block.Lava;
 }
 
 /** The collision boxes a block occupies, or an empty list if it blocks nothing. */
@@ -260,4 +282,6 @@ export const PLACEABLE: readonly Block[] = [
   Block.Shingles,
   Block.DungeonBrick,
   Block.MossyBrick,
+  Block.Terracotta,
+  Block.PaleTerracotta,
 ];

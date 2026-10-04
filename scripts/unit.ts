@@ -80,13 +80,13 @@ import {
 } from '../src/player/Skills';
 import { goldForKill, rollGold } from '../src/entities/loot';
 import { ARCHETYPES } from '../src/entities/archetypes';
-import { Block, blockCollisionBoxes, blockDef, isLightSource, isTargetable } from '../src/world/blocks';
+import { Block, blockCollisionBoxes, blockDef, isLightSource, isTargetable, isSolid} from '../src/world/blocks';
 import { facingFromYaw, makeMeta, metaIsOpen, metaIsUpper, shapeBoxes } from '../src/world/shapes';
 import { BAG_CAPACITY, tabForItem } from '../src/player/Inventory';
 import { CHUNK_SX, CHUNK_SY, CHUNK_SZ, Chunk, voxelIndex } from '../src/world/Chunk';
 import { meshChunk } from '../src/world/ChunkMesher';
 import { mulberry32 } from '../src/world/noise';
-import { TerrainGen } from '../src/world/TerrainGen';
+import { Biome, SEA_LEVEL, TerrainGen } from '../src/world/TerrainGen';
 import { TimeOfDay } from '../src/world/TimeOfDay';
 import { Weather } from '../src/world/Weather';
 
@@ -2251,6 +2251,240 @@ section('gold drops');
   if (prey) {
     check('passive creatures carry no purse', goldForKill(prey, 9) === 0 && rollGold(prey, 9, () => 0) === 0);
   }
+}
+
+
+// -------------------------------------------------------- terrain shaping
+
+section('terrain shaping');
+
+{
+  const gen = new TerrainGen(20260917);
+  // One sample grid, reused by every check below. Terrain claims are statistical
+  // — "mountains exist" is a statement about a region, not about a column — and
+  // regenerating the grid per check would make the section crawl.
+  const SPAN = 1500;
+  const STEP = 10;
+  const cols: { x: number; z: number; h: number; biome: Biome }[] = [];
+  for (let z = -SPAN; z <= SPAN; z += STEP) {
+    for (let x = -SPAN; x <= SPAN; x += STEP) {
+      cols.push({ x, z, h: gen.surfaceHeight(x, z), biome: gen.biomeAt(x, z) });
+    }
+  }
+  const share = (predicate: (c: (typeof cols)[number]) => boolean): number =>
+    cols.filter(predicate).length / cols.length;
+  const heights = cols.map((c) => c.h);
+  const maxH = Math.max(...heights);
+  const minH = Math.min(...heights);
+
+  check(
+    'every column stays inside the world',
+    heights.every((h) => h >= 1 && h < CHUNK_SY),
+    `${minH}..${maxH} in a ${CHUNK_SY} tall world`,
+  );
+
+  // Relief is the whole point of the rewrite: the old generator topped out
+  // around 63 with the sea at 27, which left no room for a mountain.
+  check('terrain reaches mountain height', maxH > 120, `tallest column ${maxH}`);
+  check('terrain also goes deep', minH < SEA_LEVEL - 25, `deepest column ${minH}`);
+  check(
+    'the world is neither all land nor all sea',
+    share((c) => c.h <= SEA_LEVEL) > 0.15 && share((c) => c.h <= SEA_LEVEL) < 0.7,
+    `${(share((c) => c.h <= SEA_LEVEL) * 100).toFixed(0)}% below sea level`,
+  );
+  check(
+    'deep ocean exists, not just shelf',
+    share((c) => c.h < SEA_LEVEL - 28) > 0.004,
+    `${(share((c) => c.h < SEA_LEVEL - 28) * 100).toFixed(2)}% of columns 28+ below`,
+  );
+
+  // Every biome has to actually occur, or the shaping tied to it is dead code.
+  // Desert, badlands and jungle carry the dunes, canyons and pillars; the first
+  // tuning pass left them at well under 1% each, which is indistinguishable
+  // from absent.
+  for (const [biome, name] of [
+    [Biome.Ocean, 'ocean'],
+    [Biome.Plains, 'plains'],
+    [Biome.Forest, 'forest'],
+    [Biome.Desert, 'desert'],
+    [Biome.Badlands, 'badlands'],
+    [Biome.Jungle, 'jungle'],
+    [Biome.Tundra, 'tundra'],
+    [Biome.Mountains, 'mountains'],
+    [Biome.Beach, 'beach'],
+  ] as [Biome, string][]) {
+    const got = share((c) => c.biome === biome);
+    check(`${name} covers a usable share of the world`, got > 0.004, `${(got * 100).toFixed(1)}%`);
+  }
+
+  check(
+    'mountains are classified where the ground is high',
+    cols.filter((c) => c.h > 112).every((c) => c.biome === Biome.Mountains),
+  );
+  check(
+    'ocean columns are all under water',
+    cols.filter((c) => c.biome === Biome.Ocean).every((c) => c.h <= SEA_LEVEL),
+  );
+
+  // Ranges have to be connected rather than isolated spikes: a tall column
+  // should usually have tall ground some way off in at least one direction.
+  check(
+    'high ground forms ranges rather than isolated spikes',
+    (() => {
+      const peaks = cols.filter((c) => c.h > 112);
+      if (peaks.length < 10) return false;
+      const connected = peaks.filter((c) =>
+        [
+          [60, 0],
+          [-60, 0],
+          [0, 60],
+          [0, -60],
+        ].some(([dx, dz]) => gen.surfaceHeight(c.x + dx, c.z + dz) > 95),
+      );
+      return connected.length / peaks.length > 0.7;
+    })(),
+  );
+
+  // Plateaus show up as dead-flat runs. Terracing is the feature most easily
+  // got wrong: blending halfway to a quantised height produces a staircase of
+  // little steps instead of a few real plateaus.
+  check(
+    'plateaus produce genuinely flat tops',
+    (() => {
+      let longest = 0;
+      for (let z = -SPAN; z <= SPAN; z += 211) {
+        let run = 1;
+        let prev = gen.surfaceHeight(-SPAN, z);
+        for (let x = -SPAN + 1; x <= SPAN; x++) {
+          const h = gen.surfaceHeight(x, z);
+          if (h === prev) run++;
+          else {
+            longest = Math.max(longest, run);
+            run = 1;
+          }
+          prev = h;
+        }
+      }
+      return longest > 20;
+    })(),
+  );
+
+  // Dunes must stay smooth. Terracing used to apply to deserts as well, which
+  // quantised them into benches with sheer one-block faces.
+  check(
+    'deserts stay smooth, with no cliffs in the sand',
+    (() => {
+      const dunes = cols.filter((c) => c.biome === Biome.Desert);
+      if (dunes.length < 20) return false;
+      // Mean step over one block, which is what "smooth" means for sand.
+      let total = 0;
+      let n = 0;
+      for (const c of dunes) {
+        total += Math.abs(gen.surfaceHeight(c.x + 1, c.z) - c.h);
+        n++;
+      }
+      return total / n < 0.8;
+    })(),
+  );
+
+  check(
+    'canyons cut deep into the badlands',
+    (() => {
+      const badlands = cols.filter((c) => c.biome === Biome.Badlands);
+      if (badlands.length < 20) return false;
+      // The drop across a canyon rim, sampled over a short distance.
+      return badlands.some((c) => Math.abs(gen.surfaceHeight(c.x + 20, c.z) - c.h) > 25);
+    })(),
+  );
+
+  check(
+    'islands rise out of open ocean',
+    share((c) => gen.isOceanRegion(c.x, c.z) && c.h > SEA_LEVEL + 3) > 0.0005,
+    `${(share((c) => gen.isOceanRegion(c.x, c.z) && c.h > SEA_LEVEL + 3) * 100).toFixed(2)}% of columns`,
+  );
+
+  // Determinism, which everything else depends on: the save format stores only
+  // a seed.
+  check(
+    'the same seed gives the same world',
+    (() => {
+      const a = new TerrainGen(777);
+      const b = new TerrainGen(777);
+      return cols.slice(0, 400).every((c) => a.surfaceHeight(c.x, c.z) === b.surfaceHeight(c.x, c.z));
+    })(),
+  );
+  check(
+    'different seeds give different worlds',
+    (() => {
+      const a = new TerrainGen(777);
+      const b = new TerrainGen(778);
+      return cols.slice(0, 400).some((c) => a.surfaceHeight(c.x, c.z) !== b.surfaceHeight(c.x, c.z));
+    })(),
+  );
+}
+
+section('underground features');
+
+{
+  const gen = new TerrainGen(4242);
+  let lava = 0;
+  let water = 0;
+  let terracotta = 0;
+  let airPockets = 0;
+  let aboveSeaWater = 0;
+
+  for (let cx = 0; cx < 6; cx++) {
+    for (let cz = 0; cz < 6; cz++) {
+      const chunk = new Chunk(cx * 11, cz * 11);
+      gen.generate(chunk);
+      for (let y = 0; y < CHUNK_SY; y++) {
+        for (let z = 0; z < CHUNK_SZ; z++) {
+          for (let x = 0; x < CHUNK_SX; x++) {
+            const id = chunk.get(x, y, z);
+            if (id === Block.Lava) lava++;
+            else if (id === Block.Water) {
+              water++;
+              if (y > SEA_LEVEL) aboveSeaWater++;
+            } else if (id === Block.Terracotta || id === Block.PaleTerracotta) terracotta++;
+            else if (id === Block.Air && y > 2 && y < 40 && chunk.get(x, y + 1, z) !== Block.Air) airPockets++;
+          }
+        }
+      }
+    }
+  }
+
+  check('lava tunnels are carved deep underground', lava > 200, `${lava} lava voxels in 36 chunks`);
+  check('water generates', water > 500, `${water} water voxels`);
+  check('canyon strata are laid down', terracotta > 100, `${terracotta} banded rock voxels`);
+  check('caves hollow the rock out', airPockets > 500, `${airPockets} enclosed air voxels`);
+  // Water above the waterline would mean a flooded hillside, which is what a
+  // badly placed underground river looks like from outside.
+  check('no water is left stranded above sea level', aboveSeaWater === 0, `${aboveSeaWater} voxels`);
+
+  check(
+    'lava is a liquid, not a floor',
+    (() => {
+      // isSolid decides whether you can stand on it; lava must not count, or
+      // the deep tunnels would be walkable paths rather than a hazard.
+      return !isSolid(Block.Lava) && !isSolid(Block.Water) && isSolid(Block.Terracotta);
+    })(),
+  );
+
+  check(
+    'chunk carving is independent of generation order',
+    (() => {
+      const a = new Chunk(3, -4);
+      const b = new Chunk(3, -4);
+      const forward = new TerrainGen(555);
+      const backward = new TerrainGen(555);
+      // Touch unrelated columns first, so the caches are in different states.
+      backward.surfaceHeight(900, 900);
+      backward.surfaceHeight(-900, -900);
+      forward.generate(a);
+      backward.generate(b);
+      return a.voxels.every((v, i) => v === b.voxels[i]);
+    })(),
+  );
 }
 
 console.log(`\n${passed} passed, ${failures.length} failed`);

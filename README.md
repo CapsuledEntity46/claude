@@ -163,6 +163,66 @@ a top or bottom half from where on the face you clicked, so you can run a
 staircase downwards without walking round to the other side. Doors open on
 right-click rather than stacking another door against themselves.
 
+## The world
+
+Terrain is shaped in the spirit of the **Tectonic** world generator: relief at a
+scale you travel through rather than step over. The world is **160 blocks tall
+with the sea at 62**, which leaves ~60 blocks of water below and ~95 above — the
+old 72-with-sea-at-27 had room for neither an ocean nor a mountain.
+
+A height is not one noise field but a negotiation between several, each answering
+a different question:
+
+| Field | Question |
+| --- | --- |
+| `continent` | ocean or land, at the scale of a thousand blocks? |
+| `erosion` | how worn down is this region? |
+| `ranges` | where do the mountain spines run? |
+| `terrace` | where does ground step up in plateaus instead of sloping? |
+
+Composing them is what gives terrain *regions* — a coastal plain that climbs into
+foothills and then into a range. A single fbm field, however many octaves, always
+reads as the same texture repeated to the horizon.
+
+What that produces, measured over a 6000-block square (`npm run survey`):
+
+- **Continents and oceans.** 37% of columns are below the waterline, with
+  continents roughly 1200 blocks across, so crossing one is a journey.
+- **Deep oceans** that drop into the stone layer — the floor reaches y=11 — with
+  trench noise giving them valleys rather than a flat bowl.
+- **Islands** out past the shelf, from ridged noise raised to a power so they stay
+  small and distinct.
+- **Mountain ranges** to y=152, connected into chains by ridged noise rather than
+  scattered as lumps. Steepest 40-block relief measured: **111 blocks**.
+- **Plateaus** with flat tops and ramps up their sides.
+- **Canyons** carved *down* through banded rock, with strata that line up across a
+  whole wall because the bands come from world y rather than from depth.
+- **Dunes** in the deserts, from three scales of smooth hump.
+- **Jungle pillars**, two thicknesses of them.
+- **Wetlands** pressed to the waterline and pitted with ponds.
+- **Underground rivers**, because terrain this tall leaves no room for a surface
+  river to cross a range — the water goes under it instead.
+- **Lava tunnels** deeper still, on a channel field offset far from the water one
+  so the two networks never meet and drain into each other. Lava burns.
+
+Three things this cost that are worth knowing:
+
+- **The mesher now skips the empty sky** above each chunk's tallest voxel. Chunks
+  are full-height columns, and scanning 160 levels where terrain occupies 40 is
+  most of the work for nothing. This is what paid for the taller world: meshing is
+  *cheaper* at 160 than it was at 72. It derives the top from the voxel data
+  rather than the height map on purpose — the map is a cache, and trusting it made
+  a chunk assembled voxel-by-voxel mesh as empty.
+- **View distance went from 6 chunks to 9.** At 6 the far plane sat around 75
+  blocks, which is less than the height of one mountain: ranges were something you
+  stood on rather than something you saw, and the whole point of the taller world
+  was lost to fog.
+- **Terracing must be nearly all-or-nothing.** Blending halfway towards a
+  quantised height does not give a gentler plateau, it gives twice as many steps
+  half as tall — which turned every grassy hillside into a flight of one-block
+  stairs. It is a smoothstep now, and switched off entirely for deserts and
+  wetlands, whose whole character is smoothness.
+
 ## Enemies
 
 Each archetype has its own silhouette. Goblins are hunched and spindly, with swept
@@ -624,9 +684,11 @@ Some notes on the parts that are less obvious than they look:
 ## Tests
 
 ```bash
-npm test            # typecheck + 304 unit checks
+npm test            # typecheck + 334 unit checks
 npm run test:unit   # damage model, mesher, terrain determinism, inventory
 npm run test:smoke  # boots the real build in headless Chromium and plays it
+npm run survey      # terrain statistics over a 6000-block square
+npm run shots:terrain  # photographs each terrain feature
 ```
 
 The unit checks assert the *design*, not just the code: that a sword is not built
@@ -727,6 +789,9 @@ streaming, spawning, or aim.
 - No pathfinding — enemies steer straight at you, step up one block, and hop at
   walls. Fine in the open; they can get stuck on complex structures.
 - Terrain is one continuous overworld, with no authored structures in it.
+- The world ceiling is 160 blocks, which is the practical limit of the Uint8
+  height map. Mountains reach ~152, so there is little headroom left for taller
+  terrain without widening that array.
 - Lighting is direct only. Placed torches light their surroundings through a small
   pool of point lights rather than a propagating light level, so deep caves stay
   dark no matter how many torches are in them, and only the nearest few planted

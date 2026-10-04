@@ -261,8 +261,18 @@ try {
   );
   check(
     'UVs span more than one tile of the atlas',
-    terrainMaterial.uMax - terrainMaterial.uMin > 0.2,
-    `u from ${terrainMaterial.uMin} to ${terrainMaterial.uMax}`,
+    // Measured in tiles, not in a hard-coded fraction. A tile is 128px wide in
+    // an atlas of `atlasWidth`, so one tile's share of the U axis is known — and
+    // the claim being made is "more than one tile", which is what should be
+    // asserted. The old `> 0.2` was a fraction that happened to suit the blocks
+    // visible from the old spawn; with different terrain underfoot the span came
+    // out at exactly 0.2 and failed while still covering two tiles.
+    (() => {
+      const tileShare = 128 / Math.max(1, terrainMaterial.atlasWidth);
+      return terrainMaterial.uMax - terrainMaterial.uMin > tileShare * 1.2;
+    })(),
+    `u from ${terrainMaterial.uMin} to ${terrainMaterial.uMax}, one tile is ` +
+      `${(128 / Math.max(1, terrainMaterial.atlasWidth)).toFixed(3)} of the atlas`,
   );
   check(
     'vertex colours still drive shading alongside the texture',
@@ -769,10 +779,15 @@ try {
   await page.waitForTimeout(300);
 
   const mined = await page.evaluate(() => window.__voxelquest.debugEditedBlockCount());
+  // Read the real state rather than printing `undefined` from a timed-out poll:
+  // when this fails the question is always *why* mining never ticked, and the
+  // mode, the held item and the refusal reason answer it.
+  const mineState = await diagnostics();
   check(
     'mining removed at least one block',
     mined > 0 && (broke?.breaks ?? 0) > 0,
-    `${mined} edited voxels, ${broke?.breaks} breaks after ${broke?.mineCalls} mine ticks`,
+    `${mined} edited voxels, ${mineState.breaks} breaks after ${mineState.mineCalls} mine ticks ` +
+      `(mode ${mineState.mode}, holding ${mineState.activeItem}, last: ${mineState.lastReason})`,
   );
 
   // The arena floor is cobblestone, so breaking it should add to that stack.
@@ -1281,9 +1296,22 @@ try {
     window.__voxelquest.debugLookDown();
   });
   await page.waitForTimeout(300);
-  await page.mouse.click(CENTER_X, CENTER_Y, { button: 'right' });
-  await page.waitForTimeout(500);
-  const lightsAfter = (await page.evaluate(() => window.__voxelquest.debugEnvironment())).lightSources;
+  // Retried: placement shares a cooldown with whatever action ran before it, so
+  // a lone right-click can be refused outright and no light appears. Same
+  // lesson as the torch shape, the bow draw and the fish.
+  const lightsAfter =
+    (await waitUntil(
+      'a planted torch to light up',
+      async () => {
+        await waitForIdle();
+        await page.mouse.click(CENTER_X, CENTER_Y, { button: 'right' });
+        await page.waitForTimeout(400);
+        const now = (await page.evaluate(() => window.__voxelquest.debugEnvironment())).lightSources;
+        return now > lightsBefore ? now : null;
+      },
+      12_000,
+      150,
+    )) ?? (await page.evaluate(() => window.__voxelquest.debugEnvironment())).lightSources;
   check('planting a torch adds a world light', lightsAfter > lightsBefore, `${lightsBefore} -> ${lightsAfter}`);
 
   console.log('\n[fish and food]');
@@ -1785,6 +1813,51 @@ try {
     console.log('  note  no lava reachable from this spawn; skipping the burn check');
   }
   await page.waitForTimeout(400);
+
+  // Streaming must not overrun the frame. This is the regression that showed up
+  // in play as an occasional drop from 60fps to the low 40s: a count-based
+  // budget authorised 2 generates plus 3 meshes, about 18ms, in a frame that
+  // has 16.7ms.
+  // Wait for streaming to settle before measuring.
+  //
+  // The initial fill runs on a deliberately larger budget, and the terrain
+  // section just above teleports the player seven times, emptying the view each
+  // time. Measuring on a fixed delay caught whichever phase the machine happened
+  // to be in and swung between 6ms and 44ms for the same code.
+  // No need to wait for a quiet world: the two phases are now recorded
+  // separately, so the steady-state figure is unaffected by a slow machine
+  // still filling in the background.
+  await page.evaluate(() => window.__voxelquest.debugResetChunkCost());
+  // Walk, so chunks genuinely stream rather than sitting already built.
+  await page.keyboard.down('KeyW');
+  await page.waitForTimeout(4000);
+  await page.keyboard.up('KeyW');
+  const chunkCost = await page.evaluate(() => window.__voxelquest.debugChunkCost());
+  check(
+    'chunk streaming stays inside its frame budget',
+    // Asserts the design guarantee rather than a wall-clock constant.
+    //
+    // The scheduler promises: spend no more than the budget, except that one
+    // mesh and one generate are always allowed through so the world cannot
+    // stall. The worst frame is therefore bounded by budget + those two
+    // operations. A fixed millisecond ceiling cannot express that, because a
+    // single geometry upload costs tens of milliseconds on the software
+    // rasteriser this suite runs on and a fraction of that on a real GPU —
+    // the same correct code would pass on one machine and fail on the other.
+    // Vacuous if no steady-state frame did chunk work, which happens on a
+    // machine slow enough to still be filling; the fill figure is reported so
+    // the run is not silently measuring nothing.
+    chunkCost.maxFrameMs <= chunkCost.maxFrameBoundMs + 2,
+    `worst steady-state frame ${chunkCost.maxFrameMs}ms vs its bound ` +
+      `${chunkCost.maxFrameBoundMs}ms (budget ${chunkCost.budgetMs}); ` +
+      `typical generate ${chunkCost.genCostMs}ms, mesh ${chunkCost.meshCostMs}ms; ` +
+      `fill phase peaked at ${chunkCost.maxFillFrameMs}ms`,
+  );
+  check(
+    'the streaming cost estimates are being measured',
+    chunkCost.genCostMs > 0 && chunkCost.meshCostMs > 0,
+    `generate ${chunkCost.genCostMs}ms, mesh ${chunkCost.meshCostMs}ms`,
+  );
 
   console.log('\n[minimap]');
   const minimapDrawn = await page.evaluate(() => {

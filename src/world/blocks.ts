@@ -204,6 +204,21 @@ export function isSolid(id: number): boolean {
   return (BLOCKS[id] ?? AIR).solid;
 }
 
+/**
+ * Opacity as a flat byte table, for the mesher's innermost loop.
+ *
+ * `isOpaque` dereferences an object per call, and the mesher asks the question
+ * roughly 270,000 times per chunk — six neighbours for every one of ~35,000
+ * buried voxels, plus twelve more per visible face for ambient occlusion. A
+ * typed-array read is the difference between that costing milliseconds and
+ * costing a rounding error.
+ */
+export const OPAQUE_BY_ID: Uint8Array = (() => {
+  const table = new Uint8Array(256);
+  for (let id = 0; id < 256; id++) table[id] = (BLOCKS[id] ?? AIR).opaque ? 1 : 0;
+  return table;
+})();
+
 export function isOpaque(id: number): boolean {
   return (BLOCKS[id] ?? AIR).opaque;
 }

@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { Block, type BlockDef, blockDef, isOpaque } from './blocks';
+import { Block, type BlockDef, blockDef, OPAQUE_BY_ID} from './blocks';
 import { CHUNK_SX, CHUNK_SY, CHUNK_SZ, Chunk, voxelIndex } from './Chunk';
 import { shapeBoxes } from './shapes';
 import { isTexturedBlock, tileForFace, tileRect } from './textures';
@@ -211,7 +211,14 @@ export function meshChunk(chunk: Chunk, neighbor: NeighborLookup): MeshResult {
     return neighbor(baseX + x, y, baseZ + z);
   };
 
-  const occluded = (x: number, y: number, z: number): number => (isOpaque(at(x, y, z)) ? 1 : 0);
+  const occluded = (x: number, y: number, z: number): number => OPAQUE_BY_ID[at(x, y, z)];
+
+  // Neighbour offsets in the flat voxel array. The layout is y-major, so a step
+  // along each axis is a fixed index delta and an interior voxel's six
+  // neighbours can be read without any bounds arithmetic at all.
+  const STRIDE_X = 1;
+  const STRIDE_Z = CHUNK_SX;
+  const STRIDE_Y = CHUNK_SX * CHUNK_SZ;
 
   /**
    * Stop scanning above the tallest voxel in this chunk.
@@ -248,6 +255,31 @@ export function meshChunk(chunk: Chunk, neighbor: NeighborLookup): MeshResult {
         const id = vox[index];
         if (id === Block.Air) continue;
 
+        // Fully buried voxels are the overwhelming majority — underground rock
+        // with rock on all six sides — and they emit nothing at all. Detecting
+        // that with six typed-array reads, before touching the face loop, skips
+        // the whole per-face machinery for them.
+        //
+        // Only taken away from the chunk's x/z borders and the world's floor and
+        // ceiling, where the neighbour lives in another chunk and the slower
+        // lookup is needed.
+        if (
+          x > 0 &&
+          x < CHUNK_SX - 1 &&
+          z > 0 &&
+          z < CHUNK_SZ - 1 &&
+          y > 0 &&
+          y < CHUNK_SY - 1 &&
+          OPAQUE_BY_ID[vox[index - STRIDE_X]] === 1 &&
+          OPAQUE_BY_ID[vox[index + STRIDE_X]] === 1 &&
+          OPAQUE_BY_ID[vox[index - STRIDE_Z]] === 1 &&
+          OPAQUE_BY_ID[vox[index + STRIDE_Z]] === 1 &&
+          OPAQUE_BY_ID[vox[index - STRIDE_Y]] === 1 &&
+          OPAQUE_BY_ID[vox[index + STRIDE_Y]] === 1
+        ) {
+          continue;
+        }
+
         const def = blockDef(id);
         const translucent = isTranslucent(id);
         const buf = translucent ? transBuf : opaqueBuf;
@@ -271,7 +303,7 @@ export function meshChunk(chunk: Chunk, neighbor: NeighborLookup): MeshResult {
 
           // Draw when the neighbour lets light through, but never between two
           // blocks of the same kind (keeps glass and water hollow).
-          if (isOpaque(neighborId) || neighborId === id) continue;
+          if (OPAQUE_BY_ID[neighborId] === 1 || neighborId === id) continue;
 
           const tint = def[face.tint];
           const emissive = def.emissive ?? 0;

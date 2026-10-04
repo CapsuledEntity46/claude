@@ -223,6 +223,63 @@ Three things this cost that are worth knowing:
   stairs. It is a smoothstep now, and switched off entirely for deserts and
   wetlands, whose whole character is smoothness.
 
+### Streaming inside the frame
+
+The occasional drop from 60fps to the low 40s was not fog, lighting or draw
+calls — fog is a shader uniform and costs nothing. It was chunk work overrunning
+the frame. `npm run perf` measures where the time goes:
+
+| Work | Cost |
+| --- | --- |
+| Generate one chunk | ~2.9 ms |
+| Mesh one chunk | ~3.2 ms |
+
+The budget used to be a count — two generates plus three meshes — which
+authorises about **18 ms of work in a frame that has 16.7 ms**. Every frame that
+streamed a full batch overran, which is exactly what an intermittent dip to the
+low 40s looks like. A count cannot be right anyway: chunk cost varies several
+fold with the terrain in it.
+
+It is now a **time budget of 8 ms**, and three details matter more than the
+number:
+
+- **Predictive, not reactive.** Checking the clock after each chunk only
+  discovers the overrun once the frame is already late. The scheduler stops
+  *before* starting work it cannot afford.
+- **Pessimistic estimates.** It decides using a high-water cost that rises
+  instantly and decays slowly, not an average. A mesher cannot be interrupted
+  once started, so planning with the mean means every expensive chunk is begun
+  late in a frame and overruns it. The estimates are also seeded at 5 ms rather
+  than 1 ms: an optimistic seed let the first frames authorise a dozen chunks and
+  spike to 63 ms before the measurements caught up.
+- **Meshing and generation each get one guaranteed operation.** Sharing a single
+  guarantee starved generation outright — meshing claimed it, and since
+  generating a chunk dirties all eight neighbours there is nearly always
+  something to mesh, so the world grew only on the rare frame with nothing dirty.
+  Measured: 3 chunks a second where the budget should have allowed twenty.
+
+Two costs found by measuring rather than reasoning:
+
+- **The streaming bookkeeping was the single largest cost in the frame**, not the
+  chunk building. The queue held the chunk map's *string* keys, so the sort
+  comparator re-parsed two keys per comparison — roughly sixteen thousand string
+  operations every frame for a queue of 250. Entries now carry numeric
+  coordinates and a precomputed distance.
+- **The queue was fully rebuilt every frame that generated anything**, re-probing
+  all 361 cells for a change it already knew about. Consumed entries are spliced
+  off the front of the sorted queue instead.
+
+The mesher also skips voxels buried on all six sides before touching the face
+loop, and reads opacity from a flat byte table rather than dereferencing a block
+definition — it asks that question about 270,000 times per chunk.
+
+The budget is asserted, not trusted: the smoke suite records the worst frame's
+chunk time and the bound in force at that instant, and fails if the scheduler
+exceeded its own promise. A fixed millisecond ceiling would not do, because one
+geometry upload costs tens of milliseconds on the software rasteriser CI uses and
+a fraction of that on a real GPU — the same correct code would pass on one and
+fail on the other.
+
 ## Enemies
 
 Each archetype has its own silhouette. Goblins are hunched and spindly, with swept
@@ -688,6 +745,7 @@ npm test            # typecheck + 334 unit checks
 npm run test:unit   # damage model, mesher, terrain determinism, inventory
 npm run test:smoke  # boots the real build in headless Chromium and plays it
 npm run survey      # terrain statistics over a 6000-block square
+npm run perf        # chunk generation and meshing cost per chunk
 npm run shots:terrain  # photographs each terrain feature
 ```
 

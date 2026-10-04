@@ -28,8 +28,55 @@ export interface ChunkEditRecord {
   edits: number[];
 }
 
-const MAX_GEN_PER_FRAME = 2;
-const MAX_MESH_PER_FRAME = 3;
+/**
+ * Milliseconds of chunk work a single frame may spend.
+ *
+ * A count-based budget was the wrong shape. Generating a chunk costs ~3.4ms and
+ * meshing one ~3.8ms, so "2 generate plus 3 mesh" authorised 18ms of work in a
+ * frame that has 16.7ms in total — every frame that streamed a full batch
+ * overran, which is exactly the occasional drop from 60 to the low 40s. The cost
+ * per chunk also depends on the terrain in it, so no fixed count can be right
+ * for both a flat plain and a mountainside.
+ *
+ * 8ms leaves roughly half the frame for rendering and simulation. Streaming is
+ * no slower on average — the same work is done, spread over more frames instead
+ * of bunched into one — and because the budget is time rather than a count, a
+ * fast machine gets through more chunks per frame without any retuning.
+ */
+const CHUNK_BUDGET_MS = 8;
+
+/**
+ * The budget while the view is still mostly empty.
+ *
+ * Filling an empty world and keeping a full one up to date are different jobs
+ * and want different answers. During the initial fill there is little to render
+ * and nothing to stutter — the player is watching the world appear — so being
+ * frugal there just makes them wait. Once the view is substantially built the
+ * budget drops to `CHUNK_BUDGET_MS` and smoothness takes over.
+ *
+ * Holding the steady-state budget through the fill as well was measurably worse:
+ * on a slow renderer one chunk already costs more than 8ms, so only the single
+ * guaranteed chunk got through per frame and the world took about twelve seconds
+ * to appear.
+ */
+const CHUNK_FILL_BUDGET_MS = 14;
+
+/**
+ * Fraction of the view still missing that counts as "still filling".
+ *
+ * Deliberately high. At 25% ordinary walking kept the queue over the line, so
+ * the generous fill budget applied permanently and the worst frame spent 43ms on
+ * chunks — the exact stutter this was meant to remove. Only a genuinely empty
+ * view, meaning a fresh start, a load or a teleport, should qualify.
+ */
+const FILLING_THRESHOLD = 0.6;
+
+/**
+ * Hard caps, so a pathologically slow frame cannot queue unbounded work.
+ * Reached only when chunks turn out to be much cheaper than expected.
+ */
+const MAX_GEN_PER_FRAME = 6;
+const MAX_MESH_PER_FRAME = 8;
 
 /**
  * Owns voxel storage, chunk streaming, and geometry.
@@ -51,7 +98,22 @@ export class World {
   renderDistance: number;
 
   /** Chunks awaiting terrain generation, nearest-first. */
-  private genQueue: string[] = [];
+/**
+   * Chunks waiting to be generated, nearest first.
+   *
+   * Entries carry their coordinates and their distance as numbers. They used to
+   * be the map's string keys, which meant the sort comparator re-parsed two keys
+   * on every comparison — `indexOf`, two slices and two `Number` calls, roughly
+   * sixteen thousand string operations per frame for a queue this size. That
+   * bookkeeping, not the chunk building, was the largest single cost in the
+   * streaming frame.
+   */
+  private genQueue: { cx: number; cz: number; d: number }[] = [];
+  /** The chunk the queue was built around, so it can be reused while stationary. */
+  private queueCx = Number.NaN;
+  private queueCz = Number.NaN;
+  /** Set whenever the set of loaded chunks changes, forcing a queue rebuild. */
+  private queueStale = true;
 
   /**
    * Positions of every loaded light-emitting block, keyed by coordinate.
@@ -287,6 +349,9 @@ export class World {
       this.gen.generate(chunk);
       this.indexLights(chunk);
       chunk.state = MeshState.Dirty;
+      // This chunk has left the queue's "missing" set, so the queue must be
+      // rebuilt before it is trusted again.
+      this.queueStale = true;
       // Neighbours were meshed while this chunk still read as solid rock, so they
       // need rebuilding. All eight matter, not just the four orthogonal ones:
       // the ambient occlusion term samples voxels diagonally around each vertex,
@@ -302,28 +367,141 @@ export class World {
     return chunk;
   }
 
+  /**
+   * Rolling cost of one generate and one mesh, in milliseconds.
+   *
+   * Measured rather than assumed, because it varies by an order of magnitude
+   * between a flat plain and a mountainside, and between a phone and a desktop.
+   * Seeded low so a cold start is willing to try.
+   */
+  private genCostMs = 1;
+  private meshCostMs = 1;
+
+
+  /**
+   * Pessimistic cost estimates, used for the budget decision.
+   *
+   * An average is the wrong predictor here. Chunk cost varies several-fold with
+   * the terrain in it, and a mesher cannot be interrupted once started — so
+   * deciding with the mean means every unusually expensive chunk is begun late
+   * in a frame and overruns it. These rise instantly to any cost actually seen
+   * and decay slowly, so the budget plans for the bad case and relaxes only once
+   * the bad case stops happening.
+   *
+   * Seeded at a realistic cost rather than optimistically. Starting them at 1ms
+   * let the very first frames authorise six chunks each on the belief they were
+   * nearly free, and the initial fill peaked at 63ms per frame before the
+   * estimates caught up — a visible stutter exactly when the player is first
+   * looking at the world. Starting pessimistically costs a little fill speed on
+   * a fast machine for the first few frames and nothing afterwards.
+   */
+  private genCostHigh = 6;
+  private meshCostHigh = 6;
+
+  /** Chunks still waiting to be generated. */
+  get pendingChunks(): number {
+    return this.genQueue.length;
+  }
+
+  /** The pessimistic estimates the budget decides with. */
+  get genCostPeak(): number {
+    return this.genCostHigh;
+  }
+
+  get meshCostPeak(): number {
+    return this.meshCostHigh;
+  }
+
+  /** The steady-state budget, so a test can assert against the real figure. */
+  get budgetMs(): number {
+    return CHUNK_BUDGET_MS;
+  }
+
+  get genCost(): number {
+    return this.genCostMs;
+  }
+
+  get meshCost(): number {
+    return this.meshCostMs;
+  }
+
+  /**
+   * Worst frame's chunk time since the last reset, in milliseconds.
+   *
+   * Recorded so the budget can be asserted rather than trusted: the regression
+   * this guards against — a frame quietly spending more than it has — is
+   * invisible in an average and shows up to the player only as an occasional
+   * stutter.
+   */
+  maxChunkFrameMs = 0;
+  /**
+   * The budget bound in force at the instant of the worst frame.
+   *
+   * Recorded alongside it because the cost estimates decay: comparing the
+   * watermark against the estimates as they read at the *end* of a run compares
+   * two numbers from different moments, and the bound can have shrunk well below
+   * what was legitimately permitted when the frame happened.
+   */
+  maxChunkFrameBoundMs = 0;
+  /**
+   * The same, but only for frames spent on the larger initial-fill budget.
+   *
+   * Kept apart because the two phases are deliberately allowed different
+   * amounts of time, and mixing them makes the figure meaningless: on a slow
+   * machine the world is filling almost permanently, so a single watermark
+   * reports the fill budget and says nothing about what exploring feels like.
+   */
+  maxFillFrameMs = 0;
+  /** Chunk time spent in the most recent frame. */
+  lastChunkFrameMs = 0;
+  /** Whether the most recent frame ran on the fill budget. */
+  lastFrameWasFilling = false;
+
   /** Streams chunks around the player and rebuilds dirty geometry within budget. */
   update(playerX: number, playerZ: number): void {
     const ccx = Math.floor(playerX) >> 4;
     const ccz = Math.floor(playerZ) >> 4;
     const r = this.renderDistance;
 
-    // Queue anything missing, nearest first.
-    this.genQueue.length = 0;
-    for (let dz = -r; dz <= r; dz++) {
-      for (let dx = -r; dx <= r; dx++) {
-        if (dx * dx + dz * dz > (r + 0.5) * (r + 0.5)) continue;
-        const key = chunkKey(ccx + dx, ccz + dz);
-        const existing = this.chunks.get(key);
-        if (!existing || existing.state === MeshState.Empty) this.genQueue.push(key);
+    // Rebuild the queue only when it could have changed: when the player crosses
+    // into a new chunk, or when chunks were added or removed since the last
+    // rebuild. Standing still used to re-probe all 361 cells and re-sort every
+    // frame for an answer that could not have moved.
+    if (this.queueStale || ccx !== this.queueCx || ccz !== this.queueCz) {
+      this.genQueue.length = 0;
+      for (let dz = -r; dz <= r; dz++) {
+        for (let dx = -r; dx <= r; dx++) {
+          const d = dx * dx + dz * dz;
+          if (d > (r + 0.5) * (r + 0.5)) continue;
+          const existing = this.chunks.get(chunkKey(ccx + dx, ccz + dz));
+          if (!existing || existing.state === MeshState.Empty) {
+            this.genQueue.push({ cx: ccx + dx, cz: ccz + dz, d });
+          }
+        }
       }
+      // Sorting on a number computed once, rather than on a key parsed per
+      // comparison.
+      this.genQueue.sort((a, b) => a.d - b.d);
+      this.queueCx = ccx;
+      this.queueCz = ccz;
+      this.queueStale = false;
     }
-    this.genQueue.sort((a, b) => distSq(a, ccx, ccz) - distSq(b, ccx, ccz));
 
-    for (let i = 0; i < Math.min(MAX_GEN_PER_FRAME, this.genQueue.length); i++) {
-      const [cx, cz] = this.genQueue[i].split(',').map(Number);
-      this.ensureChunk(cx, cz);
-    }
+    const started = performance.now();
+    const spent = (): number => performance.now() - started;
+
+    // Chunks inside the view circle, which is what "filled" is measured against.
+    const expected = Math.PI * r * r;
+    const budget = this.genQueue.length > expected * FILLING_THRESHOLD ? CHUNK_FILL_BUDGET_MS : CHUNK_BUDGET_MS;
+    // Each kind of work gets its own guaranteed first operation.
+    //
+    // Sharing one counter starved generation completely: meshing claimed the
+    // frame's single guarantee, and because generating a chunk marks all eight
+    // neighbours dirty there is almost always something to mesh — so the world
+    // grew only on the rare frame with nothing dirty. Measured, that was about
+    // 3 chunks a second where the budget should have allowed twenty.
+    let meshed = 0;
+    let generated = 0;
 
     // Rebuild dirty meshes, nearest first. Chunks outside the render distance are
     // skipped: they are kept in memory only to preserve player edits, and meshing
@@ -339,8 +517,58 @@ export class World {
       (a, b) =>
         (a.cx - ccx) ** 2 + (a.cz - ccz) ** 2 - ((b.cx - ccx) ** 2 + (b.cz - ccz) ** 2),
     );
+    // Meshing goes first, and generation gets what is left.
+    //
+    // A stale mesh is a hole in the world the player is already looking at; an
+    // ungenerated chunk is only terrain they cannot see yet. Generating first
+    // meant a frame could spend its whole allowance on chunks over the horizon
+    // and leave the one underfoot unbuilt.
     for (let i = 0; i < Math.min(MAX_MESH_PER_FRAME, dirty.length); i++) {
+      // Predictive, not reactive: stop before starting work that would overrun,
+      // using what meshing actually cost recently. Checking the clock *after*
+      // each chunk only discovers the overrun once the frame is already late.
+      if (meshed > 0 && spent() + this.meshCostHigh > budget) break;
+      const before = performance.now();
       this.buildMesh(dirty[i]);
+      const meshTook = performance.now() - before;
+      this.meshCostMs = this.meshCostMs * 0.8 + meshTook * 0.2;
+      this.meshCostHigh = Math.max(meshTook, this.meshCostHigh * 0.93);
+      meshed++;
+    }
+
+    for (let i = 0; i < Math.min(MAX_GEN_PER_FRAME, this.genQueue.length); i++) {
+      if (generated > 0 && spent() + this.genCostHigh > budget) break;
+      const entry = this.genQueue[i];
+      const before = performance.now();
+      this.ensureChunk(entry.cx, entry.cz);
+      const genTook = performance.now() - before;
+      this.genCostMs = this.genCostMs * 0.8 + genTook * 0.2;
+      this.genCostHigh = Math.max(genTook, this.genCostHigh * 0.93);
+      generated++;
+    }
+    if (generated > 0) {
+      // Drop what was just built off the front instead of rebuilding.
+      //
+      // The queue is sorted nearest-first and consumed from the front, so the
+      // remaining entries are still correct and still in order. `ensureChunk`
+      // marks the queue stale because an outside caller can generate a chunk at
+      // any time; here the loop knows exactly which chunks it changed, so it can
+      // account for them and clear the flag. Without this every frame that
+      // generated anything re-probed all 361 cells and re-sorted on the next
+      // frame — a full rebuild for a change it already knew about.
+      this.genQueue.splice(0, generated);
+      this.queueStale = false;
+    }
+
+    this.lastChunkFrameMs = spent();
+    this.lastFrameWasFilling = budget === CHUNK_FILL_BUDGET_MS;
+    if (this.lastFrameWasFilling) {
+      if (this.lastChunkFrameMs > this.maxFillFrameMs) this.maxFillFrameMs = this.lastChunkFrameMs;
+    } else if (this.lastChunkFrameMs > this.maxChunkFrameMs) {
+      this.maxChunkFrameMs = this.lastChunkFrameMs;
+      // The scheduler's promise: the budget, plus the one mesh and one generate
+      // that are always allowed through so the world cannot stall.
+      this.maxChunkFrameBoundMs = CHUNK_BUDGET_MS + this.genCostHigh + this.meshCostHigh;
     }
 
     // Unload beyond the render distance (with hysteresis so we don't thrash).
@@ -388,6 +616,7 @@ export class World {
   }
 
   private unload(key: string): void {
+    this.queueStale = true;
     for (const store of [this.opaqueMeshes, this.transMeshes]) {
       const mesh = store.get(key);
       if (mesh) {
@@ -703,11 +932,4 @@ export class World {
     this.genQueue.length = 0;
     this.lights.clear();
   }
-}
-
-function distSq(key: string, ccx: number, ccz: number): number {
-  const comma = key.indexOf(',');
-  const cx = Number(key.slice(0, comma));
-  const cz = Number(key.slice(comma + 1));
-  return (cx - ccx) ** 2 + (cz - ccz) ** 2;
 }

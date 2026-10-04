@@ -1528,7 +1528,14 @@ export class Game {
   debugEnsurePlaying(): string {
     if (this.mode === 'menu' || this.mode === 'dead') {
       this.debugRevive();
-      this.startPlaying();
+      // Deliberately not `startPlaying()`. That requests the pointer lock, and a
+      // refused request fires `pointerlockchange` with the lock absent — which
+      // the handler answers by pausing back to the menu. Going through it made
+      // this guard capable of causing the very stall it exists to clear.
+      // Mouse buttons and keys arrive through document listeners regardless of
+      // the lock; only mouse *movement* needs it, and no test relies on that.
+      this.mode = 'playing';
+      this.hud.setMenuVisible(false);
     }
     return this.mode;
   }
@@ -1558,6 +1565,32 @@ export class Game {
     this.player.spawnAt(this.world, x, z);
     this.player.applyToCamera(this.camera);
     return Math.round(this.player.position.y);
+  }
+
+  /** Chunk streaming cost, for asserting the per-frame budget holds. */
+  debugChunkCost(): Record<string, number> {
+    return {
+      genCostMs: Number(this.world.genCost.toFixed(2)),
+      meshCostMs: Number(this.world.meshCost.toFixed(2)),
+      genCostHighMs: Number(this.world.genCostPeak.toFixed(2)),
+      meshCostHighMs: Number(this.world.meshCostPeak.toFixed(2)),
+      budgetMs: this.world.budgetMs,
+      lastFrameMs: Number(this.world.lastChunkFrameMs.toFixed(2)),
+      maxFrameMs: Number(this.world.maxChunkFrameMs.toFixed(2)),
+      maxFillFrameMs: Number(this.world.maxFillFrameMs.toFixed(2)),
+      maxFrameBoundMs: Number(this.world.maxChunkFrameBoundMs.toFixed(2)),
+      filling: this.world.lastFrameWasFilling ? 1 : 0,
+      // Queue depth, so a test can tell the initial fill apart from steady
+      // state: the two run on deliberately different budgets.
+      queued: this.world.pendingChunks,
+    };
+  }
+
+  /** Clears the worst-frame watermark, so a test can measure a fresh window. */
+  debugResetChunkCost(): void {
+    this.world.maxChunkFrameMs = 0;
+    this.world.maxFillFrameMs = 0;
+    this.world.maxChunkFrameBoundMs = 0;
   }
 
   /** The current top-level mode, for diagnosing a stalled suite. */

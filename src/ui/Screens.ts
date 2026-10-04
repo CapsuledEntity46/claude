@@ -229,9 +229,21 @@ export class Screens {
    * which means the curves stay attached when the panel is resized or the font
    * metrics differ.
    */
-  private layoutBranches(): void {
+  private layoutBranches(attempt = 0): void {
     const svgNs = 'http://www.w3.org/2000/svg';
-    for (const branch of Array.from(this.skillHost.querySelectorAll<HTMLElement>('.skill-branch'))) {
+    const branches = Array.from(this.skillHost.querySelectorAll<HTMLElement>('.skill-branch'));
+
+    // A pane that has just been unhidden may not be laid out yet, in which case
+    // every branch measures zero and no connector can be placed. One animation
+    // frame is usually enough, but not always — under load the first frame can
+    // still see a zero-width panel, and the tree then renders permanently
+    // unconnected. So detect it and try again rather than assuming.
+    if (branches.length > 0 && branches[0].getBoundingClientRect().width < 2) {
+      if (attempt < 8) requestAnimationFrame(() => this.layoutBranches(attempt + 1));
+      return;
+    }
+
+    for (const branch of branches) {
       const canvas = branch.querySelector<SVGSVGElement>('.branch-canvas');
       if (!canvas) continue;
       const box = branch.getBoundingClientRect();

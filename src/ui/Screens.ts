@@ -2,7 +2,20 @@ import { describeMode, item } from '../combat/items';
 import { availableModes } from '../combat/types';
 import { BAG_CAPACITY, type BagTab, type EquipSlot } from '../player/Inventory';
 import type { Player } from '../player/Player';
-import { ATTRIBUTE_INFO, type AttributeKey } from '../player/Stats';
+import { ABILITY_INFO, ABILITY_KEYS, abilityModifier } from '../player/PointBuy';
+import { ABILITY_MAX } from '../player/Stats';
+import {
+  BRANCH_INFO,
+  SKILL_BRANCHES,
+  blockOnPurchase,
+  describeModifiers,
+  nodesInBranch,
+  pointsSpentOnSkills,
+  rankOf,
+  respecCost,
+  totalSkillPoints,
+  type SkillBranch,
+} from '../player/Skills';
 import { applyGlyph, itemGlyph } from './glyphs';
 
 function el<T extends HTMLElement>(id: string): T {
@@ -21,6 +34,7 @@ export class Screens {
   private root = el<HTMLDivElement>('sheet');
   private statsHost = el<HTMLElement>('sheet-stats');
   private equipHost = el<HTMLElement>('sheet-equip');
+  private skillHost = el<HTMLElement>('sheet-skills');
   private bagHost = el<HTMLElement>('sheet-bag');
 
   private player: Player | null = null;
@@ -59,6 +73,7 @@ export class Screens {
     if (!this.player || !this.isOpen) return;
     this.renderStats(this.player);
     this.renderEquipment(this.player);
+    this.renderSkills(this.player);
     this.renderBag(this.player);
   }
 
@@ -85,6 +100,7 @@ export class Screens {
       ['Equipment weight', stats.weight.toFixed(1)],
       ['Carried weight', `${player.inventory.carriedWeight.toFixed(1)} (materials free)`],
       ['Mana', `${Math.floor(stats.mana)} / ${stats.maxMana}`],
+      ['Gold', String(stats.gold)],
     ];
     for (const [label, value] of rows) this.statsHost.append(statRow(label, value));
 
@@ -98,31 +114,37 @@ export class Screens {
       }
     }
 
-    this.statsHost.append(heading('Attributes'));
+    this.statsHost.append(heading('Abilities'));
     if (stats.unspent > 0) {
       const note = document.createElement('div');
       note.className = 'points';
-      note.textContent = `${stats.unspent} point${stats.unspent === 1 ? '' : 's'} available`;
+      note.textContent = `${stats.unspent} ability point${stats.unspent === 1 ? '' : 's'} available`;
       this.statsHost.append(note);
     }
 
-    for (const key of Object.keys(ATTRIBUTE_INFO) as AttributeKey[]) {
-      const info = ATTRIBUTE_INFO[key];
+    for (const key of ABILITY_KEYS) {
+      const info = ABILITY_INFO[key];
+      const score = stats.abilities[key];
+      const mod = abilityModifier(score);
       const row = document.createElement('div');
       row.className = 'attr';
-      row.title = info.note;
+      row.title = info.blurb;
 
       const name = document.createElement('span');
       name.className = 'an';
-      name.textContent = info.label;
+      name.textContent = info.abbr;
 
+      // Score and modifier together. The modifier is what the formulas actually
+      // use, so hiding it would leave the player unable to tell why 13 and 12
+      // play identically.
       const value = document.createElement('span');
       value.className = 'av';
-      value.textContent = String(stats.attributes[key]);
+      value.textContent = `${score} (${mod >= 0 ? '+' : ''}${mod})`;
 
       const plus = document.createElement('button');
       plus.textContent = '+';
-      plus.disabled = stats.unspent <= 0;
+      plus.disabled = stats.unspent <= 0 || score >= ABILITY_MAX;
+      if (score >= ABILITY_MAX) plus.title = `${info.name} is at the cap of ${ABILITY_MAX}`;
       plus.addEventListener('click', () => {
         if (stats.spend(key)) {
           player.syncEquipmentDerived();
@@ -143,6 +165,131 @@ export class Screens {
       }
       this.statsHost.append(statRow(`Tier ${i + 1}`, `${count - stats.slotsUsed[i]} / ${count}`));
     });
+  }
+
+  // ---------------------------------------------------------------- skills
+
+  /**
+   * The four-branch skill tree, plus the respec button.
+   *
+   * Nodes are indented by tier so the prerequisite chain is visible without
+   * drawing connectors, and a blocked node states its reason in the tooltip —
+   * "needs Strength 14" is a goal, whereas a greyed-out button is a mystery.
+   */
+  private renderSkills(player: Player): void {
+    const stats = player.stats;
+    const available = totalSkillPoints(stats.level) - pointsSpentOnSkills(stats.skills);
+
+    this.skillHost.replaceChildren();
+    this.skillHost.append(heading('Skills'));
+
+    const points = document.createElement('div');
+    points.className = 'points';
+    points.textContent = `${available} skill point${available === 1 ? '' : 's'} available`;
+    this.skillHost.append(points);
+
+    for (const branch of SKILL_BRANCHES) {
+      this.skillHost.append(this.renderBranch(player, branch, available));
+    }
+
+    // What the whole build currently adds up to, so the player can see the tree's
+    // effect without totalling tooltips by hand.
+    const summary = describeModifiers(stats.skillModifiers);
+    if (summary.length > 0) {
+      const mods = document.createElement('div');
+      mods.className = 'skill-mods';
+      mods.textContent = summary.join(' · ');
+      this.skillHost.append(mods);
+    }
+
+    const cost = respecCost(stats.level);
+    const spent = pointsSpentOnSkills(stats.skills);
+    const respec = document.createElement('button');
+    respec.id = 'respec';
+    respec.textContent = cost > 0 ? `Respec skills — ${cost} gold` : 'Respec skills — free';
+    // Disabled with a reason rather than hidden: a player who cannot afford it
+    // should still learn the price exists and what it is.
+    respec.disabled = spent === 0 || stats.gold < cost;
+    respec.title =
+      spent === 0
+        ? 'Nothing to refund yet.'
+        : stats.gold < cost
+          ? `You have ${stats.gold} of the ${cost} gold needed.`
+          : `Refunds all ${spent} spent skill point${spent === 1 ? '' : 's'}. Abilities are not affected.`;
+    respec.addEventListener('click', () => {
+      if (!stats.respecSkills(cost)) return;
+      player.syncEquipmentDerived();
+      this.refresh();
+    });
+    this.skillHost.append(respec);
+  }
+
+  private renderBranch(player: Player, branch: SkillBranch, available: number): HTMLElement {
+    const stats = player.stats;
+    const info = BRANCH_INFO[branch];
+
+    const wrap = document.createElement('div');
+    wrap.className = 'skill-branch';
+
+    const title = document.createElement('h3');
+    title.textContent = info.name;
+    const blurb = document.createElement('p');
+    blurb.textContent = info.blurb;
+    wrap.append(title, blurb);
+
+    for (const node of nodesInBranch(branch)) {
+      const rank = rankOf(stats.skills, node.id);
+      const block = blockOnPurchase(stats.skills, node.id, stats.level, stats.abilities);
+
+      const row = document.createElement('div');
+      row.className = `skill-node skill-tier-${node.tier}`;
+      if (node.tier > 1) row.classList.add('skill-tier');
+      if (rank > 0) row.classList.add('owned');
+      // "Maxed" and "cannot afford" are not the same as locked: a maxed node is a
+      // success and a node you are saving up for is a plan, so neither is dimmed.
+      if (block && block.kind !== 'maxed' && block.kind !== 'not-enough-points') row.classList.add('locked');
+
+      const name = document.createElement('span');
+      name.className = 'sn';
+      name.textContent = node.name;
+
+      const rankLabel = document.createElement('span');
+      rankLabel.className = 'sr';
+      rankLabel.textContent = `${rank}/${node.maxRank}`;
+
+      const plus = document.createElement('button');
+      plus.textContent = '+';
+      plus.disabled = block !== null;
+
+      const reason = ((): string => {
+        if (!block) return `${node.blurb} Costs ${node.cost} point${node.cost === 1 ? '' : 's'}.`;
+        switch (block.kind) {
+          case 'maxed':
+            return `${node.name} is fully ranked. ${node.blurb}`;
+          case 'requires-node':
+            return `Requires ${block.node.name} first. ${node.blurb}`;
+          case 'requires-ability':
+            return `Requires ${ABILITY_INFO[block.ability].name} ${block.score}. ${node.blurb}`;
+          case 'not-enough-points':
+            return `Needs ${block.needed} skill point${block.needed === 1 ? '' : 's'}; you have ${block.available}.`;
+          default:
+            return node.blurb;
+        }
+      })();
+      row.title = reason;
+      plus.title = reason;
+
+      plus.addEventListener('click', () => {
+        if (!player.buySkill(node.id)) return;
+        this.refresh();
+      });
+
+      row.append(name, rankLabel, plus);
+      wrap.append(row);
+    }
+
+    void available;
+    return wrap;
   }
 
   // ---------------------------------------------------------------- equipment

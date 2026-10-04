@@ -6,7 +6,7 @@ const DB_NAME = 'voxelquest';
 const DB_VERSION = 1;
 const STORE = 'saves';
 const SLOT = 'slot0';
-export const SAVE_VERSION = 1;
+export const SAVE_VERSION = 2;
 
 export interface SaveData {
   version: number;

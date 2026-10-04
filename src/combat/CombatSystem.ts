@@ -530,8 +530,11 @@ export class CombatSystem {
     }
     const attack = resolved.attack;
 
-    if (!ctx.player.stats.spendStamina(attack.stamina)) {
-      this.diag.lastReason = `no stamina (${ctx.player.stats.stamina.toFixed(0)} < ${attack.stamina})`;
+    // Blade's "Tireless Arm" discounts the cost; rounded up so a discount can
+    // never make an attack free.
+    const staminaCost = Math.max(1, Math.ceil(attack.stamina * ctx.player.stats.attackStaminaScale));
+    if (!ctx.player.stats.spendStamina(staminaCost)) {
+      this.diag.lastReason = `no stamina (${ctx.player.stats.stamina.toFixed(0)} < ${staminaCost})`;
       ctx.log('Too winded to swing.', 'info');
       return;
     }
@@ -606,7 +609,10 @@ export class CombatSystem {
 
     const eye = ctx.player.eyePosition;
     const look = ctx.player.lookDirection;
-    const cosArc = Math.cos(THREE.MathUtils.degToRad(attack.arcDeg));
+    // Wide Sweep broadens the cone the stroke tests against, capped short of a
+    // full half-turn so a swing never reaches behind the player.
+    const arcDeg = Math.min(170, attack.arcDeg * (1 + ctx.player.stats.skillModifiers.swingArc));
+    const cosArc = Math.cos(THREE.MathUtils.degToRad(arcDeg));
     // The cone leans the way the stroke travelled, so a left slash favours enemies to
     // the left of the crosshair and an uppercut favours one standing over you. Without
     // this every stroke hit the same cone and the direction was pure decoration.
@@ -642,10 +648,10 @@ export class CombatSystem {
       const input: DamageInput = {
         amount: attack.damage,
         type: attack.type,
-        armorPierce: attack.armorPierce,
+        armorPierce: Math.min(1, attack.armorPierce + ctx.player.stats.armorPierceBonus),
         multiplier: ctx.player.stats.meleeMultiplier,
         // Thrusts are precise, so they crit more often.
-        critChance: attack.mode === 'thrust' ? 0.14 : 0.07,
+        critChance: (attack.mode === 'thrust' ? 0.14 : 0.07) + ctx.player.stats.critChanceBonus,
         critMultiplier: attack.mode === 'thrust' ? 2.0 : 1.7,
       };
       ctx.enemies.damageEnemy(enemy, input, eye, attack.knockback);
@@ -792,7 +798,8 @@ export class CombatSystem {
       }
       // Drawing costs stamina, so you cannot hold a full draw indefinitely.
       if (this.draw < 1 && !ctx.player.stats.spendStamina(9 * dt)) return;
-      this.draw = Math.min(1, this.draw + dt / Math.max(0.05, profile.drawTime));
+      const drawTime = Math.max(0.05, profile.drawTime * ctx.player.stats.drawTimeScale);
+      this.draw = Math.min(1, this.draw + dt / drawTime);
       return;
     }
 
@@ -891,6 +898,7 @@ export class CombatSystem {
         direction,
         speed: profile.speed * (0.5 + power * 0.5),
         damage: profile.damage * power * ctx.player.stats.rangedMultiplier,
+        critChance: ctx.player.stats.critChanceBonus,
         type: profile.type,
         armorPierce: profile.armorPierce,
         gravity: profile.gravity,
@@ -961,7 +969,7 @@ export class CombatSystem {
       return;
     }
 
-    if (!ctx.player.stats.spendMana(spell.mana * dt)) {
+    if (!ctx.player.stats.spendMana(spell.mana * dt * ctx.player.stats.manaCostScale)) {
       if (this.sustaining) ctx.log('Out of mana.', 'magic');
       this.sustaining = false;
       return;
@@ -1049,7 +1057,7 @@ export class CombatSystem {
 
     // Mana spells draw on the pool; slot spells consume a rationed slot.
     if (spell.cost === 'mana') {
-      if (!ctx.player.stats.spendMana(spell.mana)) {
+      if (!ctx.player.stats.spendMana(spell.mana * ctx.player.stats.manaCostScale)) {
         ctx.log('Not enough mana.', 'magic');
         return;
       }
@@ -1112,7 +1120,12 @@ export class CombatSystem {
         for (const enemy of targets) {
           ctx.enemies.damageEnemy(
             enemy,
-            { amount: spell.damage * power, type: spell.type, armorPierce: spell.armorPierce, critChance: 0.05 },
+            {
+              amount: spell.damage * power,
+              type: spell.type,
+              armorPierce: spell.armorPierce,
+              critChance: 0.05 + stats.critChanceBonus,
+            },
             center,
             7,
           );
@@ -1140,7 +1153,12 @@ export class CombatSystem {
           struck.add(next);
           ctx.enemies.damageEnemy(
             next,
-            { amount: damage, type: spell.type, armorPierce: spell.armorPierce, critChance: 0.08 },
+            {
+              amount: damage,
+              type: spell.type,
+              armorPierce: spell.armorPierce,
+              critChance: 0.08 + stats.critChanceBonus,
+            },
             from,
             3,
           );

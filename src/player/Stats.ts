@@ -1,28 +1,47 @@
 /**
- * Player progression: three attributes, no classes.
+ * Player progression: five 5e ability scores, no classes.
  *
- * Every level grants points you spend freely, so a "class" is just whatever you
- * chose to invest in. Spell slots come from Focus rather than from a class table.
+ * Scores are chosen at creation by point buy and raised by levelling. What reaches
+ * the formulas below is never the raw score but its *modifier*,
+ * `floor((score - 10) / 2)` — so 10 is the average that changes nothing, 8 is a
+ * genuine weakness, and an odd score buys nothing the even one below it did not.
+ * That is the 5e contract, and keeping it means a player who knows 5e can predict
+ * this character sheet.
+ *
+ * Skills contribute through a modifier bag rather than by touching these formulas,
+ * so a build is always `ability modifier + equipment + skills` and never a special
+ * case hidden in a getter.
  */
 
-export interface AttributeSet {
-  /** Melee damage, max health. */
-  might: number;
-  /** Ranged damage, move speed, stamina. */
-  agility: number;
-  /** Spell damage and spell slots. */
-  focus: number;
-}
+import {
+  abilityModifier,
+  type AbilityKey,
+  type AbilityScores,
+  createPointBuyState,
+  sanitizeScores,
+} from './PointBuy';
+import {
+  NO_MODIFIERS,
+  aggregateModifiers,
+  pruneIllegalSkills,
+  type SkillModifiers,
+  type SkillRanks,
+} from './Skills';
 
-export type AttributeKey = keyof AttributeSet;
+export type { AbilityKey, AbilityScores } from './PointBuy';
 
-export const ATTRIBUTE_INFO: Record<AttributeKey, { label: string; note: string }> = {
-  might: { label: 'Might', note: '+6% melee damage, +3 max HP' },
-  agility: { label: 'Agility', note: '+5% ranged damage, +4 stamina, faster on foot' },
-  focus: { label: 'Focus', note: '+7% spell damage, more spell slots' },
-};
+/**
+ * Attribute points granted per level.
+ *
+ * One, not two. Point buy already decided the shape of the character, so levelling
+ * is a slow refinement of it rather than a second allocation that washes the first
+ * one out — and a 5e score is worth far more per point than the old 1-to-20 stats
+ * were, since two points move a modifier.
+ */
+export const POINTS_PER_LEVEL = 1;
 
-export const POINTS_PER_LEVEL = 2;
+/** The highest score levelling can reach. Point buy stops at 15; this is the cap. */
+export const ABILITY_MAX = 20;
 const SPELL_SLOT_REGEN_SECONDS = 24;
 /** Seconds without taking damage before health starts recovering. */
 const REGEN_DELAY = 7;
@@ -38,10 +57,14 @@ export interface StatsSnapshot {
   level: number;
   xp: number;
   hp: number;
-  attributes: AttributeSet;
+  /** 5e ability scores. Optional so a pre-5e save still deserialises. */
+  abilities?: AbilityScores;
   unspent: number;
   slotsUsed: number[];
   mana?: number;
+  /** Skill ranks by node id. */
+  skills?: Record<string, number>;
+  gold?: number;
 }
 
 export class PlayerStats {
@@ -50,8 +73,25 @@ export class PlayerStats {
   xp = 0;
   hp = 20;
 
-  attributes: AttributeSet = { might: 2, agility: 2, focus: 2 };
+  /**
+   * The five ability scores. Starts at the point-buy baseline of 8 across the
+   * board; a character that has been through creation arrives with its own spread.
+   */
+  abilities: AbilityScores = createPointBuyState().scores;
   unspent = 0;
+
+  /** Skill ranks by node id, and the gold a respec spends. */
+  skills: SkillRanks = {};
+  gold = 0;
+
+  /**
+   * Cached skill modifiers.
+   *
+   * Recomputed on `syncSkills` rather than on every getter read: `maxHp` and
+   * friends are read several times per frame by the HUD, the damage pipeline and
+   * the view model, and summing the whole tree each time is wasted work.
+   */
+  private mods: SkillModifiers = { ...NO_MODIFIERS };
 
   stamina = 100;
   guard = 0;
@@ -86,16 +126,42 @@ export class PlayerStats {
 
   // ------------------------------------------------------------ derived values
 
+  /** `floor((score - 10) / 2)` for one ability. */
+  modifier(ability: AbilityKey): number {
+    return abilityModifier(this.abilities[ability]);
+  }
+
+  /** The skill modifiers currently in force, for the sheet. */
+  get skillModifiers(): Readonly<SkillModifiers> {
+    return this.mods;
+  }
+
+  /**
+   * Recomputes the cached skill bag, dropping anything the build no longer
+   * supports. Called after any change to skills, abilities or level.
+   */
+  syncSkills(): void {
+    this.skills = pruneIllegalSkills(this.skills, this.level, this.abilities);
+    this.mods = aggregateModifiers(this.skills);
+  }
+
+  /**
+   * Health comes from Constitution, as in 5e — not from the melee stat.
+   *
+   * Centred so an all-average character has the 34 HP the game was balanced
+   * around, with the modifier worth 5 either way: a CON 8 character is genuinely
+   * fragile at 29, and a CON 16 one is sturdy at 49.
+   */
   get maxHp(): number {
-    return 30 + (this.level - 1) * 6 + this.attributes.might * 3;
+    return 34 + (this.level - 1) * 6 + this.modifier('con') * 5 + this.mods.maxHp;
   }
 
   get maxStamina(): number {
-    return 100 + this.attributes.agility * 4;
+    return 100 + this.modifier('dex') * 6 + this.modifier('con') * 4 + this.mods.maxStamina;
   }
 
   get maxMana(): number {
-    return 60 + (this.level - 1) * 6 + this.attributes.focus * 8;
+    return 60 + (this.level - 1) * 6 + this.modifier('int') * 10 + this.mods.maxMana;
   }
 
   /** Spends mana if there is enough. Returns false when there is not. */
@@ -117,31 +183,76 @@ export class PlayerStats {
   }
 
   get meleeMultiplier(): number {
-    return 1 + this.attributes.might * 0.06;
+    return 1 + this.modifier('str') * 0.09 + this.mods.meleeDamage;
   }
 
   get rangedMultiplier(): number {
-    return 1 + this.attributes.agility * 0.05;
+    return 1 + this.modifier('dex') * 0.09 + this.mods.rangedDamage;
   }
 
   get spellMultiplier(): number {
-    return 1 + this.attributes.focus * 0.07;
+    return 1 + this.modifier('int') * 0.1 + this.mods.spellDamage;
+  }
+
+  /** Bonus critical chance from Dexterity and the tree, as a flat probability. */
+  get critChanceBonus(): number {
+    return Math.max(0, this.modifier('dex') * 0.015) + this.mods.critChance;
+  }
+
+  /** Bonus armour pierce from the tree. */
+  get armorPierceBonus(): number {
+    return this.mods.armorPierce;
+  }
+
+  /** Skill-granted flat armour, folded in alongside equipment and wards. */
+  get skillArmor(): number {
+    return this.mods.armor;
+  }
+
+  /** How much of a fall is absorbed, 0..0.9. */
+  get fallDamageScale(): number {
+    return Math.max(0.1, 1 - Math.min(0.9, this.mods.fallDamage));
+  }
+
+  /** Multiplies the stamina an attack costs. */
+  get attackStaminaScale(): number {
+    return Math.max(0.3, 1 - this.mods.attackStamina);
+  }
+
+  /** Multiplies a bow's draw time. Lower is faster. */
+  get drawTimeScale(): number {
+    return Math.max(0.4, 1 - this.mods.drawSpeed);
+  }
+
+  /** Multiplies a spell's mana cost. */
+  get manaCostScale(): number {
+    return Math.max(0.25, 1 - this.mods.manaCost);
   }
 
   /** Walk speed in blocks/second, before sprint. Armour weight slows you down. */
   get moveSpeed(): number {
-    const base = 4.6 * (1 + this.attributes.agility * 0.012);
+    const base = 4.6 * (1 + this.modifier('dex') * 0.025 + this.mods.moveSpeed);
     const encumbered = base * Math.max(0.55, 1 - this.weight * 0.055);
     return this.slowTimer > 0 ? encumbered * 0.55 : encumbered;
   }
 
-  /** Max spell slots per tier. Higher tiers unlock with level. */
+  /**
+   * Max spell slots per tier, from Wisdom.
+   *
+   * Split from Intelligence deliberately: Intelligence buys raw spell power and
+   * the mana pool, Wisdom buys how often you can reach for the rare spells. A
+   * caster therefore has a real choice between hitting harder and casting more.
+   */
   maxSlots(): number[] {
-    const focus = this.attributes.focus;
+    const wis = this.modifier('wis');
+    // Each unlocked tier floors at one slot. A negative Wisdom modifier should
+    // make high magic scarce, not impossible: the sheet promises tier 2 "unlocks
+    // at level 4", and an unlock that grants nothing is a broken promise rather
+    // than a difficult build.
     return [
-      2 + Math.floor(focus / 2),
-      this.level >= 4 ? 1 + Math.floor(focus / 4) : 0,
-      this.level >= 8 ? 1 + Math.floor(focus / 7) : 0,
+      Math.max(1, 3 + wis),
+      this.level >= 4 ? Math.max(1, 2 + wis) : 0,
+      this.level >= 8 ? Math.max(1, 1 + Math.floor(wis / 2)) : 0,
     ];
   }
 
@@ -193,14 +304,44 @@ export class PlayerStats {
     return { current: this.xp - floorXp, needed: Math.max(1, ceilXp - floorXp) };
   }
 
-  spend(attr: AttributeKey): boolean {
+  /**
+   * Raises one ability score by a level-up point.
+   *
+   * Capped at 20, the 5e ceiling. Refuses at the cap rather than silently eating
+   * the point, which is the kind of loss a player never notices until it matters.
+   */
+  spend(ability: AbilityKey): boolean {
     if (this.unspent <= 0) return false;
+    if (this.abilities[ability] >= ABILITY_MAX) return false;
     this.unspent--;
-    this.attributes[attr]++;
-    // Investing should feel immediate.
-    if (attr === 'might') this.hp += 3;
-    if (attr === 'focus') this.mana = Math.min(this.maxMana, this.mana + 8);
+    this.abilities[ability]++;
+    this.syncSkills();
+    // Investing should feel immediate, and a new CON modifier should not leave the
+    // player sitting below their own new maximum.
+    if (ability === 'con') this.hp = Math.min(this.maxHp, this.hp + 5);
+    if (ability === 'int') this.mana = Math.min(this.maxMana, this.mana + 10);
     return true;
+  }
+
+  /**
+   * Clears the skill tree for gold, returning the points to be spent again.
+   *
+   * Abilities are untouched: those came from creation and from levelling, and
+   * wiping them would make the respec a character rewrite rather than an
+   * experiment with a build.
+   */
+  respecSkills(cost: number): boolean {
+    if (cost > this.gold) return false;
+    this.gold -= cost;
+    this.skills = {};
+    this.syncSkills();
+    return true;
+  }
+
+  /** Adds coin. */
+  addGold(amount: number): void {
+    if (amount <= 0) return;
+    this.gold += Math.round(amount);
   }
 
   heal(amount: number): number {
@@ -220,7 +361,9 @@ export class PlayerStats {
     // Slow out-of-combat healing. Without it, one bad fight at low level puts the
     // player into an unrecoverable spiral with no way back but potions.
     if (this.timeSinceDamage > REGEN_DELAY && this.hp > 0 && this.hp < this.maxHp) {
-      this.hp = Math.min(this.maxHp, this.hp + REGEN_PER_SECOND * dt);
+      // Constitution governs how fast you knit back together, on top of the tree.
+      const rate = REGEN_PER_SECOND * (1 + this.modifier('con') * 0.12 + this.mods.healthRegen);
+      this.hp = Math.min(this.maxHp, this.hp + Math.max(0.2, rate) * dt);
     }
 
     // Stamina: drains while sprinting or holding guard, otherwise recovers.
@@ -229,7 +372,8 @@ export class PlayerStats {
     } else if (blocking) {
       this.stamina = Math.max(0, this.stamina - 5 * dt);
     } else {
-      const regen = 22 * Math.max(0.4, 1 - this.weight * 0.07);
+      const regen =
+        22 * Math.max(0.4, 1 - this.weight * 0.07) * (1 + this.modifier('con') * 0.05 + this.mods.staminaRegen);
       this.stamina = Math.min(this.maxStamina, this.stamina + regen * dt);
     }
 
@@ -248,7 +392,7 @@ export class PlayerStats {
     const anyUsed = this.slotsUsed.some((n) => n > 0);
     if (anyUsed) {
       this.slotRegenTimer += dt;
-      if (this.slotRegenTimer >= SPELL_SLOT_REGEN_SECONDS) {
+      if (this.slotRegenTimer >= SPELL_SLOT_REGEN_SECONDS / (1 + this.mods.slotRegen)) {
         this.slotRegenTimer = 0;
         this.restoreSlot(1) || this.restoreSlot(2) || this.restoreSlot(3);
       }
@@ -279,17 +423,25 @@ export class PlayerStats {
       level: this.level,
       xp: this.xp,
       hp: this.hp,
-      attributes: { ...this.attributes },
+      abilities: { ...this.abilities },
       unspent: this.unspent,
       slotsUsed: [...this.slotsUsed],
       mana: this.mana,
+      skills: { ...this.skills },
+      gold: this.gold,
     };
   }
 
   restore(s: StatsSnapshot): void {
     this.level = s.level;
     this.xp = s.xp;
-    this.attributes = { ...s.attributes };
+    // Per-key sanitising rather than a wholesale spread. Spreading a stored object
+    // straight in is what would turn a save written before an ability existed into
+    // `undefined`, and every formula downstream into NaN.
+    this.abilities = sanitizeScores(s.abilities).scores;
+    this.skills = s.skills ? { ...s.skills } : {};
+    this.gold = Math.max(0, Math.round(s.gold ?? 0));
+    this.syncSkills();
     this.unspent = s.unspent;
     this.slotsUsed = [...s.slotsUsed];
     // Never restore into a dead-but-walking state: a save taken at 0 HP would

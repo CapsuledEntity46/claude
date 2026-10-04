@@ -264,10 +264,16 @@ export class Hud {
     const torch = player.inventory.equippedDef('torch');
     const offhand = [shield?.name, torch ? `${torch.name} (lit)` : null].filter(Boolean).join(' + ') || 'Off-hand empty';
 
+    // Gold earns a line of its own because it is now spendable — on a respec —
+    // rather than a trophy, and a player saving up needs to see it without
+    // opening the sheet.
+    const gold = `<span style="color:#ffcb3d">${player.stats.gold} gold</span>`;
+
     this.armorLine.innerHTML =
       `${armorName} · Armor ${defense.armor}${ward}<br>` +
       `<span style="opacity:.7">${resists}</span><br>` +
-      `<span style="opacity:.8">${offhand}</span>`;
+      `<span style="opacity:.8">${offhand}</span><br>` +
+      gold;
 
     const target = combat.targetName
       ? `<br><span style="color:#ffd9a0">${combat.targetName} — ${Math.round(combat.targetHpFraction * 100)}%</span>`

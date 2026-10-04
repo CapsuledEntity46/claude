@@ -18,6 +18,9 @@ import { TrajectoryArc } from '../fx/TrajectoryArc';
 import { ViewModel } from '../fx/ViewModel';
 import { Inventory, type Stack } from '../player/Inventory';
 import { Player } from '../player/Player';
+import { ABILITY_KEYS, type AbilityKey } from '../player/PointBuy';
+import { xpToReach } from '../player/Stats';
+import { pointsSpentOnSkills, respecCost, totalSkillPoints } from '../player/Skills';
 import { readSave, writeSave, type SaveData, SAVE_VERSION } from '../save/Save';
 import { Hud } from '../ui/Hud';
 import { Screens } from '../ui/Screens';
@@ -142,6 +145,10 @@ export class Game {
       onMana: (amount) => {
         const restored = this.player.stats.restoreMana(amount);
         if (restored > 0) this.hud.log(`Absorbed ${Math.round(restored)} mana.`, 'magic');
+      },
+      onGold: (amount) => {
+        this.player.stats.addGold(amount);
+        this.hud.log(`Picked up ${Math.round(amount)} gold.`, 'good');
       },
       onItem: (stack) => this.collectItem(stack),
     });
@@ -443,10 +450,15 @@ export class Game {
   private grantXp(amount: number): void {
     const levels = this.player.stats.addXp(amount);
     if (levels > 0) {
+      const stats = this.player.stats;
+      // Both currencies, since they are spent on different screens.
+      const skillPoints = totalSkillPoints(stats.level) - pointsSpentOnSkills(stats.skills);
       this.hud.log(
-        `Level ${this.player.stats.level}! ${this.player.stats.unspent} attribute points to spend (Tab).`,
+        `Level ${stats.level}! ${stats.unspent} ability point${stats.unspent === 1 ? '' : 's'} and ` +
+          `${skillPoints} skill point${skillPoints === 1 ? '' : 's'} to spend (Tab).`,
         'good',
       );
+      stats.syncSkills();
       this.particles.burst(this.player.center, 40, 4, {
         color: 0xd5a0ff,
         size: 0.14,
@@ -1284,6 +1296,104 @@ export class Game {
   /** Remaining spell slots per tier. */
   debugSpellSlots(): number[] {
     return [1, 2, 3].map((tier) => this.player.stats.slotsAvailable(tier as 1 | 2 | 3));
+  }
+
+  /** Abilities, skills, gold and the derived values they feed, for tests. */
+  debugCharacter(): Record<string, unknown> {
+    const stats = this.player.stats;
+    return {
+      abilities: { ...stats.abilities },
+      modifiers: Object.fromEntries(ABILITY_KEYS.map((key) => [key, stats.modifier(key)])),
+      level: stats.level,
+      abilityPoints: stats.unspent,
+      skills: { ...stats.skills },
+      skillPoints: totalSkillPoints(stats.level) - pointsSpentOnSkills(stats.skills),
+      gold: stats.gold,
+      maxHp: stats.maxHp,
+      maxMana: stats.maxMana,
+      maxStamina: stats.maxStamina,
+      melee: Number(stats.meleeMultiplier.toFixed(3)),
+      ranged: Number(stats.rangedMultiplier.toFixed(3)),
+      spell: Number(stats.spellMultiplier.toFixed(3)),
+      slots: stats.maxSlots(),
+      respecCost: respecCost(stats.level),
+    };
+  }
+
+  /** Grants gold, so the respec button can be exercised. */
+  debugGiveGold(amount: number): number {
+    this.player.stats.addGold(amount);
+    return this.player.stats.gold;
+  }
+
+  /** Sets ability scores directly, bypassing creation. */
+  debugSetAbilities(scores: Partial<Record<AbilityKey, number>>): Record<string, unknown> {
+    const stats = this.player.stats;
+    for (const key of ABILITY_KEYS) {
+      const value = scores[key];
+      if (typeof value === 'number') stats.abilities[key] = Math.max(1, Math.min(20, Math.round(value)));
+    }
+    // Pruning matters here: dropping an ability must take the skills it gated.
+    stats.syncSkills();
+    this.player.syncEquipmentDerived();
+    return this.debugCharacter();
+  }
+
+  /** Buys a skill rank through the same path the sheet uses. */
+  debugBuySkill(id: string): boolean {
+    return this.player.buySkill(id);
+  }
+
+  /** Grants levels outright, for reaching the deeper tiers in a test. */
+  debugGrantLevels(count: number): number {
+    this.player.stats.addXp(xpToReach(this.player.stats.level + Math.max(1, count)));
+    this.player.stats.syncSkills();
+    return this.player.stats.level;
+  }
+
+  /**
+   * Kills the nearest enemy outright, through the normal damage path.
+   *
+   * Routed through `damageEnemy` rather than setting hp to zero, so the kill pays
+   * out XP, mana and gold exactly as a real one does — which is the whole point
+   * when the thing under test is the drop.
+   */
+  debugKillNearestEnemy(): boolean {
+    let nearest = null;
+    let best = Infinity;
+    for (const enemy of this.entities.enemies) {
+      if (enemy.dead) continue;
+      const d = enemy.center.distanceTo(this.player.center);
+      if (d < best) {
+        best = d;
+        nearest = enemy;
+      }
+    }
+    if (!nearest) return false;
+    this.entities.damageEnemy(
+      nearest,
+      { amount: nearest.maxHp * 10, type: 'slash', canCrit: false },
+      this.player.center,
+      0,
+    );
+    return true;
+  }
+
+  /** Opens the character sheet, for inspecting what it renders. */
+  debugOpenSheet(): void {
+    this.openSheet();
+  }
+
+  debugCloseSheet(): void {
+    this.screens.close();
+  }
+
+  /** Respecs for gold, returning whether it went through. */
+  debugRespec(): boolean {
+    const stats = this.player.stats;
+    const done = stats.respecSkills(respecCost(stats.level));
+    if (done) this.player.syncEquipmentDerived();
+    return done;
   }
 
   /** Points the camera at the ground a few blocks ahead. */

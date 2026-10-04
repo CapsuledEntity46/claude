@@ -99,3 +99,36 @@ export function rollLoot(archetype: EnemyArchetype, level: number, rng: () => nu
 export function xpForKill(archetype: EnemyArchetype, level: number): number {
   return Math.round(archetype.xp * (1 + (level - 1) * 0.35));
 }
+
+/** The chance a kill pays out any coin at all. */
+export const GOLD_DROP_CHANCE = 0.55;
+
+/**
+ * Coin dropped by a kill, before the drop roll.
+ *
+ * Scales on both axes the player can see: the archetype's own worth — the same
+ * `xp` figure that already encodes how dangerous a thing is — and its level. A
+ * wolf and a bandit captain at the same level should not pay the same, and a
+ * level 10 bandit should be worth meaningfully more than a level 1 one.
+ *
+ * Passive creatures carry nothing. A fish has no purse, and paying out for one
+ * would make farming them the cheapest income in the game.
+ */
+export function goldForKill(archetype: EnemyArchetype, level: number): number {
+  if (archetype.passive) return 0;
+  const worth = archetype.xp * 0.32 * (1 + (level - 1) * 0.28);
+  return Math.max(1, Math.round(worth));
+}
+
+/**
+ * Coin actually dropped, including the roll and its spread.
+ *
+ * The ±25% jitter exists so two identical kills do not pay identically; a purse
+ * that always holds exactly the same number of coins reads as a vending machine.
+ */
+export function rollGold(archetype: EnemyArchetype, level: number, rng: () => number): number {
+  if (rng() >= GOLD_DROP_CHANCE) return 0;
+  const base = goldForKill(archetype, level);
+  if (base <= 0) return 0;
+  return Math.max(1, Math.round(base * (0.75 + rng() * 0.5)));
+}

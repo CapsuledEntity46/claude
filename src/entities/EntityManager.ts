@@ -4,7 +4,7 @@ import { computeDamage, type DamageInput } from '../combat/types';
 import { mulberry32 } from '../world/noise';
 import { archetypeById, FISH, pickArchetype } from './archetypes';
 import { Enemy } from './Enemy';
-import { rollLoot, xpForKill } from './loot';
+import { rollLoot, xpForKill, rollGold} from './loot';
 import type { PickupManager } from './Pickups';
 
 /** Base seconds between spawn attempts at full night-time pressure. */
@@ -144,6 +144,11 @@ export class EntityManager implements EnemyWorld {
       const mana = Math.round((isCaster ? 16 : 8) + enemy.level * 1.6);
       this.pickups.spawnOrbs(enemy.center, mana, 'mana');
     }
+
+    // Coin. Not every kill pays, so finding a purse stays a small event rather
+    // than becoming background noise.
+    const gold = rollGold(enemy.archetype, enemy.level, this.rng);
+    if (gold > 0) this.pickups.spawnOrbs(enemy.center, gold, 'gold');
 
     const loot = rollLoot(enemy.archetype, enemy.level, this.rng);
     if (loot.length > 0) this.pickups.spawnLoot(enemy.center, loot);

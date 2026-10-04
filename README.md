@@ -24,7 +24,7 @@ npm run dev     # then open the printed localhost URL
 | `X` | Cycle the build tool's shape |
 | `R` | Reload a firearm, or sample a block with the build tool |
 | `1`–`8` / wheel | Hotbar |
-| `Tab` | Character sheet: stats, attribute points, equipment, bag |
+| `Tab` | Character sheet: abilities, skill tree, equipment, bag |
 | `F5` / `F9` | Save / load · `Esc` pause |
 
 You can see what you are holding. Weapons, torches, shields, spells, and blocks
@@ -146,7 +146,10 @@ manage rather than a cooldown you wait out.
 
 **Slot spells** stay rationed for the powerful ones: Arcane Nova, Chain Lightning,
 Stoneskin, and the Meteor. Tier 2 unlocks at level 4, tier 3 at level 8, slot
-counts come from Focus, and slots refill on level-up and trickle back over time.
+counts come from Wisdom, and slots refill on level-up and trickle back over time.
+Each unlocked tier floors at one slot: a negative Wisdom modifier should make high
+magic scarce, not impossible, and an unlock that grants nothing is a broken
+promise rather than a hard build.
 
 ## Building
 
@@ -249,9 +252,63 @@ into a proper heal.
 ## Progression
 
 Kills drop glowing orbs that home in on you once you are close — purple for
-experience, blue for mana. Each level grants 2 points to spend on **Might** (melee
-damage, health), **Agility** (ranged damage, stamina, speed), or **Focus** (spell
-damage, mana, spell slots).
+experience, blue for mana, gold for coin.
+
+### Five abilities, on 5e terms
+
+Characters run on five D&D 5e ability scores. What reaches the formulas is never
+the raw score but its **modifier**, `floor((score - 10) / 2)` — so 10 is the
+average that changes nothing, 8 is a real weakness, and an odd score buys nothing
+the even one below it did not. If you know 5e, you can predict this sheet.
+
+| Ability | Drives |
+| --- | --- |
+| **STR** | Melee damage, knockback |
+| **DEX** | Ranged damage, movement speed, critical chance |
+| **CON** | Health, health and stamina recovery, fall damage |
+| **INT** | Spell damage, mana pool |
+| **WIS** | Spell slots, spell-slot recovery |
+
+Health hangs off Constitution rather than the melee stat, which is the main thing
+the old three-attribute system had wrong: a heavy hitter and a tough character are
+different builds, and tying both to one number meant you could never be one
+without the other.
+
+Scores are chosen at creation by **point buy**: all five start at 8, cost 1 point
+per step to 13 and 2 points each for 14 and 15, out of a bank of 27. Levelling
+then grants **1 ability point** and **1 skill point** per level, and levelling can
+take a score past the creation cap of 15 up to the 5e ceiling of 20.
+
+### The skill tree
+
+Four branches — **Blade**, **Hunt**, **Arcana**, **Endurance** — of five nodes
+each, three tiers deep. Deeper nodes need their parent bought first, and the
+capstones need the branch's ability at 14, so point buy decides what you are
+*able* to specialise in rather than the two systems ignoring each other.
+
+Skills never touch the stat formulas directly. They contribute to one modifier
+bag that the formulas consult, which is what makes the arithmetic explainable:
+every number is `ability modifier + equipment + skills`, with percentages adding
+rather than compounding. Two +10% skills give +20%, not +21% — multiplicative
+stacking would make every value depend on the order you bought the tree in, which
+is impossible to put on a tooltip.
+
+Dropping an ability score takes the skills it gated with it, and the prune
+cascades: clearing a tier-1 node invalidates tier 2, which invalidates tier 3. A
+single sweep in definition order would leave the deepest node standing on nothing.
+
+### Respeccing, and gold
+
+Hostile kills sometimes drop coin, scaled by both the archetype's own worth and
+its level — a wolf and a captain at the same level are not paid alike. Passive
+creatures carry nothing; a fish has no purse, and paying out for one would make
+farming them the cheapest income in the game.
+
+Gold buys a **respec**: a button on the sheet that refunds every skill point for
+a fee of `40 + 35 per level`. It is priced off level rather than off how much you
+have invested, so you know the cost before you open the screen. Ability scores
+are deliberately left alone — a respec should let you try a different build, not
+rewrite the character.
 
 ### Dying looks like a block breaking
 
@@ -539,7 +596,7 @@ Some notes on the parts that are less obvious than they look:
 ## Tests
 
 ```bash
-npm test            # typecheck + 267 unit checks
+npm test            # typecheck + 304 unit checks
 npm run test:unit   # damage model, mesher, terrain determinism, inventory
 npm run test:smoke  # boots the real build in headless Chromium and plays it
 ```

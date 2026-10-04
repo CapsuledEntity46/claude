@@ -61,6 +61,25 @@ import {
   suggestedAllocation,
   validationIssues,
 } from '../src/player/PointBuy';
+import type { AbilityScores } from '../src/player/PointBuy';
+import {
+  SKILL_BRANCHES,
+  SKILL_NODES,
+  aggregateModifiers,
+  blockOnPurchase,
+  buySkill,
+  dependentsOf,
+  nodesInBranch,
+  pointsSpentOnSkills,
+  pruneIllegalSkills,
+  rankOf,
+  respecCost,
+  skillNode,
+  totalSkillPoints,
+  type SkillRanks,
+} from '../src/player/Skills';
+import { goldForKill, rollGold } from '../src/entities/loot';
+import { ARCHETYPES } from '../src/entities/archetypes';
 import { Block, blockCollisionBoxes, blockDef, isLightSource, isTargetable } from '../src/world/blocks';
 import { facingFromYaw, makeMeta, metaIsOpen, metaIsUpper, shapeBoxes } from '../src/world/shapes';
 import { BAG_CAPACITY, tabForItem } from '../src/player/Inventory';
@@ -399,22 +418,65 @@ check(
 section('progression and inventory');
 
 const stats = new PlayerStats();
-check('starting character has a survivable health pool', stats.maxHp >= 30, `${stats.maxHp} HP`);
+// An all-8 character is deliberately fragile — every modifier is -1 — but must
+// still be playable, since that is what a fresh PlayerStats represents before
+// point buy has run.
+check('a baseline character has a survivable health pool', stats.maxHp >= 28, `${stats.maxHp} HP`);
+check(
+  'an all-average character sits at the balance point',
+  (() => {
+    const average = new PlayerStats();
+    average.abilities = { str: 10, dex: 10, con: 10, int: 10, wis: 10 };
+    return average.maxHp === 34 && average.meleeMultiplier === 1 && average.modifier('con') === 0;
+  })(),
+);
+check(
+  'Constitution drives health, not the melee ability',
+  (() => {
+    const tough = new PlayerStats();
+    tough.abilities = { str: 8, dex: 8, con: 16, int: 8, wis: 8 };
+    const strong = new PlayerStats();
+    strong.abilities = { str: 16, dex: 8, con: 8, int: 8, wis: 8 };
+    return tough.maxHp > strong.maxHp && strong.meleeMultiplier > tough.meleeMultiplier;
+  })(),
+);
 check('XP curve is strictly increasing', xpToReach(2) < xpToReach(3) && xpToReach(3) < xpToReach(4));
 check('level 1 requires no XP', xpToReach(1) === 0);
 
 const levelled = new PlayerStats();
 const gained = levelled.addXp(xpToReach(3));
 check('enough XP grants the right number of levels', levelled.level === 3 && gained === 2, `level ${levelled.level}, gained ${gained}`);
-check('levelling up grants attribute points', levelled.unspent === 4, `${levelled.unspent} points`);
+check('levelling up grants ability points', levelled.unspent === 2, `${levelled.unspent} points`);
 check('levelling up restores health to full', levelled.hp === levelled.maxHp);
 
 const spender = new PlayerStats();
 spender.addXp(xpToReach(2));
-const beforeSpend = spender.attributes.might;
-check('attribute points can be spent', spender.spend('might') && spender.attributes.might === beforeSpend + 1);
+const beforeSpend = spender.abilities.str;
+check('ability points can be spent', spender.spend('str') && spender.abilities.str === beforeSpend + 1);
 const drained = new PlayerStats();
-check('cannot spend points you do not have', drained.spend('might') === false);
+check('cannot spend points you do not have', drained.spend('str') === false);
+check(
+  'an ability cannot be raised past the 5e cap of 20',
+  (() => {
+    const capped = new PlayerStats();
+    capped.abilities = { str: 20, dex: 10, con: 10, int: 10, wis: 10 };
+    capped.unspent = 3;
+    // Refused rather than silently eaten: the point must still be there to spend
+    // somewhere useful.
+    return capped.spend('str') === false && capped.unspent === 3;
+  })(),
+);
+check(
+  'an odd score buys nothing the even one below it did not',
+  (() => {
+    const a = new PlayerStats();
+    a.abilities = { str: 12, dex: 10, con: 10, int: 10, wis: 10 };
+    const at12 = a.meleeMultiplier;
+    a.unspent = 1;
+    a.spend('str');
+    return a.abilities.str === 13 && a.meleeMultiplier === at12;
+  })(),
+);
 
 const caster = new PlayerStats();
 check('tier 1 spell slots exist at level 1', caster.slotsAvailable(1) > 0, `${caster.slotsAvailable(1)} slots`);
@@ -797,12 +859,21 @@ section('mana and spells');
 
 const caster2 = new PlayerStats();
 check('a new character starts with mana', caster2.mana > 0, `${caster2.mana}`);
-check('mana capacity grows with Focus', (() => {
+check('mana capacity grows with Intelligence', (() => {
   const a = new PlayerStats();
+  a.abilities = { str: 8, dex: 8, con: 8, int: 12, wis: 8 };
   const before = a.maxMana;
-  a.unspent = 1;
-  a.spend('focus');
-  return a.maxMana > before;
+  a.unspent = 2;
+  a.spend('int');
+  a.spend('int');
+  return a.abilities.int === 14 && a.maxMana > before;
+})());
+check('spell slots come from Wisdom, not Intelligence', (() => {
+  const wise = new PlayerStats();
+  wise.abilities = { str: 8, dex: 8, con: 8, int: 8, wis: 16 };
+  const clever = new PlayerStats();
+  clever.abilities = { str: 8, dex: 8, con: 8, int: 16, wis: 8 };
+  return wise.maxSlots()[0] > clever.maxSlots()[0] && clever.maxMana > wise.maxMana;
 })());
 caster2.mana = 10;
 check('a spell you cannot afford is refused', !caster2.spendMana(25) && caster2.mana === 10);
@@ -1625,7 +1696,7 @@ section('point-buy character creation');
     JSON.stringify(fresh.scores),
   );
   check('a fresh build has the whole bank unspent', fresh.remaining === 27 && fresh.spent === 0, `${fresh.remaining} left`);
-  check('there are six abilities', ABILITY_KEYS.length === 6, ABILITY_KEYS.join(', '));
+  check('there are five abilities', ABILITY_KEYS.length === 5, ABILITY_KEYS.join(', '));
 
   // The 5e cost table, asserted as totals from the baseline. These are the numbers
   // the whole system turns on, so they are checked explicitly rather than inferred.
@@ -1700,7 +1771,7 @@ section('point-buy character creation');
     'an illegal move returns the state untouched',
     (() => {
       const s = createPointBuyState();
-      return decrease(s, 'cha') === s;
+      return decrease(s, 'wis') === s;
     })(),
   );
 
@@ -1722,7 +1793,7 @@ section('point-buy character creation');
       for (const key of ABILITY_KEYS) for (let i = 0; i < 4; i++) s = increase(s, key);
       const spentMidway = s.spent;
       for (const key of ABILITY_KEYS) for (let i = 0; i < 4; i++) s = decrease(s, key);
-      return spentMidway === 24 && s.spent === 0 && s.remaining === 27;
+      return spentMidway === 20 && s.spent === 0 && s.remaining === 27;
     })(),
   );
 
@@ -1806,7 +1877,6 @@ section('point-buy character creation');
         s.scores.con === 13 &&
         s.scores.int === 8 &&
         s.scores.wis === 8 &&
-        s.scores.cha === 8 &&
         Number.isFinite(s.remaining)
       );
     })(),
@@ -1821,10 +1891,366 @@ section('point-buy character creation');
   check(
     'an over-budget allocation is reported, not silently accepted',
     (() => {
-      const s = sanitizeScores({ str: 15, dex: 15, con: 15, int: 15, wis: 15, cha: 15 });
-      return s.spent === 54 && !isComplete(s) && validationIssues(s).some((i) => i.kind === 'over-budget');
+      const s = sanitizeScores({ str: 15, dex: 15, con: 15, int: 15, wis: 15 });
+      return s.spent === 45 && !isComplete(s) && validationIssues(s).some((i) => i.kind === 'over-budget');
     })(),
   );
+}
+
+
+// ------------------------------------------------------------- skill tree
+
+section('skill tree');
+
+{
+  const strong: AbilityScores = { str: 15, dex: 15, con: 15, int: 15, wis: 15 };
+  const weak: AbilityScores = { str: 8, dex: 8, con: 8, int: 8, wis: 8 };
+
+  check('there are four branches', SKILL_BRANCHES.length === 4, SKILL_BRANCHES.join(', '));
+  check(
+    'every branch has nodes at three tiers',
+    SKILL_BRANCHES.every((b) => {
+      const tiers = new Set(nodesInBranch(b).map((n) => n.tier));
+      return tiers.has(1) && tiers.has(2) && tiers.has(3);
+    }),
+  );
+  check(
+    'every prerequisite names a node that exists in the same branch',
+    SKILL_NODES.every((n) => {
+      if (!n.requires) return true;
+      const parent = skillNode(n.requires);
+      return parent !== undefined && parent.branch === n.branch;
+    }),
+  );
+  check('every tier-1 node is immediately reachable', SKILL_NODES.filter((n) => n.tier === 1).every((n) => !n.requires));
+  check('node ids are unique', new Set(SKILL_NODES.map((n) => n.id)).size === SKILL_NODES.length);
+  check(
+    'every node actually changes something',
+    SKILL_NODES.every((n) => Object.keys(n.perRank).length > 0),
+  );
+
+  check('one skill point per level', totalSkillPoints(1) === 1 && totalSkillPoints(7) === 7);
+
+  check(
+    'a tier-1 skill can be bought at level 1',
+    (() => {
+      const ranks = buySkill({}, 'blade_edge', 1, strong);
+      return rankOf(ranks, 'blade_edge') === 1 && pointsSpentOnSkills(ranks) === 1;
+    })(),
+  );
+  check(
+    'a second rank needs a second point',
+    (() => {
+      const one = buySkill({}, 'blade_edge', 1, strong);
+      const refused = buySkill(one, 'blade_edge', 1, strong);
+      const allowed = buySkill(one, 'blade_edge', 2, strong);
+      return rankOf(refused, 'blade_edge') === 1 && rankOf(allowed, 'blade_edge') === 2;
+    })(),
+  );
+  check(
+    'a node cannot exceed its maximum rank',
+    (() => {
+      let ranks: SkillRanks = {};
+      for (let i = 0; i < 9; i++) ranks = buySkill(ranks, 'blade_edge', 20, strong);
+      return rankOf(ranks, 'blade_edge') === 3;
+    })(),
+  );
+  check(
+    'a deeper node is refused until its prerequisite is bought',
+    (() => {
+      const block = blockOnPurchase({}, 'blade_sunder', 9, strong);
+      return block !== null && block.kind === 'requires-node';
+    })(),
+  );
+  check(
+    'an ability gate blocks a node the character is not built for',
+    (() => {
+      const withParent = buySkill({}, 'blade_edge', 9, weak);
+      const block = blockOnPurchase(withParent, 'blade_sunder', 9, weak);
+      return block !== null && block.kind === 'requires-ability' && block.ability === 'str';
+    })(),
+  );
+  check(
+    'the capstone needs the branch ability at 14',
+    (() => {
+      const mid: AbilityScores = { str: 12, dex: 8, con: 8, int: 8, wis: 8 };
+      let ranks = buySkill({}, 'blade_edge', 9, mid);
+      ranks = buySkill(ranks, 'blade_sunder', 9, mid);
+      const block = blockOnPurchase(ranks, 'blade_executioner', 9, mid);
+      return rankOf(ranks, 'blade_sunder') === 1 && block !== null && block.kind === 'requires-ability';
+    })(),
+  );
+  check(
+    'running out of points is reported as such, not as a lock',
+    (() => {
+      const block = blockOnPurchase({}, 'blade_edge', 0, strong);
+      return block !== null && block.kind === 'not-enough-points';
+    })(),
+  );
+  check('an unknown node is rejected', blockOnPurchase({}, 'no_such_skill', 9, strong)?.kind === 'unknown-node');
+
+  // Modifiers are additive across ranks and across nodes.
+  check(
+    'ranks stack additively',
+    (() => {
+      const mods = aggregateModifiers({ blade_edge: 3 });
+      return Math.abs(mods.meleeDamage - 0.18) < 1e-9;
+    })(),
+    `${aggregateModifiers({ blade_edge: 3 }).meleeDamage}`,
+  );
+  check(
+    'different nodes contributing the same stat add up',
+    (() => {
+      const mods = aggregateModifiers({ blade_edge: 3, blade_executioner: 1 });
+      return Math.abs(mods.meleeDamage - 0.28) < 1e-9 && Math.abs(mods.critChance - 0.05) < 1e-9;
+    })(),
+  );
+  check(
+    'an over-ranked or unknown save degrades to something legal',
+    (() => {
+      const mods = aggregateModifiers({ blade_edge: 99, ghost_skill: 5 });
+      return Math.abs(mods.meleeDamage - 0.18) < 1e-9;
+    })(),
+  );
+
+  check(
+    'dependents are found through the whole chain',
+    (() => {
+      const ids = dependentsOf('blade_edge').map((n) => n.id);
+      return ids.includes('blade_sunder') && ids.includes('blade_executioner');
+    })(),
+    dependentsOf('blade_edge').map((n) => n.id).join(', '),
+  );
+
+  // Pruning is what keeps a build honest when its foundation changes.
+  check(
+    'lowering an ability takes the skills it gated with it',
+    (() => {
+      let ranks = buySkill({}, 'blade_edge', 9, strong);
+      ranks = buySkill(ranks, 'blade_sunder', 9, strong);
+      ranks = buySkill(ranks, 'blade_executioner', 9, strong);
+      const pruned = pruneIllegalSkills(ranks, 9, weak);
+      return rankOf(ranks, 'blade_executioner') === 1 && rankOf(pruned, 'blade_executioner') === 0;
+    })(),
+  );
+  check(
+    'pruning cascades through a whole chain in one call',
+    (() => {
+      // Hand-built to put tier 3 on a tier 2 whose own parent is missing. One
+      // sweep in definition order would leave the deepest node standing.
+      const pruned = pruneIllegalSkills({ blade_sunder: 1, blade_executioner: 1 }, 9, strong);
+      return Object.keys(pruned).length === 0;
+    })(),
+    JSON.stringify(pruneIllegalSkills({ blade_sunder: 1, blade_executioner: 1 }, 9, strong)),
+  );
+  check(
+    'a build that costs more than the character has is trimmed',
+    (() => {
+      const pruned = pruneIllegalSkills({ blade_edge: 3, hunt_aim: 3, arcana_power: 3 }, 2, strong);
+      return pointsSpentOnSkills(pruned) <= totalSkillPoints(2);
+    })(),
+  );
+  check(
+    'a legal build survives pruning untouched',
+    (() => {
+      const ranks = { blade_edge: 2, end_vitality: 1 };
+      const pruned = pruneIllegalSkills(ranks, 5, strong);
+      return pointsSpentOnSkills(pruned) === 3 && rankOf(pruned, 'blade_edge') === 2;
+    })(),
+  );
+
+  // Respec pricing and the gold it spends.
+  check('respeccing is free at level 1', respecCost(1) === 0);
+  check('respec cost rises with level', respecCost(5) > respecCost(2) && respecCost(2) > 0, `${respecCost(2)} -> ${respecCost(5)}`);
+
+  check(
+    'a respec refunds every point and charges the gold',
+    (() => {
+      const s = new PlayerStats();
+      s.addXp(xpToReach(4));
+      s.skills = { blade_edge: 2, end_vitality: 1 };
+      s.syncSkills();
+      s.addGold(1000);
+      const cost = respecCost(s.level);
+      const before = s.gold;
+      const ok = s.respecSkills(cost);
+      return ok && pointsSpentOnSkills(s.skills) === 0 && s.gold === before - cost;
+    })(),
+  );
+  check(
+    'a respec you cannot afford changes nothing',
+    (() => {
+      const s = new PlayerStats();
+      s.addXp(xpToReach(4));
+      s.skills = { blade_edge: 2 };
+      s.syncSkills();
+      s.gold = 1;
+      return s.respecSkills(respecCost(s.level)) === false && pointsSpentOnSkills(s.skills) === 2;
+    })(),
+  );
+  check(
+    'a respec leaves ability scores alone',
+    (() => {
+      const s = new PlayerStats();
+      s.abilities = { str: 15, dex: 14, con: 13, int: 12, wis: 10 };
+      s.addXp(xpToReach(3));
+      s.skills = { blade_edge: 1 };
+      s.syncSkills();
+      s.addGold(9999);
+      s.respecSkills(respecCost(s.level));
+      return s.abilities.str === 15 && s.abilities.dex === 14;
+    })(),
+  );
+
+  // Skills must reach the derived stats, or the tree is decoration.
+  check(
+    'Vitality raises maximum health',
+    (() => {
+      // Levelled first: three ranks cost three skill points, and syncSkills
+      // rightly prunes a build the character has not earned.
+      const s = new PlayerStats();
+      s.addXp(xpToReach(3));
+      const before = s.maxHp;
+      s.skills = { end_vitality: 3 };
+      s.syncSkills();
+      return pointsSpentOnSkills(s.skills) === 3 && s.maxHp === before + 24;
+    })(),
+  );
+  check(
+    'Keen Edge raises the melee multiplier',
+    (() => {
+      const s = new PlayerStats();
+      s.addXp(xpToReach(3));
+      const before = s.meleeMultiplier;
+      s.skills = { blade_edge: 3 };
+      s.syncSkills();
+      return s.meleeMultiplier > before && Math.abs(s.meleeMultiplier - (before + 0.18)) < 1e-9;
+    })(),
+  );
+  check(
+    'Thrift discounts mana and Tireless Arm discounts stamina',
+    (() => {
+      // Both are tier 2, so their parents have to be bought as well: six points
+      // in total, hence level 6.
+      const s = new PlayerStats();
+      s.addXp(xpToReach(6));
+      s.skills = { arcana_power: 1, arcana_thrift: 2, blade_edge: 1, blade_vigour: 2 };
+      s.syncSkills();
+      return (
+        pointsSpentOnSkills(s.skills) === 6 &&
+        Math.abs(s.manaCostScale - 0.8) < 1e-9 &&
+        Math.abs(s.attackStaminaScale - 0.76) < 1e-9
+      );
+    })(),
+  );
+  check(
+    'Sure Footing softens a fall',
+    (() => {
+      const s = new PlayerStats();
+      s.addXp(xpToReach(3));
+      s.skills = { end_vitality: 1, end_landing: 2 };
+      s.syncSkills();
+      return pointsSpentOnSkills(s.skills) === 3 && Math.abs(s.fallDamageScale - 0.5) < 1e-9;
+    })(),
+  );
+  check(
+    'skill discounts can never reach zero cost',
+    (() => {
+      const s = new PlayerStats();
+      s.skills = { arcana_thrift: 99, blade_vigour: 99 };
+      s.syncSkills();
+      return s.manaCostScale > 0 && s.attackStaminaScale > 0;
+    })(),
+  );
+  check(
+    'a build survives a save and load round trip',
+    (() => {
+      const s = new PlayerStats();
+      s.abilities = { str: 15, dex: 12, con: 14, int: 10, wis: 8 };
+      s.addXp(xpToReach(5));
+      s.skills = { blade_edge: 2, end_vitality: 1 };
+      s.syncSkills();
+      s.addGold(250);
+      const loaded = new PlayerStats();
+      loaded.restore(JSON.parse(JSON.stringify(s.snapshot())));
+      return (
+        loaded.abilities.str === 15 &&
+        loaded.abilities.con === 14 &&
+        rankOf(loaded.skills, 'blade_edge') === 2 &&
+        loaded.gold === 250 &&
+        loaded.maxHp === s.maxHp
+      );
+    })(),
+  );
+  check(
+    'a save from before abilities existed loads without NaN',
+    (() => {
+      const loaded = new PlayerStats();
+      // The old shape: an `attributes` object this version knows nothing about.
+      loaded.restore({
+        level: 3,
+        xp: 100,
+        hp: 20,
+        unspent: 2,
+        slotsUsed: [0, 0, 0],
+      } as never);
+      return (
+        Number.isFinite(loaded.maxHp) &&
+        Number.isFinite(loaded.maxMana) &&
+        Number.isFinite(loaded.moveSpeed) &&
+        loaded.abilities.str === 8 &&
+        loaded.gold === 0
+      );
+    })(),
+  );
+}
+
+// ------------------------------------------------------------------- gold
+
+section('gold drops');
+
+{
+  const grunt = ARCHETYPES.find((a) => !a.passive);
+  const prey = ARCHETYPES.find((a) => a.passive);
+
+  check('there is a hostile archetype to price', grunt !== undefined);
+  if (grunt) {
+    check(
+      'gold scales with enemy level',
+      goldForKill(grunt, 10) > goldForKill(grunt, 1),
+      `${goldForKill(grunt, 1)} at level 1 -> ${goldForKill(grunt, 10)} at level 10`,
+    );
+    check(
+      'a stronger archetype is worth more than a weaker one at the same level',
+      (() => {
+        const sorted = [...ARCHETYPES].filter((a) => !a.passive).sort((a, b) => a.xp - b.xp);
+        const weakest = sorted[0];
+        const strongest = sorted[sorted.length - 1];
+        return goldForKill(strongest, 5) > goldForKill(weakest, 5);
+      })(),
+    );
+    check('a hostile kill is always worth at least one coin', goldForKill(grunt, 1) >= 1);
+    check(
+      'the drop roll respects its chance',
+      (() => {
+        // rng at 0.99 is above the drop chance, so nothing pays out.
+        const never = rollGold(grunt, 5, () => 0.99);
+        const always = rollGold(grunt, 5, () => 0.1);
+        return never === 0 && always > 0;
+      })(),
+    );
+    check(
+      'the payout varies between identical kills',
+      (() => {
+        const low = rollGold(grunt, 8, (() => { let i = 0; return () => (i++ === 0 ? 0.1 : 0.0); })());
+        const high = rollGold(grunt, 8, (() => { let i = 0; return () => (i++ === 0 ? 0.1 : 0.99); })());
+        return high > low;
+      })(),
+    );
+  }
+  if (prey) {
+    check('passive creatures carry no purse', goldForKill(prey, 9) === 0 && rollGold(prey, 9, () => 0) === 0);
+  }
 }
 
 console.log(`\n${passed} passed, ${failures.length} failed`);

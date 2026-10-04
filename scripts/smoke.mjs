@@ -671,15 +671,25 @@ try {
   const staminaBeforeDraw = await page.evaluate(() => window.__voxelquest.debugStamina());
   const firedBefore = (await snapshot()).projectilesFired;
   await page.mouse.move(CENTER_X, CENTER_Y);
-  await page.mouse.down();
-  await page.waitForTimeout(1100);
-  await page.mouse.up();
-  // Poll: the projectile appears on a later frame, and a slow renderer can take
-  // longer than one fixed wait to get there.
-  const shot = await waitUntil('an arrow to be launched', async () => {
-    const s2 = await snapshot();
-    return s2.projectilesFired > firedBefore ? s2 : null;
-  }, 6000, 40);
+  // The whole draw is retried, not just polled for. Polling alone assumes the
+  // draw happened; but a hold can be swallowed outright — the press landing on a
+  // frame where the previous action still owned the button, or the draw never
+  // reaching the minimum power — and then no amount of waiting produces an arrow.
+  // This flaked roughly one run in four before it retried.
+  const shot = await waitUntil(
+    'an arrow to be launched',
+    async () => {
+      await page.evaluate(() => window.__voxelquest.debugRefill());
+      await page.mouse.down();
+      await page.waitForTimeout(1100);
+      await page.mouse.up();
+      await page.waitForTimeout(150);
+      const s2 = await snapshot();
+      return s2.projectilesFired > firedBefore ? s2 : null;
+    },
+    12_000,
+    120,
+  );
   check(
     'bow launches a projectile',
     (shot?.projectilesFired ?? firedBefore) > firedBefore,
@@ -1280,12 +1290,28 @@ try {
   });
   check('the raw fish can be held', holdingFish, `selected ${holdingFish}`);
   await page.waitForTimeout(300);
-  await page.mouse.click(CENTER_X, CENTER_Y);
-  await page.waitForTimeout(1200);
-  const afterCook = await page.evaluate(() => ({
-    raw: window.__voxelquest.debugItemCount('raw_fish'),
-    cooked: window.__voxelquest.debugItemCount('cooked_fish'),
-  }));
+  // Retried: using an item shares the action cooldown with whatever ran just
+  // before it, so a lone click here can be refused outright and the counts never
+  // move. Same lesson as the torch placement and the bow draw.
+  const afterCook =
+    (await waitUntil(
+      'the fish to be cooked',
+      async () => {
+        await page.mouse.click(CENTER_X, CENTER_Y);
+        await page.waitForTimeout(500);
+        const now = await page.evaluate(() => ({
+          raw: window.__voxelquest.debugItemCount('raw_fish'),
+          cooked: window.__voxelquest.debugItemCount('cooked_fish'),
+        }));
+        return now.cooked > cooked.cooked ? now : null;
+      },
+      12_000,
+      150,
+    )) ??
+    (await page.evaluate(() => ({
+      raw: window.__voxelquest.debugItemCount('raw_fish'),
+      cooked: window.__voxelquest.debugItemCount('cooked_fish'),
+    })));
   check(
     'holding a torch cooks a raw fish instead of eating it',
     afterCook.cooked > cooked.cooked && afterCook.raw < cooked.raw,
@@ -1404,6 +1430,153 @@ try {
   check('aiming draws a trajectory arc', whileAiming.arcVisible === true);
   check('releasing restores the view', afterAim.fov > whileAiming.fov, `fov back to ${afterAim.fov}`);
   check('the arc disappears when not aiming', afterAim.arcVisible === false);
+
+  console.log('\n[character, skills and gold]');
+  const character = await page.evaluate(() => {
+    const g = window.__voxelquest;
+    // A build that can actually reach a capstone: Strength 15 clears the gate.
+    g.debugSetAbilities({ str: 15, dex: 12, con: 14, int: 10, wis: 10 });
+    g.debugGrantLevels(8);
+    return g.debugCharacter();
+  });
+  check(
+    'the sheet runs on five 5e abilities',
+    Object.keys(character.abilities).length === 5 && character.abilities.str === 15,
+    JSON.stringify(character.abilities),
+  );
+  check(
+    'modifiers follow floor((score - 10) / 2)',
+    character.modifiers.str === 2 && character.modifiers.con === 2 && character.modifiers.int === 0,
+    JSON.stringify(character.modifiers),
+  );
+  check(
+    'Constitution is what sets the health pool',
+    character.maxHp > 34,
+    `${character.maxHp} HP at CON ${character.abilities.con}`,
+  );
+  check('levelling grants skill points', character.skillPoints >= 8, `${character.skillPoints} points`);
+
+  // Buying through the same path the sheet uses, including the ability gate.
+  const bought = await page.evaluate(() => {
+    const g = window.__voxelquest;
+    const before = g.debugCharacter();
+    const edge = g.debugBuySkill('blade_edge');
+    const sunder = g.debugBuySkill('blade_sunder');
+    const capstone = g.debugBuySkill('blade_executioner');
+    return { before, edge, sunder, capstone, after: g.debugCharacter() };
+  });
+  check('a skill can be bought', bought.edge === true && (bought.after.skills.blade_edge ?? 0) >= 1);
+  check(
+    'buying a skill raises the stat it claims to',
+    bought.after.melee > bought.before.melee,
+    `melee x${bought.before.melee} -> x${bought.after.melee}`,
+  );
+  check(
+    'the prerequisite chain can be climbed',
+    bought.sunder === true && bought.capstone === true,
+    `sunder ${bought.sunder}, capstone ${bought.capstone}`,
+  );
+
+  const gated = await page.evaluate(() => {
+    const g = window.__voxelquest;
+    // Dropping Strength below the gate must take the capstone with it.
+    const after = g.debugSetAbilities({ str: 8 });
+    return { skills: after.skills, melee: after.melee };
+  });
+  check(
+    'lowering an ability prunes the skills it gated',
+    (gated.skills.blade_executioner ?? 0) === 0 && (gated.skills.blade_sunder ?? 0) === 0,
+    JSON.stringify(gated.skills),
+  );
+
+  // Gold, and the respec it pays for.
+  const respec = await page.evaluate(() => {
+    const g = window.__voxelquest;
+    g.debugSetAbilities({ str: 15 });
+    g.debugBuySkill('blade_edge');
+    const before = g.debugCharacter();
+    const broke = g.debugRespec();
+    g.debugGiveGold(5000);
+    const rich = g.debugRespec();
+    return { before, broke, rich, after: g.debugCharacter() };
+  });
+  check('a respec is refused without the gold', respec.broke === false, `cost ${respec.before.respecCost}`);
+  check(
+    'paying the fee clears the tree and charges the gold',
+    respec.rich === true &&
+      Object.keys(respec.after.skills).length === 0 &&
+      // Measured against the purse the player already had: earlier kills in this
+      // run pay out gold too, so 5000 is a top-up and not a starting balance.
+      respec.after.gold === respec.before.gold + 5000 - respec.before.respecCost,
+    `gold ${respec.before.gold} +5000 -${respec.before.respecCost} -> ${respec.after.gold}`,
+  );
+  check(
+    'a respec leaves ability scores alone',
+    respec.after.abilities.str === 15,
+    JSON.stringify(respec.after.abilities),
+  );
+  check(
+    'refunded points can be spent again',
+    respec.after.skillPoints >= respec.before.skillPoints,
+    `${respec.before.skillPoints} -> ${respec.after.skillPoints}`,
+  );
+
+  // Enemies have to actually pay out, or the respec fee is unreachable.
+  const earned = await page.evaluate(async () => {
+    const g = window.__voxelquest;
+    g.debugSetInvulnerable(true);
+    g.debugClearEnemies();
+    const start = g.debugCharacter().gold;
+    // Kill repeatedly: the drop is a roll, so one kill proves nothing.
+    for (let i = 0; i < 24; i++) {
+      g.debugSpawnEnemyInReach(2.4);
+      g.debugKillNearestEnemy();
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    return { start, spawned: true };
+  });
+  const goldAfterKills = await waitUntil(
+    'gold to be collected from kills',
+    async () => {
+      const c = await page.evaluate(() => window.__voxelquest.debugCharacter());
+      return c.gold > earned.start ? c : null;
+    },
+    20_000,
+    250,
+  );
+  check(
+    'enemies drop gold that the player collects',
+    (goldAfterKills?.gold ?? 0) > earned.start,
+    `${earned.start} -> ${goldAfterKills?.gold ?? earned.start} gold over 24 kills`,
+  );
+
+  // The sheet must render all four branches and the respec button.
+  const sheet = await page.evaluate(() => {
+    window.__voxelquest.debugOpenSheet();
+    return null;
+  });
+  void sheet;
+  await page.waitForTimeout(400);
+  const sheetDom = await page.evaluate(() => ({
+    branches: document.querySelectorAll('#sheet-skills .skill-branch').length,
+    nodes: document.querySelectorAll('#sheet-skills .skill-node').length,
+    respec: document.getElementById('respec')?.textContent ?? '',
+    abilities: Array.from(document.querySelectorAll('#sheet-stats .attr .an')).map((n) => n.textContent),
+  }));
+  check('the sheet shows four skill branches', sheetDom.branches === 4, `${sheetDom.branches} branches`);
+  check('every skill node is rendered', sheetDom.nodes === 20, `${sheetDom.nodes} nodes`);
+  check(
+    'the respec button shows its gold price',
+    sheetDom.respec.toLowerCase().includes('gold'),
+    sheetDom.respec,
+  );
+  check(
+    'the sheet lists the five abilities',
+    sheetDom.abilities.join(',') === 'STR,DEX,CON,INT,WIS',
+    sheetDom.abilities.join(','),
+  );
+  await page.evaluate(() => window.__voxelquest.debugCloseSheet());
+  await page.waitForTimeout(300);
 
   console.log('\n[minimap]');
   const minimapDrawn = await page.evaluate(() => {

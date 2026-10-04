@@ -1,7 +1,7 @@
 /**
  * Character-creation point buy, following the D&D 5e / Baldur's Gate 3 rules.
  *
- * Six ability scores start at 8, may be raised to at most 15 during creation, and
+ * Five ability scores start at 8, may be raised to at most 15 during creation, and
  * are paid for out of a fixed bank of 27 points on a scale that charges double for
  * the last two steps. That cost curve is the whole point of the system: it makes a
  * 15 cost more than twice a 13, so a spread of good scores is a real alternative to
@@ -28,7 +28,7 @@
  */
 
 /**
- * The six core abilities.
+ * The five core abilities.
  *
  * Written out as an interface rather than a `Record<AbilityKey, number>` alias so
  * that a missing ability is a compile error at every construction site, and so the
@@ -40,7 +40,6 @@ export interface AbilityScores {
   con: number;
   int: number;
   wis: number;
-  cha: number;
 }
 
 /** A single ability's key. Derived from the interface, so the two cannot drift. */
@@ -54,7 +53,7 @@ export type AbilityKey = keyof AbilityScores;
  * exist": loops and validation walk this, so adding or removing one is a change
  * here plus the interface above.
  */
-export const ABILITY_KEYS: readonly AbilityKey[] = ['str', 'dex', 'con', 'int', 'wis', 'cha'];
+export const ABILITY_KEYS: readonly AbilityKey[] = ['str', 'dex', 'con', 'int', 'wis'];
 
 export interface AbilityInfo {
   /** Three-letter form, as the sheet labels it. */
@@ -70,7 +69,6 @@ export const ABILITY_INFO: Readonly<Record<AbilityKey, AbilityInfo>> = {
   con: { abbr: 'CON', name: 'Constitution', blurb: 'Health, stamina recovery, and resistance to falling.' },
   int: { abbr: 'INT', name: 'Intelligence', blurb: 'Spell damage and the size of your mana pool.' },
   wis: { abbr: 'WIS', name: 'Wisdom', blurb: 'Spell slots, mana recovery, and magical resistance.' },
-  cha: { abbr: 'CHA', name: 'Charisma', blurb: 'Presence: how readily foes commit to you, and what they carry.' },
 };
 
 /** The rules of the creation phase, in one place. */
@@ -79,7 +77,7 @@ export const POINT_BUY = {
   baseline: 8,
   /** The highest score buyable during creation. Levelling exceeds this later. */
   manualMax: 15,
-  /** Points available to spend across all six abilities. */
+  /** Points available to spend across all five abilities. */
   budget: 27,
 } as const;
 
@@ -182,7 +180,7 @@ export function pointsSpent(scores: Readonly<AbilityScores>): number {
 }
 
 function baselineScores(): AbilityScores {
-  return { str: 8, dex: 8, con: 8, int: 8, wis: 8, cha: 8 };
+  return { str: 8, dex: 8, con: 8, int: 8, wis: 8 };
 }
 
 /** Wraps a set of scores into a state, recomputing the budget from scratch. */
@@ -285,11 +283,10 @@ export function sanitizeScores(raw: Partial<Record<AbilityKey, unknown>> | null 
 /**
  * A spread that spends the whole bank, for a "recommended" button.
  *
- * 15/15/14/10/8/8 costs exactly 9+9+7+2 = 27: two abilities at the cap, a strong
- * third, one ability nudged to average, and two conceded. The obvious-looking
- * 15/15/13/10 is only 25 — the double-priced steps make totals easy to get wrong
- * by hand, which is the same reason the cost table above is derived rather than
- * typed out.
+ * 15/15/14/10/8 costs exactly 9+9+7+2 = 27: two abilities at the cap, a strong
+ * third, one nudged to average, and one conceded. The obvious-looking 15/15/13/10
+ * is only 25 — the double-priced steps make totals easy to get wrong by hand,
+ * which is the same reason the cost table above is derived rather than typed out.
  */
 export function suggestedAllocation(primary: AbilityKey, secondary: AbilityKey, tertiary: AbilityKey): PointBuyState {
   const scores: AbilityScores = baselineScores();

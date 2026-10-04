@@ -241,7 +241,7 @@ canvas#game { display: block; width: 100vw; height: 100vh; }
   background: none; border: 1px solid var(--edge); color: var(--ink);
   font-size: 18px; width: 30px; height: 30px; cursor: pointer;
 }
-.sheet-cols { display: grid; grid-template-columns: 1fr 1fr 1.15fr; gap: 18px; margin-top: 14px; }
+.sheet-cols { display: grid; grid-template-columns: 0.85fr 0.9fr 1.1fr 1.1fr; gap: 18px; margin-top: 14px; }
 .sheet-cols h2 {
   font-size: 12px; text-transform: uppercase; letter-spacing: 1.4px;
   opacity: 0.6; margin: 0 0 8px; border-bottom: 1px solid var(--edge); padding-bottom: 5px;
@@ -345,3 +345,42 @@ button#play:hover, button#respawn:hover { background: var(--gold); color: #14110
   width: 148px; height: 20px;
   border: 1px solid var(--edge);
 }
+
+/* ---- skill tree ------------------------------------------------------- */
+
+/* The tree is the tallest column, so it scrolls on its own rather than
+   stretching the whole sheet past the viewport. */
+#sheet-skills { max-height: 56vh; overflow-y: auto; padding-right: 4px; }
+.skill-branch { margin-bottom: 12px; }
+.skill-branch > h3 {
+  font-size: 11px; text-transform: uppercase; letter-spacing: 1.2px;
+  margin: 0 0 2px; color: var(--gold); opacity: 0.85;
+}
+.skill-branch > p { margin: 0 0 6px; font-size: 10.5px; opacity: 0.5; line-height: 1.35; }
+.skill-node {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 11.5px; padding: 3px 0 3px 8px;
+  /* A left rule reads as the branch's spine, which is cheaper and clearer than
+     drawing real connector lines between absolutely positioned nodes. */
+  border-left: 2px solid var(--edge);
+}
+.skill-node.owned { border-left-color: var(--gold); }
+.skill-node.locked { opacity: 0.42; }
+.skill-node .sn { flex: 1; }
+.skill-node .sr { color: var(--gold); min-width: 30px; text-align: right; }
+.skill-node button {
+  background: rgba(255, 255, 255, 0.06); color: var(--ink);
+  border: 1px solid var(--edge); border-radius: 3px;
+  width: 20px; height: 18px; line-height: 1; cursor: pointer; font-size: 12px;
+}
+.skill-node button:disabled { opacity: 0.3; cursor: default; }
+.skill-tier { padding-left: 10px; }
+.skill-tier-3 { padding-left: 20px; }
+#respec {
+  margin-top: 8px; width: 100%; padding: 5px;
+  background: rgba(255, 203, 61, 0.1); color: var(--gold);
+  border: 1px solid var(--gold); border-radius: 3px;
+  cursor: pointer; font-size: 11px; letter-spacing: 0.4px;
+}
+#respec:disabled { opacity: 0.35; cursor: default; border-color: var(--edge); color: var(--ink); }
+.skill-mods { margin-top: 8px; font-size: 10.5px; opacity: 0.6; line-height: 1.45; }

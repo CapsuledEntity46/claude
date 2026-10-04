@@ -3,6 +3,7 @@ import type { Input } from '../core/Input';
 import { Block } from '../world/blocks';
 import type { World } from '../world/World';
 import { combineDefense, type DefenseProfile } from '../combat/types';
+import { buySkill, rankOf } from './Skills';
 import { Inventory } from './Inventory';
 import { PlayerStats } from './Stats';
 
@@ -92,10 +93,30 @@ export class Player {
     if (this.stats.guard > this.stats.maxGuard) this.stats.guard = this.stats.maxGuard;
   }
 
+  /**
+   * Buys a skill rank and refreshes everything derived from it.
+   *
+   * Lives on the Player rather than on PlayerStats because a new rank can change
+   * max health, armour and movement all at once, and the equipment-derived values
+   * have to be recomputed alongside them — the same reason spending an ability
+   * point goes through here.
+   */
+  buySkill(id: string): boolean {
+    const before = rankOf(this.stats.skills, id);
+    this.stats.skills = buySkill(this.stats.skills, id, this.stats.level, this.stats.abilities);
+    if (rankOf(this.stats.skills, id) === before) return false;
+    this.stats.syncSkills();
+    this.syncEquipmentDerived();
+    return true;
+  }
+
   get defense(): DefenseProfile {
     const armor = this.inventory.equippedDef('armor')?.armor ?? null;
     const ward = this.stats.wardArmor > 0 ? { armor: this.stats.wardArmor, resist: {} } : null;
-    return combineDefense([armor, ward]);
+    // Thick Hide is folded in as its own profile rather than added to the armour
+    // def, so a skill cannot be mistaken for the equipment's own rating.
+    const skills: DefenseProfile = { armor: this.stats.skillArmor, resist: {} };
+    return combineDefense([armor, ward, skills]);
   }
 
   get canBlock(): boolean {
@@ -277,7 +298,8 @@ export class Player {
     const distance = this.fallStart - this.position.y;
     this.fallStart = null;
     if (distance > 4) {
-      const damage = Math.round((distance - 4) * 3.2);
+      // Sure Footing absorbs part of the landing.
+      const damage = Math.round((distance - 4) * 3.2 * this.stats.fallDamageScale);
       if (damage > 0) this.onFallDamage?.(damage);
     }
   }

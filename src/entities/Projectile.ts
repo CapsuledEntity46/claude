@@ -198,7 +198,7 @@ class Projectile {
         amount: this.req.damage,
         type: this.req.type,
         armorPierce: this.req.armorPierce,
-        critChance: 0.1,
+        critChance: 0.1 + (this.req.critChance ?? 0),
       },
       at,
       this.req.knockback,

@@ -27,6 +27,14 @@ export interface ProjectileRequest {
   color?: number;
   /** Applies the frost slow on hit. */
   slow?: number;
+  /**
+   * Extra critical chance, added to the projectile's own.
+   *
+   * Carried on the request rather than read from the player at impact: a shot
+   * should land with the skill the character had when it was loosed, not with
+   * whatever they have respecced into while it was in flight.
+   */
+  critChance?: number;
   /** Sets the target burning on hit: damage per second, and duration. */
   burn?: number;
   burnDuration?: number;

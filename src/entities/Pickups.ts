@@ -50,11 +50,25 @@ const MANA_BUBBLE_MATERIAL = new THREE.MeshBasicMaterial({
   side: THREE.BackSide,
 });
 
-export type OrbKind = 'xp' | 'mana';
+export type OrbKind = 'xp' | 'mana' | 'gold';
+
+/**
+ * Coins are warm yellow, so the three currencies read apart at a glance even in
+ * the middle of a fight: purple experience, blue mana, gold coin.
+ */
+const GOLD_CORE_MATERIAL = new THREE.MeshBasicMaterial({ color: 0xffcb3d });
+const GOLD_BUBBLE_MATERIAL = new THREE.MeshBasicMaterial({
+  color: 0xd8a52a,
+  transparent: true,
+  opacity: 0.3,
+  depthWrite: false,
+  side: THREE.BackSide,
+});
 
 /** Small fixed palettes, so orb motes read as pixels and not as a soft gradient. */
 const XP_MOTE_COLORS = [0xd9a7ff, 0xb46cf5, 0x8f3fe0] as const;
 const MANA_MOTE_COLORS = [0xa8dcff, 0x5aa8f0, 0x2f6fc8] as const;
+const GOLD_MOTE_COLORS = [0xfff0b0, 0xffcb3d, 0xc8920f] as const;
 
 /**
  * A soft radial gradient, drawn on a canvas so the project needs no textures.
@@ -149,11 +163,20 @@ class ExpOrb extends Pickup {
   readonly kind: OrbKind;
 
   constructor(position: THREE.Vector3, value: number, kind: OrbKind = 'xp') {
-    super(new THREE.Mesh(GEO.orb, kind === 'mana' ? MANA_CORE_MATERIAL : ORB_MATERIAL), position);
+    super(
+      new THREE.Mesh(
+        GEO.orb,
+        kind === 'mana' ? MANA_CORE_MATERIAL : kind === 'gold' ? GOLD_CORE_MATERIAL : ORB_MATERIAL,
+      ),
+      position,
+    );
     this.value = value;
     this.kind = kind;
 
-    this.bubble = new THREE.Mesh(GEO.bubble, kind === 'mana' ? MANA_BUBBLE_MATERIAL : BUBBLE_MATERIAL);
+    this.bubble = new THREE.Mesh(
+      GEO.bubble,
+      kind === 'mana' ? MANA_BUBBLE_MATERIAL : kind === 'gold' ? GOLD_BUBBLE_MATERIAL : BUBBLE_MATERIAL,
+    );
     this.mesh.add(this.bubble);
 
     this.halo = new THREE.Mesh(GLOW_GEOMETRY, GLOW_MATERIAL);
@@ -210,7 +233,8 @@ class ExpOrb extends Pickup {
       this.trailTimer = 0.18 + Math.random() * 0.14;
       // Two-tone palette, so the motes look like stepped pixel art rather than a
       // continuous gradient of glow.
-      const palette = this.kind === 'mana' ? MANA_MOTE_COLORS : XP_MOTE_COLORS;
+      const palette =
+        this.kind === 'mana' ? MANA_MOTE_COLORS : this.kind === 'gold' ? GOLD_MOTE_COLORS : XP_MOTE_COLORS;
       ctx.particles.spawn(
         this.mesh.position.clone(),
         new THREE.Vector3((Math.random() - 0.5) * 0.45, 0.35 + Math.random() * 0.4, (Math.random() - 0.5) * 0.45),
@@ -258,6 +282,7 @@ class LootDrop extends Pickup {
 export interface PickupCallbacks {
   onXp(amount: number): void;
   onMana(amount: number): void;
+  onGold(amount: number): void;
   /** Returns true if the item was taken; false leaves the drop on the ground. */
   onItem(stack: Stack): boolean;
 }
@@ -275,6 +300,7 @@ export class PickupManager {
   /** Batches orbs collected in the same frame into one message each. */
   private pendingXp = 0;
   private pendingMana = 0;
+  private pendingGold = 0;
 
   constructor(callbacks: PickupCallbacks) {
     this.callbacks = callbacks;
@@ -285,7 +311,7 @@ export class PickupManager {
     return this.orbs.length;
   }
 
-  /** Splits an XP reward into a handful of orbs so pickup feels granular. */
+  /** Splits a reward into a handful of orbs so pickup feels granular. */
   spawnOrbs(position: THREE.Vector3, totalXp: number, kind: OrbKind = 'xp'): void {
     if (totalXp <= 0) return;
     const count = Math.max(1, Math.min(8, Math.round(totalXp / 8)));
@@ -325,6 +351,7 @@ export class PickupManager {
       if (orb.dead) {
         if (orb.life > 0) {
           if (orb.kind === 'mana') this.pendingMana += orb.value;
+          else if (orb.kind === 'gold') this.pendingGold += orb.value;
           else this.pendingXp += orb.value;
         }
         this.group.remove(orb.mesh, orb.halo);
@@ -342,6 +369,12 @@ export class PickupManager {
       this.callbacks.onMana(this.pendingMana);
       ctx.floater(ctx.player.center, `+${this.pendingMana} MP`, 'mana');
       this.pendingMana = 0;
+    }
+
+    if (this.pendingGold > 0) {
+      this.callbacks.onGold(this.pendingGold);
+      ctx.floater(ctx.player.center, `+${this.pendingGold} gold`, 'xp');
+      this.pendingGold = 0;
     }
 
     for (let i = this.drops.length - 1; i >= 0; i--) {

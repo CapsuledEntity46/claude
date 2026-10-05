@@ -1,0 +1,17 @@
+# Rojo / build output
+*.rbxl
+*.rbxlx
+*.rbxm
+*.rbxmx
+*.rbxl.lock
+*.rbxlx.lock
+build/
+
+# Toolchain
+/.lune/
+/sourcemap.json
+
+# Editor
+.vscode/
+.idea/
+.DS_Store

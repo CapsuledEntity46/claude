@@ -86,7 +86,7 @@ import { BAG_CAPACITY, tabForItem } from '../src/player/Inventory';
 import { CHUNK_SX, CHUNK_SY, CHUNK_SZ, Chunk, voxelIndex } from '../src/world/Chunk';
 import { meshChunk } from '../src/world/ChunkMesher';
 import { mulberry32 } from '../src/world/noise';
-import { Biome, SEA_LEVEL, TerrainGen } from '../src/world/TerrainGen';
+import { Biome, MAX_TREE_DENSITY, SEA_LEVEL, TerrainGen, treeDensity } from '../src/world/TerrainGen';
 import { TimeOfDay } from '../src/world/TimeOfDay';
 import { Weather } from '../src/world/Weather';
 
@@ -412,6 +412,156 @@ check(
   'player edits are re-applied after terrain regeneration',
   edited.voxels[voxelIndex(4, 40, 4)] === Block.Brick,
 );
+
+// ------------------------------------------------------------------ trees
+
+// The tree pass rejects a column by comparing one hash against the largest density
+// any biome uses, before it pays for the biome lookup that would give the real
+// figure. Understate that ceiling and the densest biome quietly loses the trees
+// above it — no error, just a thinner forest than the table asks for.
+{
+  let largest = 0;
+  // Biome is a const enum, so it is iterated by value here rather than by name.
+  for (let biome = 0; biome <= Biome.Wetland; biome++) {
+    largest = Math.max(largest, treeDensity(biome as Biome));
+  }
+  check(
+    'the tree spawn pre-filter admits every density in the table',
+    MAX_TREE_DENSITY >= largest,
+    `pre-filter ${MAX_TREE_DENSITY}, densest biome ${largest}`,
+  );
+  // And it must not be loose either, or the cheap rejection stops paying for itself.
+  check(
+    'the tree spawn pre-filter is tight',
+    MAX_TREE_DENSITY === largest,
+    `pre-filter ${MAX_TREE_DENSITY} equals the densest biome`,
+  );
+}
+
+/**
+ * Chunks grow their neighbours' trees and clip what lands outside, which is only
+ * seamless while each chunk evaluates a margin of columns at least as wide as the
+ * widest tree. Too narrow and canopies are sliced flat along chunk borders — a bug
+ * that is invisible from inside a single chunk, because the chunk is self-
+ * consistent; it only shows up as a straight green edge in the world.
+ *
+ * Asserted by regenerating with a deliberately over-wide margin: any voxel the
+ * wider pass finds that the default pass missed is a tree that was being cut off.
+ */
+{
+  let compared = 0;
+  let mismatches = 0;
+  for (const [cx, cz] of [
+    [0, 0],
+    [4, -7],
+    [-13, 21],
+    [57, 34],
+    [-40, -40],
+  ] as const) {
+    const normal = new Chunk(cx, cz);
+    const wide = new Chunk(cx, cz);
+    genA.generate(normal);
+    genA.generate(wide, 16);
+    compared++;
+    for (let i = 0; i < normal.voxels.length; i++) {
+      if (normal.voxels[i] !== wide.voxels[i]) mismatches++;
+    }
+  }
+  check(
+    'no tree is clipped at a chunk border',
+    mismatches === 0,
+    `${compared} chunks regenerated with a 16-block margin, ${mismatches} voxels differed`,
+  );
+}
+
+// Trees have to be a pure function of the root column, or the two chunks either
+// side of a trunk disagree about the tree and the canopy tears along the seam. A
+// per-tree PRNG is fine; a generator-wide one advanced per tree is not.
+{
+  const a = new Chunk(9, -4);
+  const b = new Chunk(9, -4);
+  const warm = new TerrainGen(12345);
+  // Warm one generator's caches with unrelated columns first, so the two runs
+  // reach this chunk having done different amounts of work.
+  for (let i = 0; i < 400; i++) warm.surfaceHeight(i * 3, i * 7);
+  warm.generate(a);
+  genA.generate(b);
+  check(
+    'trees do not depend on generation order',
+    a.voxels.every((v, i) => v === b.voxels[i]),
+    'shape comes from hashes of the root column, never from shared mutable state',
+  );
+}
+
+// The point of the exercise: trees that read as trees rather than as pillars with a
+// blob on top. Measured over enough forest to catch every species.
+{
+  let tallest = 0;
+  let trunks = 0;
+  let leaves = 0;
+  let wood = 0;
+  const heights: number[] = [];
+
+  for (let cx = 0; cx < 14; cx++) {
+    for (let cz = 0; cz < 14; cz++) {
+      const chunk = new Chunk(cx * 3, cz * 3);
+      genA.generate(chunk);
+      for (let i = 0; i < chunk.voxels.length; i++) {
+        if (chunk.voxels[i] === Block.Leaves) leaves++;
+        else if (chunk.voxels[i] === Block.Wood) wood++;
+      }
+      // A trunk is a wood column standing on something that is not wood; its
+      // height is how far the wood runs up from there.
+      for (let z = 0; z < CHUNK_SZ; z++) {
+        for (let x = 0; x < CHUNK_SX; x++) {
+          for (let y = 1; y < CHUNK_SY - 1; y++) {
+            if (chunk.voxels[voxelIndex(x, y, z)] !== Block.Wood) continue;
+            if (chunk.voxels[voxelIndex(x, y - 1, z)] === Block.Wood) continue;
+            let run = 0;
+            while (y + run < CHUNK_SY && chunk.voxels[voxelIndex(x, y + run, z)] === Block.Wood) run++;
+            // Four and up, to skip buttress roots and the stubs of limbs that
+            // happen to run vertically.
+            if (run >= 4) {
+              trunks++;
+              heights.push(run);
+              tallest = Math.max(tallest, run);
+            }
+            break;
+          }
+        }
+      }
+    }
+  }
+
+  heights.sort((p, q) => p - q);
+  const median = heights[heights.length >> 1] ?? 0;
+  // Sampled on a stride, so most of these chunks are ocean, desert or mountain —
+  // about 60% of the world grows nothing at all, and a forest chunk carries only
+  // four or five of these much larger trees.
+  check('the world grows trees', trunks > 100, `${trunks} trunks over 196 chunks`);
+  // The old generator topped out at a 6-block trunk outside the jungle and 11
+  // inside it. Doubling the trees means the median has to clear the old maximum.
+  check(
+    'trunks are roughly twice their old height',
+    median >= 9,
+    `median trunk ${median} blocks, tallest ${tallest} (was 4-6, jungle 7-11)`,
+  );
+  check('the tallest trees are jungle-giant scale', tallest >= 16, `${tallest} blocks`);
+  // Canopy per trunk. The old canopy was a 3-layer blob about 5 across, roughly 40
+  // voxels; a real crown with limbs is several times that.
+  check(
+    'canopies are full crowns rather than a blob on a pole',
+    leaves / Math.max(1, trunks) > 90,
+    `${Math.round(leaves / Math.max(1, trunks))} leaf voxels per trunk, ${leaves} leaves and ${wood} wood total`,
+  );
+  // Several distinct trunk heights, which is the cheap proxy for several species:
+  // one shape with one height range would cluster tightly.
+  check(
+    'trees vary in height rather than all being one stamp',
+    new Set(heights).size >= 8,
+    `${new Set(heights).size} distinct trunk heights, ${heights[0]} to ${tallest}`,
+  );
+}
 
 // ---------------------------------------------------------------- progression
 
@@ -1234,16 +1384,16 @@ section('block textures');
 check(
   'a grass block uses three different tiles',
   new Set([
-    tileForFace(Block.Grass, 'top', 0, 0),
-    tileForFace(Block.Grass, 'side', 0, 0),
-    tileForFace(Block.Grass, 'bottom', 0, 0),
+    tileForFace(Block.Grass, 'top', 0, 0, 0),
+    tileForFace(Block.Grass, 'side', 0, 0, 0),
+    tileForFace(Block.Grass, 'bottom', 0, 0, 0),
   ]).size === 3,
   'turf on top, fringe on the sides, soil underneath',
 );
 check(
   'a log shows end grain on its cut faces and bark on its sides',
-  tileForFace(Block.Wood, 'top', 0, 0) === tileForFace(Block.Wood, 'bottom', 0, 0) &&
-    tileForFace(Block.Wood, 'top', 0, 0) !== tileForFace(Block.Wood, 'side', 0, 0),
+  tileForFace(Block.Wood, 'top', 0, 0, 0) === tileForFace(Block.Wood, 'bottom', 0, 0, 0) &&
+    tileForFace(Block.Wood, 'top', 0, 0, 0) !== tileForFace(Block.Wood, 'side', 0, 0, 0),
   'rings above and below, bark around',
 );
 // Ground cover and foliage vary per block, or a dug pit and a canopy visibly
@@ -1251,25 +1401,62 @@ check(
 {
   const sample = (block: number, face: 'top' | 'side') => {
     const seen = new Set<number>();
-    for (let wx = 0; wx < 16; wx++) for (let wz = 0; wz < 16; wz++) seen.add(tileForFace(block, face, wx, wz));
+    for (let wx = 0; wx < 16; wx++) for (let wz = 0; wz < 16; wz++) seen.add(tileForFace(block, face, wx, 0, wz));
     return seen;
   };
   const grass = sample(Block.Grass, 'top');
   const leaves = sample(Block.Leaves, 'side');
+  const stone = sample(Block.Stone, 'side');
+  const sand = sample(Block.Sand, 'top');
   check('grass varies between blocks', grass.size > 1, `${grass.size} variants across 256 positions`);
   check('leaves vary between blocks', leaves.size > 1, `${leaves.size} variants across 256 positions`);
+  check('stone varies between blocks', stone.size > 1, `${stone.size} variants across 256 positions`);
+  check('sand varies between blocks', sand.size > 1, `${sand.size} variants across 256 positions`);
   // And the choice must be stable, or a block would flicker as chunks reload.
   check(
     'a block always picks the same variant',
-    tileForFace(Block.Grass, 'top', 7, -3) === tileForFace(Block.Grass, 'top', 7, -3),
+    tileForFace(Block.Grass, 'top', 7, 0, -3) === tileForFace(Block.Grass, 'top', 7, 0, -3),
     'variant is a pure function of world position',
+  );
+  // Ground cover is a single layer, so its variant must not depend on height — a
+  // grass block dug down and replaced would otherwise change tile.
+  check(
+    'ground cover ignores height when picking a variant',
+    tileForFace(Block.Grass, 'top', 7, 0, -3) === tileForFace(Block.Grass, 'top', 7, 61, -3),
+    'only the blocks that stack mix height into the hash',
   );
 }
 check(
   'untextured blocks sample the blank tile',
-  tileForFace(Block.Stone, 'top', 0, 0) === Tile.Blank && tileForFace(Block.DungeonBrick, 'side', 0, 0) === Tile.Blank,
+  tileForFace(Block.Planks, 'top', 0, 0, 0) === Tile.Blank &&
+    tileForFace(Block.DungeonBrick, 'side', 0, 0, 0) === Tile.Blank &&
+    tileForFace(Block.Snow, 'top', 0, 0, 0) === Tile.Blank,
   'so adding a texture to one block cannot disturb the rest of the world',
 );
+check(
+  'natural rock and sand are textured',
+  tileForFace(Block.Stone, 'side', 0, 0, 0) !== Tile.Blank &&
+    tileForFace(Block.Sand, 'top', 0, 0, 0) !== Tile.Blank &&
+    tileForFace(Block.Terracotta, 'side', 0, 0, 0) !== Tile.Blank,
+  'the three authored block GLBs reach the world',
+);
+check(
+  'the canyon strata keep two different tiles',
+  tileForFace(Block.Terracotta, 'side', 3, 9, 5) !== tileForFace(Block.PaleTerracotta, 'side', 3, 9, 5),
+  'a textured block takes its colour from the tile, so sharing one would erase the banding',
+);
+
+// Stone stacks hundreds of blocks deep. Keyed on the horizontal position alone,
+// every block in a column picks the same variant and a cliff comes out striped.
+{
+  const tiles = new Set<number>();
+  for (let y = 0; y < 64; y++) tiles.add(tileForFace(Block.Stone, 'side', 5, y, 9));
+  check(
+    'stone varies its tile down a column, not just across the ground',
+    tiles.size > 1,
+    `${tiles.size} variants in one 64-block column`,
+  );
+}
 
 // The mesher has to emit UVs, and has to write greyscale shading for textured blocks
 // so the texture supplies the hue. Both are invisible when wrong — a missing UV
@@ -1277,7 +1464,9 @@ check(
 {
   const chunk = new Chunk(0, 0);
   chunk.voxels[voxelIndex(4, 4, 4)] = Block.Grass;
-  chunk.voxels[voxelIndex(6, 4, 4)] = Block.Stone;
+  // Planks and not stone: stone is textured now, and a textured block deliberately
+  // writes greyscale, so it can no longer stand for "keeps its own tint".
+  chunk.voxels[voxelIndex(6, 4, 4)] = Block.Planks;
   const { opaque } = meshChunk(chunk, () => Block.Air);
 
   const position = opaque?.getAttribute('position');
@@ -1293,10 +1482,10 @@ check(
   const color = opaque!.getAttribute('color');
   // Ask the same question the mesher does, rather than assuming which variant a
   // block at this position lands on.
-  const grassTop = tileRect(tileForFace(Block.Grass, 'top', 4, 4));
+  const grassTop = tileRect(tileForFace(Block.Grass, 'top', 4, 4, 4));
   let greyscaleGrass = true;
   let grassVertices = 0;
-  let tintedStone = false;
+  let tintedFlat = false;
   for (let i = 0; i < uv!.count; i++) {
     const u = uv!.getX(i);
     const v = uv!.getY(i);
@@ -1308,7 +1497,7 @@ check(
       grassVertices++;
       if (Math.abs(r - g) > 1e-6 || Math.abs(g - b) > 1e-6) greyscaleGrass = false;
     }
-    if (Math.abs(r - g) > 0.02 || Math.abs(g - b) > 0.02) tintedStone = true;
+    if (Math.abs(r - g) > 0.02 || Math.abs(g - b) > 0.02) tintedFlat = true;
   }
   check(
     'a textured block writes greyscale shading, letting the texture carry the colour',
@@ -1317,8 +1506,8 @@ check(
   );
   check(
     'an untextured block still writes its own tint',
-    tintedStone,
-    'stone keeps the colour it had before textures existed',
+    tintedFlat,
+    'planks keep the colour they had before textures existed',
   );
 }
 
@@ -1346,7 +1535,7 @@ section('texture orientation');
   const position = opaque!.getAttribute('position');
   const normal = opaque!.getAttribute('normal');
   const uv = opaque!.getAttribute('uv');
-  const rect = tileRect(tileForFace(Block.Grass, 'side', 8, 8));
+  const rect = tileRect(tileForFace(Block.Grass, 'side', 8, 8, 8));
 
   let sideFaces = 0;
   let correctlyOriented = 0;

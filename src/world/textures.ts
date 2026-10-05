@@ -58,15 +58,22 @@ export const TILE_PIXELS = 128;
  */
 export const TILE_PADDING = 16;
 const CELL_PIXELS = TILE_PIXELS + TILE_PADDING * 2;
-const ATLAS_COLUMNS = 4;
+/**
+ * Grid width of the atlas, in cells.
+ *
+ * Five rather than four purely for headroom: the eighteen tiles below would fit a
+ * 4x4 grid with nothing to spare, and `tileRect` throws past the last slot — so the
+ * next block type to want a texture would fail at runtime rather than at review.
+ */
+const ATLAS_COLUMNS = 5;
 export const ATLAS_PIXELS = CELL_PIXELS * ATLAS_COLUMNS;
 
 /**
  * Tile slots in the atlas.
  *
- * Ground cover and foliage come in pairs. One tile per block type makes a dug pit or
- * a canopy visibly checkerboard, because every block carries the identical image; a
- * second variant chosen by world position breaks the repeat up at no cost.
+ * Ground cover, foliage and rock come in pairs. One tile per block type makes a dug
+ * pit or a canopy visibly checkerboard, because every block carries the identical
+ * image; a second variant chosen by world position breaks the repeat up at no cost.
  */
 export const Tile = {
   /** Flat white. Multiplying by this leaves a block's vertex colour untouched. */
@@ -82,6 +89,25 @@ export const Tile = {
   LogSide: 8,
   /** End grain: growth rings and radial cracks, for the cut faces of a log. */
   LogTop: 9,
+  /** Grey cracked stone — the bulk of everything underground and every mountain. */
+  StoneA: 10,
+  StoneB: 11,
+  /** Rippled desert sand, for beaches and dunes. */
+  SandA: 12,
+  SandB: 13,
+  /** Rust-red banded rock, for the badlands and the canyon walls. */
+  RedRockA: 14,
+  RedRockB: 15,
+  /**
+   * The same red rock washed pale.
+   *
+   * Canyon strata alternate Terracotta with PaleTerracotta, and the whole point of
+   * that is a visible band. Pointing both at one tile would texture the canyon
+   * beautifully and flatten its stripes away, because a textured block takes its
+   * colour from the tile rather than from its own tint.
+   */
+  PaleRedRockA: 16,
+  PaleRedRockB: 17,
 } as const;
 
 export type TileId = (typeof Tile)[keyof typeof Tile];
@@ -125,9 +151,15 @@ export function tileRect(tile: number): TileRect {
  *
  * Deterministic and independent of chunk boundaries, so the same block always draws
  * the same way however the world streams in.
+ *
+ * `wy` is mixed in as well as `wx`/`wz`, which matters for anything that stacks.
+ * Ground cover is a single layer and never noticed, but stone forms cliffs and mine
+ * shafts hundreds of blocks tall: keyed on the horizontal position alone, every
+ * block in a column picks the same variant and the wall comes out in vertical
+ * stripes — the exact artefact the second variant exists to prevent.
  */
-function variant(wx: number, wz: number, count: number): number {
-  let h = (wx * 374761393 + wz * 668265263) | 0;
+function variant(wx: number, wy: number, wz: number, count: number): number {
+  let h = (wx * 374761393 + wy * 1103515245 + wz * 668265263) | 0;
   h = (h ^ (h >>> 13)) * 1274126177;
   return Math.abs(h ^ (h >>> 16)) % count;
 }
@@ -137,22 +169,43 @@ function variant(wx: number, wz: number, count: number): number {
  *
  * Anything not listed gets the blank tile, so adding a texture to one block never
  * disturbs the rest of the world.
+ *
+ * Deliberately *not* extended to cobblestone, dungeon brick, slabs or stairs even
+ * though all of them are made of rock. Masonry reads as masonry because it is not
+ * natural stone, and the shaped blocks stretch a whole tile across each sub-cube
+ * box of their geometry, which a 128px rock face would show up badly. Ores stay flat
+ * for a gameplay reason: now that stone has detail, a flat ore block is *easier* to
+ * pick out of a wall than it was before.
  */
-export function tileForFace(blockId: number, face: 'top' | 'side' | 'bottom', wx = 0, wz = 0): number {
+export function tileForFace(
+  blockId: number,
+  face: 'top' | 'side' | 'bottom',
+  wx = 0,
+  wy = 0,
+  wz = 0,
+): number {
   switch (blockId) {
     case Block.Grass:
       // Turf on top, a ragged fringe of it hanging over gritty soil on the sides,
       // plain soil underneath.
-      if (face === 'top') return variant(wx, wz, 2) === 0 ? Tile.GrassTopA : Tile.GrassTopB;
+      if (face === 'top') return variant(wx, 0, wz, 2) === 0 ? Tile.GrassTopA : Tile.GrassTopB;
       if (face === 'side') return Tile.GrassSide;
-      return variant(wx, wz, 2) === 0 ? Tile.DirtA : Tile.DirtB;
+      return variant(wx, 0, wz, 2) === 0 ? Tile.DirtA : Tile.DirtB;
     case Block.Dirt:
-      return variant(wx, wz, 2) === 0 ? Tile.DirtA : Tile.DirtB;
+      return variant(wx, 0, wz, 2) === 0 ? Tile.DirtA : Tile.DirtB;
     case Block.Leaves:
-      return variant(wx, wz, 2) === 0 ? Tile.LeavesA : Tile.LeavesB;
+      return variant(wx, wy, wz, 2) === 0 ? Tile.LeavesA : Tile.LeavesB;
     case Block.Wood:
       // The cut faces show growth rings; the sides show bark.
       return face === 'side' ? Tile.LogSide : Tile.LogTop;
+    case Block.Stone:
+      return variant(wx, wy, wz, 2) === 0 ? Tile.StoneA : Tile.StoneB;
+    case Block.Sand:
+      return variant(wx, wy, wz, 2) === 0 ? Tile.SandA : Tile.SandB;
+    case Block.Terracotta:
+      return variant(wx, wy, wz, 2) === 0 ? Tile.RedRockA : Tile.RedRockB;
+    case Block.PaleTerracotta:
+      return variant(wx, wy, wz, 2) === 0 ? Tile.PaleRedRockA : Tile.PaleRedRockB;
     default:
       return Tile.Blank;
   }
@@ -171,7 +224,11 @@ export function isTexturedBlock(blockId: number): boolean {
     blockId === Block.Grass ||
     blockId === Block.Dirt ||
     blockId === Block.Leaves ||
-    blockId === Block.Wood
+    blockId === Block.Wood ||
+    blockId === Block.Stone ||
+    blockId === Block.Sand ||
+    blockId === Block.Terracotta ||
+    blockId === Block.PaleTerracotta
   );
 }
 
@@ -220,6 +277,57 @@ const BARK_LICHEN = ['#8a8b70', '#97987c'];
 const WOOD_RINGS = ['#d8b183', '#cfa676', '#c49a6a', '#bb8e60', '#b08354', '#c7a070'];
 const WOOD_DARK = ['#8a5f38', '#7a5230'];
 const WOOD_CRACK = '#4d341d';
+
+/**
+ * Rock palettes, for the procedurally painted fallback.
+ *
+ * Each is pitched at the mean luma `scripts/glb-tiles.mjs` tone-maps the authored
+ * tile to — grey stone 0.56, red rock 0.53, pale red rock 0.67 — so a browser that
+ * fails to fetch the sheets does not suddenly render a differently-lit world.
+ */
+interface RockPalette {
+  /** Broad tonal range of the rock face. */
+  body: readonly string[];
+  /** Catching the light on a raised plate. */
+  lit: readonly string[];
+  /** Crack and fissure ink. */
+  crack: readonly string[];
+  /** Flecks of mineral or lichen. */
+  fleck: readonly string[];
+}
+
+const STONE_ROCK: RockPalette = {
+  body: ['#8d8d91', '#97979b', '#838387', '#a1a1a5', '#79797d'],
+  lit: ['#b4b4b8', '#c0c0c4', '#aaaaae'],
+  crack: ['#4a4a4e', '#3e3e42', '#565659'],
+  fleck: ['#c8c8c0', '#8f9490', '#b0aca2'],
+};
+
+const RED_ROCK: RockPalette = {
+  body: ['#a86a3c', '#b47544', '#9c6034', '#c08250', '#8d542c'],
+  lit: ['#cb9262', '#d6a071', '#c08858'],
+  crack: ['#5a3118', '#4a2712', '#68391d'],
+  fleck: ['#d8b183', '#9a7a5a', '#c48f5e'],
+};
+
+const PALE_RED_ROCK: RockPalette = {
+  body: ['#cda679', '#d6b185', '#c29b6e', '#e0bd93', '#b78f64'],
+  lit: ['#e8cca6', '#f0d7b4', '#e2c49c'],
+  crack: ['#8a6440', '#7a5636', '#9a7450'],
+  fleck: ['#f0ddc0', '#bfa588', '#dcc2a0'],
+};
+
+/**
+ * Sand: a narrow, bright, warm ramp.
+ *
+ * Narrower than it looks like it should be. Sand's character is *ripple*, not tonal
+ * variety — the authored tile measures a luma stdev of 0.017 before its normal map
+ * is lit, which is to say the colour is nearly uniform and all the form comes from
+ * relief. Painting it with a wide ramp reads as gravel.
+ */
+const SAND_BODY = ['#ddc89b', '#e4d1a6', '#d4bd8e', '#ebdab4', '#cbb382'];
+const SAND_LIT = ['#f2e4c2', '#f8edd2'];
+const SAND_SHADE = ['#ab9064', '#9c8358', '#b99d71'];
 
 type Ctx = CanvasRenderingContext2D;
 
@@ -816,6 +924,151 @@ function drawEndGrain(ctx: Ctx, x: number, y: number, size: number, rand: () => 
 }
 
 
+// ------------------------------------------------------------------ rock
+
+/**
+ * Cracked rock: tonal plates divided by branching fissures.
+ *
+ * This is the *fallback*. The rock a player normally sees is baked from
+ * `assets/blocks/*.glb` by `scripts/glb-tiles.mjs` and composited over this tile
+ * once it loads. Painting it anyway is what keeps two promises: the unit tests mesh
+ * chunks in Node where no image can be fetched, and a browser that loses the
+ * request gets stone that still looks like stone instead of a flat grey cube.
+ *
+ * Fissures are drawn as *branching* runs rather than independent scratches. A field
+ * of unconnected strokes reads as damage to the texture; a few trunks with offshoots
+ * read as rock that has split.
+ */
+function drawRock(ctx: Ctx, x: number, y: number, size: number, rand: () => number, palette: RockPalette): void {
+  ctx.fillStyle = palette.body[0];
+  ctx.fillRect(x, y, size, size);
+
+  // Plates: broad overlapping washes, well above the scale of any crack, so the
+  // face has regions of light and shade rather than uniform noise.
+  for (let i = 0; i < 60; i++) {
+    blob(ctx, x + rand() * size, y + rand() * size, size * (0.1 + rand() * 0.26), pick(palette.body, rand), 0.5);
+  }
+  for (let i = 0; i < 14; i++) {
+    blob(ctx, x + rand() * size, y + rand() * size, size * (0.06 + rand() * 0.14), pick(palette.lit, rand), 0.3);
+  }
+
+  // Fissures. Each trunk wanders across the tile; each offshoot leaves it part way
+  // along at a shallow angle.
+  const trunks = 5;
+  for (let t = 0; t < trunks; t++) {
+    let px = x + rand() * size;
+    let py = y + rand() * size;
+    let angle = rand() * Math.PI * 2;
+    const segments = 3 + Math.floor(rand() * 3);
+    for (let s = 0; s < segments; s++) {
+      const length = size * (0.12 + rand() * 0.2);
+      angle += (rand() - 0.5) * 1.1;
+      const nx = px + Math.cos(angle) * length;
+      const ny = py + Math.sin(angle) * length;
+      stroke(ctx, px, py, nx, ny, size * 0.04 * (rand() - 0.5), pick(palette.crack, rand), 1 + rand() * 1.8, 0.6);
+      // A highlight along one side of the crack is what gives it depth: the lip of
+      // the break catches light that the groove itself does not.
+      stroke(
+        ctx,
+        px + size * 0.012,
+        py - size * 0.012,
+        nx + size * 0.012,
+        ny - size * 0.012,
+        0,
+        pick(palette.lit, rand),
+        0.9,
+        0.22,
+      );
+      if (rand() < 0.5) {
+        const branchAngle = angle + (rand() < 0.5 ? -1 : 1) * (0.5 + rand() * 0.7);
+        const branchLength = size * (0.06 + rand() * 0.12);
+        stroke(
+          ctx,
+          nx,
+          ny,
+          nx + Math.cos(branchAngle) * branchLength,
+          ny + Math.sin(branchAngle) * branchLength,
+          0,
+          pick(palette.crack, rand),
+          0.8 + rand(),
+          0.45,
+        );
+      }
+      px = nx;
+      py = ny;
+    }
+  }
+
+  // Grit and mineral flecks, at two scales.
+  grain(ctx, x, y, size, rand, palette.fleck, Math.round(size * size * 0.03), 1.4, 0.3);
+  grain(ctx, x, y, size, rand, palette.crack, Math.round(size * size * 0.02), 1.2, 0.2);
+  grain(ctx, x, y, size, rand, palette.body, Math.round(size * size * 0.035), 2.1, 0.3);
+
+  // A few embedded nodules, so the surface is not uniformly flat-faced.
+  const nodules = Math.round(size * size * 0.0012);
+  for (let i = 0; i < nodules; i++) {
+    stone(
+      ctx,
+      x + rand() * size,
+      y + rand() * size,
+      size * (0.025 + rand() * 0.04),
+      pick(palette.body, rand),
+      pick(palette.lit, rand),
+      rand,
+    );
+  }
+}
+
+// ------------------------------------------------------------------ sand
+
+/**
+ * Wind-rippled sand.
+ *
+ * The ripples are drawn as roughly parallel bowed strokes, each paired with a
+ * lighter one just above it. That pairing is the whole effect: a ripple is a crest
+ * and a trough, and a single-tone stroke reads as a scratch. The run direction
+ * wanders a little across the tile so the field does not look combed.
+ */
+function drawSand(ctx: Ctx, x: number, y: number, size: number, rand: () => number): void {
+  ctx.fillStyle = SAND_BODY[0];
+  ctx.fillRect(x, y, size, size);
+
+  for (let i = 0; i < 40; i++) {
+    blob(ctx, x + rand() * size, y + rand() * size, size * (0.1 + rand() * 0.25), pick(SAND_BODY, rand), 0.45);
+  }
+
+  // Ripple crests, marching across the tile at a shallow angle.
+  const ripples = 16;
+  const drift = (rand() - 0.5) * 0.5;
+  for (let i = 0; i < ripples; i++) {
+    const t = (i + rand() * 0.4) / ripples;
+    const y0 = y + t * size * 1.15 - size * 0.08;
+    const slope = drift + (rand() - 0.5) * 0.18;
+    const x0 = x - size * 0.1;
+    const x1 = x + size * 1.1;
+    const bow = size * (0.04 + rand() * 0.06) * (rand() < 0.5 ? -1 : 1);
+    // Trough first, then the crest a little above it.
+    stroke(ctx, x0, y0, x1, y0 + slope * size, bow, pick(SAND_SHADE, rand), size * 0.022, 0.3);
+    stroke(
+      ctx,
+      x0,
+      y0 - size * 0.018,
+      x1,
+      y0 + slope * size - size * 0.018,
+      bow,
+      pick(SAND_LIT, rand),
+      size * 0.016,
+      0.26,
+    );
+  }
+
+  // Fine grain. Dense and very low alpha — sand is made of visible grains, but at a
+  // scale where any individual one that reads on its own is a stone, not a grain.
+  grain(ctx, x, y, size, rand, SAND_LIT, Math.round(size * size * 0.06), 1.1, 0.22);
+  grain(ctx, x, y, size, rand, SAND_SHADE, Math.round(size * size * 0.035), 1.0, 0.16);
+  grain(ctx, x, y, size, rand, SAND_BODY, Math.round(size * size * 0.05), 1.8, 0.24);
+}
+
 // ------------------------------------------------------------------ atlas
 
 /**
@@ -829,6 +1082,124 @@ function drawEndGrain(ctx: Ctx, x: number, y: number, size: number, rand: () => 
 export function tryCreateBlockAtlas(): THREE.Texture | null {
   if (typeof document === 'undefined') return null;
   return createBlockAtlas();
+}
+
+/** Top-left pixel of a tile's drawn area, excluding its gutter. */
+function tileOrigin(tile: number): [number, number] {
+  return [
+    (tile % ATLAS_COLUMNS) * CELL_PIXELS + TILE_PADDING,
+    Math.floor(tile / ATLAS_COLUMNS) * CELL_PIXELS + TILE_PADDING,
+  ];
+}
+
+/**
+ * Smears a tile's border pixels outwards into its gutter.
+ *
+ * Has to be re-run on any tile whose pixels are replaced after the atlas is first
+ * built, or the gutter keeps the *old* tile's edge and mipmapping blends the two at
+ * distance — a stone face that fades to procedural grey as you walk away from it.
+ */
+function fillGutter(ctx: Ctx, canvas: HTMLCanvasElement, tile: number): void {
+  const [x, y] = tileOrigin(tile);
+  const p = TILE_PADDING;
+  const s = TILE_PIXELS;
+  ctx.drawImage(canvas, x, y, 1, s, x - p, y, p, s);
+  ctx.drawImage(canvas, x + s - 1, y, 1, s, x + s, y, p, s);
+  ctx.drawImage(canvas, x, y, s, 1, x, y - p, s, p);
+  ctx.drawImage(canvas, x, y + s - 1, s, 1, x, y + s, s, p);
+  ctx.drawImage(canvas, x, y, 1, 1, x - p, y - p, p, p);
+  ctx.drawImage(canvas, x + s - 1, y, 1, 1, x + s, y - p, p, p);
+  ctx.drawImage(canvas, x, y + s - 1, 1, 1, x - p, y + s, p, p);
+  ctx.drawImage(canvas, x + s - 1, y + s - 1, 1, 1, x + s, y + s, p, p);
+}
+
+/**
+ * The authored tile sheets, and which atlas slots each one fills.
+ *
+ * Baked from `assets/blocks/*.glb` by `npm run tiles` and committed under
+ * `public/textures/`, so a normal checkout needs no build step and no GLB parsing
+ * at runtime. Each sheet is one row of 128px variants.
+ *
+ * `wash` derives an extra, paler pair of tiles from the same image. Only red rock
+ * uses it, for the alternating canyon strata.
+ */
+const AUTHORED_SHEETS: readonly {
+  file: string;
+  tiles: readonly number[];
+  wash?: { tiles: readonly number[]; alpha: number };
+}[] = [
+  { file: 'rock.png', tiles: [Tile.StoneA, Tile.StoneB] },
+  { file: 'sand.png', tiles: [Tile.SandA, Tile.SandB] },
+  {
+    file: 'red-rock.png',
+    tiles: [Tile.RedRockA, Tile.RedRockB],
+    // 0.30 and not more: the wash both lightens and desaturates, and it scales the
+    // tile's contrast by (1 - alpha) as it goes. Past about 0.45 the pale band
+    // stops clearing the contrast floor that the smoke suite enforces, which is
+    // the same thing as saying it stops looking like rock.
+    wash: { tiles: [Tile.PaleRedRockA, Tile.PaleRedRockB], alpha: 0.3 },
+  },
+];
+
+/** Loads one image, resolving to null rather than rejecting if it is unavailable. */
+function loadImage(url: string): Promise<HTMLImageElement | null> {
+  return new Promise((resolve) => {
+    const image = new Image();
+    image.onload = () => resolve(image);
+    image.onerror = () => resolve(null);
+    image.src = url;
+  });
+}
+
+/**
+ * Composites the authored rock and sand tiles over the painted ones.
+ *
+ * Deliberately *not* awaited by startup. The atlas is complete and correct the
+ * moment `createBlockAtlas` returns, because every tile these sheets replace has
+ * already been painted in code; this only upgrades them. Nothing downstream depends
+ * on the pixels: UVs are fixed by `tileRect`, so chunks meshed before the sheets
+ * arrive pick up the new image for free on the next frame drawn.
+ *
+ * Which means a slow or failed fetch costs exactly the procedural look, never a
+ * stall on a loading screen and never an untextured world. Resolves with the number
+ * of sheets applied, so callers and tests can tell which of the two happened.
+ */
+export async function loadAuthoredBlockTiles(texture: THREE.Texture, baseUrl = 'textures/'): Promise<number> {
+  if (typeof document === 'undefined' || typeof Image === 'undefined') return 0;
+  const canvas = texture.image as HTMLCanvasElement | undefined;
+  if (!canvas) return 0;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return 0;
+
+  const sheets = await Promise.all(AUTHORED_SHEETS.map((sheet) => loadImage(baseUrl + sheet.file)));
+
+  let applied = 0;
+  sheets.forEach((image, index) => {
+    if (!image) return;
+    const sheet = AUTHORED_SHEETS[index];
+    // Variant size comes from the image rather than from TILE_PIXELS, so a
+    // re-bake at a different resolution scales instead of cropping.
+    const source = image.height;
+
+    const paint = (tile: number, slot: number, wash: number): void => {
+      const [tx, ty] = tileOrigin(tile);
+      ctx.drawImage(image, slot * source, 0, source, source, tx, ty, TILE_PIXELS, TILE_PIXELS);
+      if (wash > 0) {
+        ctx.globalAlpha = wash;
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(tx, ty, TILE_PIXELS, TILE_PIXELS);
+        ctx.globalAlpha = 1;
+      }
+      fillGutter(ctx, canvas, tile);
+    };
+
+    sheet.tiles.forEach((tile, slot) => paint(tile, slot, 0));
+    sheet.wash?.tiles.forEach((tile, slot) => paint(tile, slot, sheet.wash!.alpha));
+    applied++;
+  });
+
+  if (applied > 0) texture.needsUpdate = true;
+  return applied;
 }
 
 /**
@@ -852,8 +1223,7 @@ export function atlasTileStats(texture: THREE.Texture): Record<string, { mean: n
 
   const names = Object.entries(Tile);
   for (const [name, tile] of names) {
-    const x = (tile % ATLAS_COLUMNS) * CELL_PIXELS + TILE_PADDING;
-    const y = Math.floor(tile / ATLAS_COLUMNS) * CELL_PIXELS + TILE_PADDING;
+    const [x, y] = tileOrigin(tile);
     const { data } = ctx.getImageData(x, y, TILE_PIXELS, TILE_PIXELS);
     let sum = 0;
     let sumSq = 0;
@@ -889,13 +1259,8 @@ export function createBlockAtlas(): THREE.Texture {
   // Fixed seed: the atlas is identical every run, so screenshots are comparable.
   const rand = mulberry32(0x9e3779b9);
 
-  const originOf = (tile: number): [number, number] => [
-    (tile % ATLAS_COLUMNS) * CELL_PIXELS + TILE_PADDING,
-    Math.floor(tile / ATLAS_COLUMNS) * CELL_PIXELS + TILE_PADDING,
-  ];
-
   const draw = (tile: number, paint: (x: number, y: number) => void): void => {
-    const [x, y] = originOf(tile);
+    const [x, y] = tileOrigin(tile);
     paint(x, y);
   };
 
@@ -915,20 +1280,19 @@ export function createBlockAtlas(): THREE.Texture {
   draw(Tile.LogSide, (x, y) => drawBark(ctx, x, y, TILE_PIXELS, rand));
   draw(Tile.LogTop, (x, y) => drawEndGrain(ctx, x, y, TILE_PIXELS, rand));
 
+  // Rock and sand. These are the fallback for the authored sheets in
+  // public/textures/, which loadAuthoredBlockTiles composites over them.
+  draw(Tile.StoneA, (x, y) => drawRock(ctx, x, y, TILE_PIXELS, rand, STONE_ROCK));
+  draw(Tile.StoneB, (x, y) => drawRock(ctx, x, y, TILE_PIXELS, rand, STONE_ROCK));
+  draw(Tile.SandA, (x, y) => drawSand(ctx, x, y, TILE_PIXELS, rand));
+  draw(Tile.SandB, (x, y) => drawSand(ctx, x, y, TILE_PIXELS, rand));
+  draw(Tile.RedRockA, (x, y) => drawRock(ctx, x, y, TILE_PIXELS, rand, RED_ROCK));
+  draw(Tile.RedRockB, (x, y) => drawRock(ctx, x, y, TILE_PIXELS, rand, RED_ROCK));
+  draw(Tile.PaleRedRockA, (x, y) => drawRock(ctx, x, y, TILE_PIXELS, rand, PALE_RED_ROCK));
+  draw(Tile.PaleRedRockB, (x, y) => drawRock(ctx, x, y, TILE_PIXELS, rand, PALE_RED_ROCK));
+
   // Gutters: extend each tile's edge pixels outwards.
-  for (const tile of ALL_TILE_IDS) {
-    const [x, y] = originOf(tile);
-    const p = TILE_PADDING;
-    const s = TILE_PIXELS;
-    ctx.drawImage(canvas, x, y, 1, s, x - p, y, p, s);
-    ctx.drawImage(canvas, x + s - 1, y, 1, s, x + s, y, p, s);
-    ctx.drawImage(canvas, x, y, s, 1, x, y - p, s, p);
-    ctx.drawImage(canvas, x, y + s - 1, s, 1, x, y + s, s, p);
-    ctx.drawImage(canvas, x, y, 1, 1, x - p, y - p, p, p);
-    ctx.drawImage(canvas, x + s - 1, y, 1, 1, x + s, y - p, p, p);
-    ctx.drawImage(canvas, x, y + s - 1, 1, 1, x - p, y + s, p, p);
-    ctx.drawImage(canvas, x + s - 1, y + s - 1, 1, 1, x + s, y + s, p, p);
-  }
+  for (const tile of ALL_TILE_IDS) fillGutter(ctx, canvas, tile);
 
   const texture = new THREE.CanvasTexture(canvas);
   // Crisp texels close up, mipmapped in the distance. Nearest sampling alone

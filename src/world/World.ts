@@ -3,7 +3,7 @@ import { Block, blockCollisionBoxes, blockDef, isLightSource, isSolid, isTargeta
 import { CHUNK_SX, CHUNK_SY, CHUNK_SZ, Chunk, MeshState, chunkKey, voxelIndex } from './Chunk';
 import { meshChunk } from './ChunkMesher';
 import { TerrainGen } from './TerrainGen';
-import { atlasTileStats, tryCreateBlockAtlas } from './textures';
+import { atlasTileStats, loadAuthoredBlockTiles, tryCreateBlockAtlas } from './textures';
 import { META_OPEN, metaIsOpen } from './shapes';
 
 export interface RaycastHit {
@@ -122,6 +122,11 @@ export class World {
    */
   private lights = new Map<string, { x: number; y: number; z: number }>();
 
+  /** Resolves once the authored tile sheets have been fetched, applied or given up on. */
+  private authoredTiles: Promise<number> = Promise.resolve(0);
+  /** How many authored sheets made it into the atlas. 0 means the painted fallback. */
+  private authoredTileCount = 0;
+
   constructor(seed: number, renderDistance = 6) {
     this.gen = new TerrainGen(seed);
     this.renderDistance = renderDistance;
@@ -144,12 +149,35 @@ export class World {
       transparent: true,
       opacity: 0.72,
     });
+
+    // Rock and sand have authored tiles baked from assets/blocks/*.glb, which get
+    // composited over the painted ones when they arrive. Started and not awaited on
+    // purpose: every tile they replace is already drawn, and UVs come from
+    // `tileRect` rather than from the image, so chunks meshed in the meantime need
+    // no remeshing — the next frame simply samples better pixels. A failed fetch
+    // therefore costs the procedural look and nothing else.
+    if (atlas) {
+      this.authoredTiles = loadAuthoredBlockTiles(atlas).then((count) => {
+        this.authoredTileCount = count;
+        return count;
+      });
+    }
   }
 
   /** Per-tile brightness and contrast of the atlas. A flat tile has stdev near 0. */
   debugAtlasStats(): Record<string, unknown> {
     const map = this.opaqueMat.map;
     return map ? atlasTileStats(map) : {};
+  }
+
+  /**
+   * Waits for the authored tile sheets to settle, and reports how many applied.
+   *
+   * Only the diagnostics need this. Nothing in the game waits on it — see the
+   * constructor for why there is nothing to wait for.
+   */
+  debugAuthoredTiles(): Promise<number> {
+    return this.authoredTiles;
   }
 
   /** Atlas and UV plumbing, for diagnosis. See Game.debugTerrainMaterial. */
@@ -174,6 +202,7 @@ export class World {
     return {
       hasMap: !!map,
       atlasWidth: map?.image?.width ?? 0,
+      authoredTiles: this.authoredTileCount,
       vertexColors: this.opaqueMat.vertexColors,
       meshes,
       uvCount,

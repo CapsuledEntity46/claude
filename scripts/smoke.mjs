@@ -279,6 +279,17 @@ try {
     terrainMaterial.vertexColors === true,
     'ambient occlusion and face shading are preserved',
   );
+  // Rock and sand are authored: baked from assets/blocks/*.glb into public/textures/
+  // and composited over the painted tiles when they load. That load is deliberately
+  // allowed to fail — the fallback is a perfectly good procedural rock — which is
+  // exactly why it needs asserting. A wrong path, a missing copy into dist, or a
+  // broken bake all leave a world that looks fine and is quietly not using the art.
+  const authored = await page.evaluate(() => window.__voxelquest.debugAuthoredTiles());
+  check(
+    'the authored block tiles reached the atlas',
+    authored === 3,
+    `${authored} of 3 sheets applied (0 means the procedural fallback is showing)`,
+  );
 
   // Every tile has to carry visible detail.
   //

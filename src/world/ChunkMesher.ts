@@ -135,6 +135,7 @@ function emitShape(
   y: number,
   z: number,
   wx: number,
+  wy: number,
   wz: number,
   def: BlockDef,
   meta: number,
@@ -158,7 +159,7 @@ function emitShape(
       const tint = def[face.tint];
       const shade = CUBE_FACE_SHADE[f];
       const start = buf.pos.length / 3;
-      const rect = tileRect(tileForFace(def.id, face.tint, wx, wz));
+      const rect = tileRect(tileForFace(def.id, face.tint, wx, wy, wz));
       const swapUV = FACE_UV_SWAP[f];
       // A shaped block's boxes are sub-cube, so its faces take the whole tile
       // rather than a slice of it. Every shaped block currently samples the blank
@@ -289,7 +290,7 @@ export function meshChunk(chunk: Chunk, neighbor: NeighborLookup): MeshResult {
         // term is defined against the voxel lattice, and sampling it at
         // arbitrary sub-block positions produces creases in the wrong places.
         if (def.shape !== 'cube') {
-          emitShape(buf, x, y, z, baseX + x, baseZ + z, def, chunk.meta[index]);
+          emitShape(buf, x, y, z, baseX + x, y, baseZ + z, def, chunk.meta[index]);
           continue;
         }
 
@@ -309,8 +310,10 @@ export function meshChunk(chunk: Chunk, neighbor: NeighborLookup): MeshResult {
           const emissive = def.emissive ?? 0;
           const faceShade = CUBE_FACE_SHADE[faceIndex];
           // World coordinates, so a block's texture variant is the same however the
-          // world streams in and does not change at chunk boundaries.
-          const rect = tileRect(tileForFace(id, face.tint, baseX + x, baseZ + z));
+          // world streams in and does not change at chunk boundaries. The vertical
+          // coordinate is included because stone stacks: without it a cliff face
+          // picks one variant for its whole column and comes out striped.
+          const rect = tileRect(tileForFace(id, face.tint, baseX + x, y, baseZ + z));
           const swapUV = FACE_UV_SWAP[faceIndex];
           // For a textured block the vertex colour carries shading only and the
           // texture supplies the hue. Multiplying a green texture by an already

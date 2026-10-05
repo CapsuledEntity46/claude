@@ -1,6 +1,6 @@
 import { Block } from './blocks';
 import { CHUNK_SX, CHUNK_SY, CHUNK_SZ, Chunk, voxelIndex } from './Chunk';
-import { Noise, hash2i } from './noise';
+import { Noise, hash2i, mulberry32 } from './noise';
 
 /**
  * The waterline.
@@ -18,6 +18,27 @@ const MAX_HEIGHT = CHUNK_SY - 8;
 /** Terrain above this is bare rock and then snow, whatever the biome says. */
 const TREE_LINE = 104;
 const SNOW_LINE = 118;
+
+/**
+ * Largest horizontal distance, in blocks, that any tree may write from its trunk.
+ *
+ * This is a contract, not an observation. Chunks grow the trees of their neighbours
+ * and clip what falls outside, which only produces a seamless canopy while the
+ * margin of columns each chunk evaluates is at least this wide — so the widest crown
+ * and the longest limb-plus-cluster in `placeTrees` both have to stay inside it. The
+ * jungle giant is the binding case at 4 blocks of limb plus a 2.6-block cluster.
+ */
+const MAX_TREE_REACH = 7;
+
+/**
+ * The largest value `treeDensity` returns.
+ *
+ * Lets the tree pass reject a column with one integer hash, before paying for the
+ * biome lookup that would tell it the real density. Understating it silently stops
+ * the densest biome's trees from spawning, which is why a unit check holds the two
+ * together rather than a comment asking the next person to remember.
+ */
+export const MAX_TREE_DENSITY = 0.017;
 
 export const enum Biome {
   Plains,
@@ -421,8 +442,14 @@ export class TerrainGen {
     return null;
   }
 
-  /** Fills a chunk's voxel array, then re-applies any saved player edits. */
-  generate(chunk: Chunk): void {
+  /**
+   * Fills a chunk's voxel array, then re-applies any saved player edits.
+   *
+   * `treeMargin` exists for one test, which regenerates a chunk with a wider margin
+   * and requires the result to be identical — that is what proves `MAX_TREE_REACH`
+   * is actually wide enough for the trees as written. Callers should leave it alone.
+   */
+  generate(chunk: Chunk, treeMargin = MAX_TREE_REACH): void {
     const vox = chunk.voxels;
     vox.fill(Block.Air);
     const baseX = chunk.cx * CHUNK_SX;
@@ -478,7 +505,7 @@ export class TerrainGen {
       }
     }
 
-    this.placeTrees(chunk);
+    this.placeTrees(chunk, treeMargin);
 
     // Player edits go on top of the generated terrain, so anything you have built
     // or mined always wins.
@@ -487,76 +514,308 @@ export class TerrainGen {
   }
 
   /**
+   * Grows the trees.
+   *
    * Trees are generated for a margin of columns *outside* the chunk as well, and
    * only the voxels landing inside get written. That way a trunk near a border
-   * still grows its canopy across the seam without inter-chunk messaging.
+   * still grows its canopy across the seam without inter-chunk messaging: both
+   * chunks evaluate the same root column, compute the identical tree, and each
+   * keeps its own half. Everything here is therefore a pure function of
+   * `(wx, wz, seed)` — a per-tree PRNG is seeded from the root column, so the
+   * sequence of decisions depends only on which tree it is and never on the order
+   * chunks happen to be generated in.
+   *
+   * The invariant that makes it work is `margin >= MAX_TREE_REACH`. Get it wrong
+   * and canopies are sliced off at chunk borders; `scripts/unit.ts` asserts it by
+   * regenerating with a wider margin and demanding the same voxels.
+   *
+   * `margin` is a parameter only so that test can vary it.
    */
-  private placeTrees(chunk: Chunk): void {
-    const margin = 3;
+  private placeTrees(chunk: Chunk, margin = MAX_TREE_REACH): void {
     const baseX = chunk.cx * CHUNK_SX;
     const baseZ = chunk.cz * CHUNK_SZ;
     const vox = chunk.voxels;
 
-    const put = (wx: number, y: number, wz: number, id: Block, overwrite: boolean) => {
+    /** Writes a leaf, never over anything solid. */
+    const leaf = (wx: number, y: number, wz: number): void => {
       const lx = wx - baseX;
       const lz = wz - baseZ;
       if (lx < 0 || lx >= CHUNK_SX || lz < 0 || lz >= CHUNK_SZ) return;
       if (y < 0 || y >= CHUNK_SY) return;
       const i = voxelIndex(lx, y, lz);
-      if (!overwrite && vox[i] !== Block.Air) return;
-      vox[i] = id;
+      if (vox[i] !== Block.Air) return;
+      vox[i] = Block.Leaves;
     };
+
+    /**
+     * Writes wood.
+     *
+     * `force` is for the trunk, which replaces the surface block it stands on so
+     * the tree is rooted rather than balanced on top of the grass. Limbs leave it
+     * off: a branch is allowed to displace air and its own foliage, but one that
+     * overwrote terrain would bore a wooden plug through the hillside behind it.
+     */
+    const wood = (wx: number, y: number, wz: number, force = false): void => {
+      const lx = wx - baseX;
+      const lz = wz - baseZ;
+      if (lx < 0 || lx >= CHUNK_SX || lz < 0 || lz >= CHUNK_SZ) return;
+      if (y < 0 || y >= CHUNK_SY) return;
+      const i = voxelIndex(lx, y, lz);
+      if (!force && vox[i] !== Block.Air && vox[i] !== Block.Leaves) return;
+      vox[i] = Block.Wood;
+    };
+
+    /** Hash of a voxel position. Absolute, so two chunks rag an edge identically. */
+    const hash3 = (x: number, y: number, z: number, salt: number): number =>
+      hash2i(x, Math.imul(z, 92837111) ^ Math.imul(y, 689287499), this.seed ^ salt);
+
+    /**
+     * A clump of foliage: an ellipsoid with a deterministically ragged shell.
+     *
+     * `squash` is how much more a block of vertical distance counts than a block of
+     * horizontal — above 1 the clump is a flattened dome, which is what most
+     * canopies are. `ragged` is the fraction of the outermost shell to drop, and it
+     * is what stops the clump reading as a geometric solid.
+     */
+    const clump = (
+      cx: number,
+      cy: number,
+      cz: number,
+      radius: number,
+      squash: number,
+      ragged: number,
+    ): void => {
+      const reach = Math.min(Math.ceil(radius), MAX_TREE_REACH);
+      const lift = Math.ceil(radius / Math.sqrt(squash));
+      for (let dy = -lift; dy <= lift; dy++) {
+        for (let dz = -reach; dz <= reach; dz++) {
+          for (let dx = -reach; dx <= reach; dx++) {
+            const d = Math.sqrt(dx * dx + dz * dz + dy * dy * squash);
+            if (d > radius) continue;
+            if (d > radius - 1 && hash3(cx + dx, cy + dy, cz + dz, 0x1eaf) < ragged) continue;
+            leaf(cx + dx, cy + dy, cz + dz);
+          }
+        }
+      }
+    };
+
+    /** A branch, as a voxelised line of wood. */
+    const limb = (x0: number, y0: number, z0: number, x1: number, y1: number, z1: number): void => {
+      const steps = Math.max(Math.abs(x1 - x0), Math.abs(y1 - y0), Math.abs(z1 - z0));
+      for (let s = 0; s <= steps; s++) {
+        const t = steps === 0 ? 0 : s / steps;
+        wood(Math.round(x0 + (x1 - x0) * t), Math.round(y0 + (y1 - y0) * t), Math.round(z0 + (z1 - z0) * t));
+      }
+    };
+
+    const TAU = Math.PI * 2;
 
     for (let wz = baseZ - margin; wz < baseZ + CHUNK_SZ + margin; wz++) {
       for (let wx = baseX - margin; wx < baseX + CHUNK_SX + margin; wx++) {
+        // One integer hash rejects ~98% of columns before anything expensive runs.
+        // Widening the margin to cover the new canopies took this loop from 484
+        // columns a chunk to 900, and `biomeAt`/`surfaceHeight` are the two hottest
+        // paths in the generator — so the spawn roll is taken first, against the
+        // largest density any biome uses, and only survivors pay for a biome
+        // lookup. Identical distribution, a fraction of the work.
+        const roll = hash2i(wx, wz, this.seed ^ 0x5eed);
+        if (roll >= MAX_TREE_DENSITY) continue;
+
         const biome = this.biomeAt(wx, wz);
-        const density = treeDensity(biome);
-        if (density === 0) continue;
-        if (hash2i(wx, wz, this.seed ^ 0x5eed) >= density) continue;
+        if (roll >= treeDensity(biome)) continue;
 
         const h = this.surfaceHeight(wx, wz);
         if (h <= SEA_LEVEL + 1 || h > TREE_LINE) continue;
 
-        // Jungle trees are taller, which is what lets the pillars read as
-        // pillars: canopy at two different heights instead of one flat ceiling.
-        const tall = biome === Biome.Jungle;
-        const trunk = (tall ? 7 : 4) + Math.floor(hash2i(wx, wz, this.seed ^ 0xa11) * (tall ? 5 : 3));
-        const topY = h + trunk;
+        // Caves are carved *after* the surface is laid down, so a column's top
+        // voxel may be a hole. Recomputed from the same pure function rather than
+        // read back out of the chunk: a tree rooted in the chunk next door has to
+        // reach the same verdict here as it does there, and reading voxels would
+        // only work for roots inside this one — the two would then disagree about
+        // whether the tree exists at all and slice its canopy along the seam.
+        if (this.isCave(wx, h, wz)) continue;
 
-        // Canopy: a squashed sphere with a deterministic ragged edge.
-        const spread = tall ? 3.3 : 2.6;
-        for (let dy = -2; dy <= 2; dy++) {
-          const radius = dy === 2 ? spread - 1.6 : dy === -2 ? spread - 0.6 : spread;
-          for (let dz = -4; dz <= 4; dz++) {
-            for (let dx = -4; dx <= 4; dx++) {
-              const d = Math.sqrt(dx * dx + dz * dz + dy * dy * 1.6);
-              if (d > radius) continue;
-              if (d > radius - 0.9 && hash2i(wx + dx * 7, wz + dz * 13 + dy * 31, this.seed) < 0.35) continue;
-              put(wx + dx, topY + dy, wz + dz, Block.Leaves, false);
+        // Per-tree PRNG, seeded from the root column. hash2i returns a float
+        // scaled from a uint32, so multiplying it back recovers that integer.
+        const rand = mulberry32((hash2i(wx, wz, this.seed ^ 0xa11) * 4294967296) >>> 0);
+        // Species is rolled on its own salt, so retuning a tree's shape cannot
+        // shuffle which species grow where.
+        const kind = treeKind(biome, h, hash2i(wx, wz, this.seed ^ 0x5bec1e5));
+
+        switch (kind) {
+          case TreeKind.Pine: {
+            // A conifer: one straight bole, whorls of foliage tapering to a tip.
+            const trunkH = 12 + Math.floor(rand() * 6);
+            const topY = h + trunkH;
+            for (let y = h; y <= topY; y++) wood(wx, y, wz, true);
+
+            const skirt = h + 2 + Math.floor(rand() * 2);
+            const tiers = Math.max(3, Math.floor((topY - skirt) / 2));
+            for (let t = 0; t <= tiers; t++) {
+              const y = skirt + t * 2;
+              if (y > topY) break;
+              // Quadratic rather than linear, so the tree flares into a skirt near
+              // the ground instead of reading as a straight-sided triangle.
+              const f = 1 - t / tiers;
+              // Squash 2.6 and not more: the whorls sit two blocks apart, and at 3.4
+              // each one was a single-voxel disc with clear air between it and the
+              // next — the bole showed through and the tree read as threadbare.
+              // Just over 2.6 is what makes consecutive whorls touch at their inner
+              // radius while still pinching in to a tip.
+              clump(wx, y, wz, 0.9 + f * f * 3.2, 2.6, 0.24);
             }
+            clump(wx, topY + 1, wz, 1.2, 2, 0.2);
+            break;
+          }
+
+          case TreeKind.Birch: {
+            // Slender: a tall bare bole and a narrow crown held high.
+            const trunkH = 11 + Math.floor(rand() * 4);
+            const topY = h + trunkH;
+            for (let y = h; y <= topY; y++) wood(wx, y, wz, true);
+
+            clump(wx, topY, wz, 2.3 + rand() * 0.5, 2.4, 0.42);
+            clump(wx, topY - 2 - Math.floor(rand() * 2), wz, 2 + rand() * 0.5, 2.6, 0.5);
+            // One token limb, so it is not a perfectly straight pole.
+            const angle = rand() * TAU;
+            const from = topY - 3 - Math.floor(rand() * 3);
+            const ex = wx + Math.round(Math.cos(angle) * 2);
+            const ez = wz + Math.round(Math.sin(angle) * 2);
+            limb(wx, from, wz, ex, from + 2, ez);
+            clump(ex, from + 3, ez, 1.7, 2, 0.45);
+            break;
+          }
+
+          case TreeKind.Jungle: {
+            // The giant: bare for most of its height, then a broad layered crown.
+            const trunkH = 16 + Math.floor(rand() * 7);
+            const topY = h + trunkH;
+            for (let y = h; y <= topY; y++) wood(wx, y, wz, true);
+
+            // Buttress roots. A trunk this tall looks staked into the ground
+            // without them.
+            for (let i = 0; i < 4; i++) {
+              const a = (i / 4) * TAU + 0.4;
+              wood(wx + Math.round(Math.cos(a)), h, wz + Math.round(Math.sin(a)));
+            }
+
+            clump(wx, topY, wz, 5 + rand() * 0.8, 2.8, 0.42);
+            const limbs = 3 + Math.floor(rand() * 3);
+            for (let i = 0; i < limbs; i++) {
+              const a = (i / limbs) * TAU + rand() * 0.8;
+              const reach = 3 + Math.floor(rand() * 2);
+              const from = topY - 2 - Math.floor(rand() * 4);
+              const ex = wx + Math.round(Math.cos(a) * reach);
+              const ez = wz + Math.round(Math.sin(a) * reach);
+              limb(wx, from, wz, ex, from + 1, ez);
+              clump(ex, from + 1, ez, 2 + rand() * 0.6, 2.2, 0.45);
+            }
+            break;
+          }
+
+          case TreeKind.Willow: {
+            // Swamp tree: short, thick, wide-domed, with foliage hanging off the rim.
+            const trunkH = 7 + Math.floor(rand() * 3);
+            const topY = h + trunkH;
+            for (let y = h; y <= topY; y++) wood(wx, y, wz, true);
+
+            clump(wx, topY, wz, 4.2 + rand() * 0.8, 1.3, 0.4);
+            const strands = 5 + Math.floor(rand() * 4);
+            for (let i = 0; i < strands; i++) {
+              const a = (i / strands) * TAU + rand() * 0.6;
+              const rr = 2.6 + rand() * 1.6;
+              const sx = wx + Math.round(Math.cos(a) * rr);
+              const sz = wz + Math.round(Math.sin(a) * rr);
+              const drop = 3 + Math.floor(rand() * 4);
+              for (let d = 0; d < drop; d++) leaf(sx, topY - 1 - d, sz);
+            }
+            break;
+          }
+
+          default: {
+            // Oak: a broad irregular crown carried on several limbs.
+            const trunkH = 9 + Math.floor(rand() * 4);
+            const topY = h + trunkH;
+            for (let y = h; y <= topY; y++) wood(wx, y, wz, true);
+
+            clump(wx, topY, wz, 3.6 + rand() * 0.8, 1.6, 0.4);
+            const limbs = 3 + Math.floor(rand() * 2);
+            for (let i = 0; i < limbs; i++) {
+              const a = (i / limbs) * TAU + rand() * 0.9;
+              const reach = 2 + Math.floor(rand() * 2);
+              const from = h + Math.round(trunkH * (0.55 + rand() * 0.3));
+              const ex = wx + Math.round(Math.cos(a) * reach);
+              const ez = wz + Math.round(Math.sin(a) * reach);
+              const ey = from + 1 + Math.floor(rand() * 2);
+              limb(wx, from, wz, ex, ey, ez);
+              clump(ex, ey + 1, ez, 2 + rand() * 0.7, 1.5, 0.45);
+            }
+            break;
           }
         }
-        for (let y = h; y <= topY; y++) put(wx, y, wz, Block.Wood, true);
       }
     }
   }
 }
 
-function treeDensity(biome: Biome): number {
+/** The tree shapes. Which one grows is decided by biome and altitude. */
+const enum TreeKind {
+  Oak,
+  Birch,
+  Pine,
+  Jungle,
+  Willow,
+}
+
+/**
+ * Which species grows in a column.
+ *
+ * Mixing two shapes within a biome is what stops a forest reading as one asset
+ * stamped repeatedly, and the altitude rule gives a forested mountainside a visible
+ * band of conifers below the tree line rather than oaks all the way up.
+ */
+function treeKind(biome: Biome, h: number, roll: number): TreeKind {
   switch (biome) {
     case Biome.Jungle:
-      // Lower than it looks like it should be. At 0.09 the canopies merged into
-      // one unbroken green slab at a single height, which hides the pillars the
-      // biome exists to show off.
-      return 0.055;
-    case Biome.Forest:
-      return 0.055;
+      return TreeKind.Jungle;
     case Biome.Wetland:
-      return 0.03;
-    case Biome.Plains:
-      return 0.008;
+      return TreeKind.Willow;
     case Biome.Tundra:
-      return 0.012;
+      return TreeKind.Pine;
+    case Biome.Forest:
+      if (h > 92) return TreeKind.Pine;
+      if (roll < 0.22) return TreeKind.Pine;
+      if (roll < 0.42) return TreeKind.Birch;
+      return TreeKind.Oak;
+    default:
+      return roll < 0.3 ? TreeKind.Birch : TreeKind.Oak;
+  }
+}
+
+/**
+ * Chance per column that a tree roots there.
+ *
+ * These dropped by roughly a factor of three when the trees grew. Canopy *area*
+ * goes as the square of the crown radius, so doubling a tree's size without
+ * thinning the stand does not give a denser forest — it gives one unbroken slab of
+ * leaves at a single height, with no trunks and no sky visible underneath. The
+ * numbers below are solved for the coverage wanted rather than guessed: for a crown
+ * of area `a` and target coverage `c`, trees per column is `-ln(1 - c) / a`.
+ */
+export function treeDensity(biome: Biome): number {
+  switch (biome) {
+    case Biome.Forest:
+      return 0.017;
+    case Biome.Jungle:
+      // The sparsest of the woodlands relative to its canopy, because the jungle's
+      // whole visual point is the terrain pillars rising *through* the trees.
+      return 0.01;
+    case Biome.Wetland:
+      return 0.01;
+    case Biome.Tundra:
+      return 0.005;
+    case Biome.Plains:
+      return 0.003;
     default:
       return 0;
   }

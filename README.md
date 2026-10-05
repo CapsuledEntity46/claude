@@ -205,6 +205,68 @@ What that produces, measured over a 6000-block square (`npm run survey`):
 - **Lava tunnels** deeper still, on a channel field offset far from the water one
   so the two networks never meet and drain into each other. Lava burns.
 
+### Trees
+
+Five species, chosen by biome and by altitude:
+
+| Tree | Where | Trunk | Shape |
+| --- | --- | :-: | --- |
+| **Oak** | Forest, Plains | 9–12 | Broad irregular crown carried on 3–4 limbs |
+| **Birch** | Forest, Plains | 11–14 | Slender, bare, a narrow crown held high |
+| **Pine** | Tundra, high Forest | 12–17 | Whorls tapering from a wide skirt to a tip |
+| **Jungle giant** | Jungle | 16–22 | Bare for most of its height, then a layered crown and buttress roots |
+| **Willow** | Wetland | 7–9 | Low wide dome with foliage hanging off the rim |
+
+A trunk used to be 4–6 blocks (7–11 in the jungle) with a squashed sphere on top,
+which is a *pillar with a blob on it* rather than a tree. Measured on the same
+sample, the median trunk went from 6 blocks to 13 and the canopy from about 40 leaf
+voxels to 156. Conifers take over from oaks above y=92, so a forested mountainside
+has a visible altitude band instead of oaks running to the tree line.
+
+Four things worth knowing if you touch `placeTrees`:
+
+- **Density had to fall by about a third as the trees grew**, and the two changes
+  are not independent. Canopy *area* goes as the square of the crown radius, so
+  doubling a tree without thinning the stand does not give a denser forest — it
+  gives one unbroken slab of leaves at a single height, with no trunks and no sky
+  underneath. The numbers are solved for the coverage wanted rather than guessed:
+  for a crown of area `a` and target coverage `c`, trees per column is
+  `-ln(1 - c) / a`. Total foliage in the world barely moved; it is simply gathered
+  into a third as many trees that are each eight times the volume.
+
+- **`margin >= MAX_TREE_REACH` is the invariant the whole approach rests on.**
+  There is no inter-chunk messaging: each chunk grows its neighbours' trees too and
+  clips whatever lands outside itself, which is seamless only because both sides
+  compute a bit-identical tree. Let a canopy out-reach the margin and it is sliced
+  flat along the chunk border — a bug that is invisible from inside any single
+  chunk, because each chunk is self-consistent. A unit check regenerates with a
+  deliberately over-wide margin and demands the same voxels, which turns the
+  invariant into something the suite can prove rather than something a reviewer has
+  to re-derive from the widest crown.
+
+- **Widening the margin made generation *faster*.** It took the tree pass from 484
+  columns per chunk to 900, and `biomeAt`/`surfaceHeight` are the two hottest paths
+  in the generator. Taking the spawn roll *first*, against the largest density any
+  biome uses, rejects ~98% of columns with one integer hash before anything pays
+  for a biome lookup — the distribution is identical and the measured cost of
+  `generate` fell from 2.82 ms to 2.63 ms.
+
+- **A tree has to be a pure function of its root column.** Shape comes from a PRNG
+  seeded from `(wx, wz, seed)`, so each tree's decisions depend only on which tree
+  it is. A generator-wide RNG advanced once per tree would make a canopy depend on
+  how many trees had been built before it, and the two chunks either side of a
+  trunk would disagree about the tree and tear it along the seam.
+
+Bigger canopies cost less than they look like they should, because the mesher
+already culls faces between two blocks of the same kind: a canopy is hollow, so its
+triangles go as its surface area and never as its volume. Meshing a chunk went from
+3.26 ms to 3.75 ms.
+
+Trees also no longer root themselves in holes. Caves are carved *after* the surface
+is laid down, so a column's top voxel may be air; the tree pass now re-asks the cave
+function rather than reading the voxel back, because a tree rooted in the chunk next
+door has to reach the same verdict on both sides.
+
 Three things this cost that are worth knowing:
 
 - **The mesher now skips the empty sky** above each chunk's tallest voxel. Chunks
@@ -504,7 +566,10 @@ src/
                view model, trails, rain, stars, sun and moon, lights, cracks, arc
   ui/          HUD, minimap and compass, character sheet, icon fallback
   save/        IndexedDB persistence
+assets/        Authored source art. Block GLBs, not shipped to the browser
+public/        Baked block tiles, served as-is
 scripts/       Tests: unit checks, headless smoke test, screenshots, diagnostics
+               and the offline texture bake (npm run tiles)
 ```
 
 ### Items are low-poly, not voxelised
@@ -515,7 +580,8 @@ free low-poly geometry with no grid restriction at all. Swords are tapered blade
 with a real point, a cross-guard and a turned pommel; shields are bowed bevelled
 plates with a ring rim and a boss; bows are swept curves; mace heads carry flanges.
 
-Everything is still generated in code — there are no external assets. Geometry is
+Every item's geometry is generated in code — no model is ever loaded. (Block
+*textures* are the one authored thing in the project; see below.) Geometry is
 built **non-indexed** so `computeVertexNormals` gives one normal per triangle
 instead of averaging across them, which is what produces faceted low-poly shading
 rather than a soft blob.
@@ -541,15 +607,19 @@ Three traps worth knowing if you extend `fx/models.ts`:
 
 ### Block textures
 
-Ground cover and trees are textured: turf on top of a grass block with a ragged fringe
-of it hanging over gritty pebbled soil on the sides, leaves as dense overlapping
-foliage with veins, and logs showing **growth rings on their cut faces and bark around
-their sides**. Everything else is still flat-coloured.
+Ground cover, trees and natural rock are textured: turf on top of a grass block with a
+ragged fringe of it hanging over gritty pebbled soil on the sides, leaves as dense
+overlapping foliage with veins, logs showing **growth rings on their cut faces and bark
+around their sides**, and cracked stone, rust-red canyon rock and rippled sand.
+Masonry, ore, snow and everything built is still flat-coloured.
 
-The atlas is **generated in code on a canvas at load** — no external assets, same rule
-as the models. Tiles are 128px and sampled with `LinearFilter`, so the result reads as
-a photograph of soil or bark rather than as pixel art. Drawn from a fixed seed, so the
-atlas is identical every run and screenshots stay comparable.
+Tiles are 128px in an 800px atlas and sampled with `LinearFilter`, so the result reads
+as a photograph of soil or bark rather than as pixel art. Every tile is painted in code
+from a fixed seed, so the atlas is identical every run and screenshots stay comparable.
+
+Ore stays flat on purpose, and it is a gameplay decision rather than an oversight:
+now that stone carries detail, a flat iron or gold block is *easier* to pick out of a
+wall than it was when both were plain colours.
 
 Getting there took three passes. 32px with nearest-filter sampling was far too coarse —
 a 3px pebble is a tenth of a 32px face, so soil read as confetti. 64px fixed the scale
@@ -567,10 +637,77 @@ Two palette corrections worth knowing, because both are counter-intuitive:
   brighter and it came out a vivid emerald lawn. Turf needs the *red* channel raised —
   olive, not emerald.
 
-Ground cover and foliage come in **two variants each**, chosen by a hash of the block's
-world position. One tile per block type makes a dug pit or a canopy visibly
+Ground cover, foliage and rock come in **two variants each**, chosen by a hash of the
+block's world position. One tile per block type makes a dug pit or a canopy visibly
 checkerboard, because every block carries the identical image. The choice is a pure
 function of position, so it never changes as chunks stream in.
+
+The hash includes the block's **height** as well as its horizontal position, which
+only matters for the things that stack. Ground cover is a single layer and never
+noticed, but stone runs hundreds of blocks deep: keyed on x and z alone, every block
+in a column picks the same variant and a cliff face or a mine shaft comes out in
+vertical stripes — the exact artefact the second variant exists to prevent. Ground
+cover deliberately still ignores height, so digging a grass block up and putting it
+back does not change its tile.
+
+### Rock and sand are authored
+
+Stone, canyon rock and sand are the one part of the game that comes from art rather
+than from code. The sources are in `assets/blocks/` as Blender cubes with 1024px
+baked colour, normal and roughness maps. `npm run tiles` bakes them into the atlas
+tiles committed under `public/textures/`, which is the only form the browser ever
+sees — **7.3 MB of source becomes 252 KB of tiles**, and a checkout needs no build
+step to run.
+
+Four things that bake does which are not obvious:
+
+- **It reads the model's UV layout instead of assuming one.** A Blender default cube
+  unwrap is a cross on a 4×4 grid of quarter-cells, so each face is a 256px region
+  and most of the image is unused grey filler. Slicing the image naively textures the
+  world with that filler. Two of the six faces are shipped as the variants, chosen as
+  the pair that differs most — they are baked from the same material, so a similar
+  pair would waste the slot that exists to break up the per-block repeat.
+
+- **It bakes relief from the normal map into the colour.** The terrain material is a
+  `MeshLambertMaterial` with one `map`, so surface relief has nowhere to come from at
+  runtime. Sand is the proof: its colour map measures a luma stdev of **0.017** — flat
+  enough that the smoke suite's "every tile carries visible detail" check rejects
+  it — while its normal map is full of ripples. Lighting that normal map from a fixed
+  direction and multiplying it in puts the relief somewhere the renderer can see it,
+  which is the same trick the mesher already plays with `CUBE_FACE_SHADE`.
+
+- **It solves its tone curve instead of being tuned by hand.** A tile has to land near
+  the brightness its block used to render at flat — stone at 0.49, sand at 0.85 — or
+  turning textures on visibly re-lights the world. Rock bakes at 0.34, and multiplying
+  by 1.6 clips every highlight, so the exponent is solved from the measurement:
+  `pow(mean, g) = target`. Contrast then gets its own pass, because the two fight:
+  relief is multiplied in *linear* light, which is correct, and sRGB encoding then
+  compresses that variation by roughly the 2.4 exponent — a normal map with an N·L
+  spread of 0.21 came out as a tile with a stdev of 0.043. Solving a stretch factor
+  from the measured stdev makes the result a guarantee rather than a hope. The stretch
+  is capped, because an uncapped factor on a nearly flat source amplifies 8-bit
+  quantisation into banding rather than inventing detail that was never there.
+
+- **Pale canyon rock is derived, not a second asset.** The strata alternate Terracotta
+  with PaleTerracotta, and a textured block takes its colour from its *tile* rather
+  than from its own tint — so pointing both at one tile textures the canyon
+  beautifully and erases the banding the biome exists for. The pale tile is the red
+  rock washed 30% towards white at atlas-build time. Not more than 30%: the wash
+  scales contrast by `1 - alpha` as it lightens, and past about 0.45 the pale band
+  stops clearing the contrast floor, which is the same thing as saying it stops
+  looking like rock.
+
+**Every authored tile is painted procedurally first, and the sheets composite over
+it.** That is what keeps the load off the startup path: the atlas is complete and
+correct the moment it is built, UVs come from `tileRect` rather than from the image,
+so chunks meshed before the sheets arrive need no remeshing and simply sample better
+pixels on the next frame. A slow or failed fetch therefore costs the painted look and
+nothing else — never a loading screen, never an untextured world. It is also what
+lets the unit tests mesh real chunks in Node, where no image can be fetched at all.
+
+Since that fallback is deliberately invisible, the smoke suite asserts the authored
+sheets actually arrived. A wrong path, a missing copy into `dist/`, or a broken bake
+would otherwise leave a world that looks fine and is quietly not using the art.
 
 Leaves are drawn opaque, with deep shadow green between the leaves rather than an
 alpha cutout. They render in the opaque pass on a material shared with every other
@@ -741,13 +878,17 @@ Some notes on the parts that are less obvious than they look:
 ## Tests
 
 ```bash
-npm test            # typecheck + 334 unit checks
+npm test            # typecheck + 349 unit checks
 npm run test:unit   # damage model, mesher, terrain determinism, inventory
 npm run test:smoke  # boots the real build in headless Chromium and plays it
 npm run survey      # terrain statistics over a 6000-block square
 npm run perf        # chunk generation and meshing cost per chunk
 npm run shots:terrain  # photographs each terrain feature
+npm run tiles       # re-bakes assets/blocks/*.glb into public/textures/
 ```
+
+`npm run tiles` is only needed after changing the source art; its output is
+committed.
 
 The unit checks assert the *design*, not just the code: that a sword is not built
 out of boxes and converges on a real point, that a tower shield is big enough to be

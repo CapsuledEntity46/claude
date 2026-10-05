@@ -99,6 +99,11 @@ await shot('island', 'island', 72, 24);
 await shot('deep-ocean', 'deep-ocean', 55, 14);
 await shot('jungle', 'jungle', 76, 30);
 await shot('desert', 'desert', 90, 22);
+// Woodland. Shot from further back and higher than the landforms above, because a
+// tree is only legible against sky or against the stand behind it — from inside a
+// canopy every one of these is just green filling the frame.
+await shot('forest', 'forest', 78, 26);
+await shot('tundra', 'tundra', 78, 24);
 
 await browser.close();
 server.close();

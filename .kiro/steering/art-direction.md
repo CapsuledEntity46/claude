@@ -20,7 +20,29 @@ Real triangles are fine. `LatheGeometry`, `ExtrudeGeometry`, `CylinderGeometry`,
 `ConeGeometry`, and hand-built `BufferGeometry` are all fair game. Keep the
 triangle budget modest and the silhouette readable — low *poly*, not low effort.
 
-Still no external assets: geometry stays procedural and generated in code.
+**Geometry stays procedural and generated in code.** No model is ever loaded at
+runtime. That rule is about *shape*, and it is not negotiable: a silhouette that
+can only be changed in Blender cannot be tuned against the game.
+
+## Block textures may be authored
+
+Surface *texture* is the one exception, and only for the voxel world's own blocks.
+Authored source art lives in `assets/blocks/` as `.glb`, and `npm run tiles` bakes
+it down into committed atlas tiles in `public/textures/`.
+
+The rules that keep that from leaking:
+
+- **Nothing authored is loaded at runtime in its source form.** The GLBs are
+  ~2.5 MB each; the tiles baked out of them are ~85 KB. The bake is offline and
+  its output is committed, so a checkout needs no build step.
+- **Only the colour is taken, never the mesh.** These files happen to contain a
+  cube. The cube is not the asset — the baked maps on it are.
+- **Every authored tile has a procedural fallback painted in code.** The atlas is
+  complete and correct before any fetch resolves, the authored sheets merely
+  composite over it, and a failed request costs the painted look and nothing
+  else. Startup never waits on a texture.
+- **Items, creatures, props and particles get none of this.** They stay fully
+  procedural, colour included.
 
 ## What stays blocky
 

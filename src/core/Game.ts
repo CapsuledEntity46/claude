@@ -51,6 +51,24 @@ const MAX_FRAME_DT = 1 / 20;
 
 type Mode = 'menu' | 'playing' | 'sheet' | 'dead';
 
+/**
+ * Terrain features the screenshot and diagnostic harnesses can fly to.
+ *
+ * Named rather than repeated inline because `debugFindTerrain` and
+ * `debugViewFeature` both take it and have to stay in step. Extending one of two
+ * duplicated unions compiles perfectly well and then misses the predicate switch.
+ */
+export type TerrainTarget =
+  | 'mountain'
+  | 'canyon'
+  | 'deep-ocean'
+  | 'island'
+  | 'plateau'
+  | 'jungle'
+  | 'desert'
+  | 'forest'
+  | 'tundra';
+
 export class Game {
   private renderer: THREE.WebGLRenderer;
   private scene = new THREE.Scene();
@@ -1045,6 +1063,16 @@ export class Game {
     return this.world.debugAtlasStats();
   }
 
+  /**
+   * How many authored tile sheets made it into the atlas, once they have settled.
+   *
+   * Zero means the procedural fallback is on screen, which looks deliberate and is
+   * therefore worth being able to assert against.
+   */
+  debugAuthoredTiles(): Promise<number> {
+    return this.world.debugAuthoredTiles();
+  }
+
   /** Block highlight state, for verifying the mining animation advances. */
   debugHighlight(): Record<string, unknown> | null {
     const state = this.combat.highlightState();
@@ -1405,7 +1433,7 @@ export class Game {
    * well under a second. Returns where it landed, or null if nothing matched.
    */
   debugFindTerrain(
-    want: 'mountain' | 'canyon' | 'deep-ocean' | 'island' | 'plateau' | 'jungle' | 'desert',
+    want: TerrainTarget,
     maxRadius = 4000,
   ): { x: number; y: number; z: number; biome: number; height: number } | null {
     const gen = this.world.gen;
@@ -1441,6 +1469,22 @@ export class Game {
           return biome === Biome.Jungle && h > SEA_LEVEL + 20;
         case 'desert':
           return biome === Biome.Desert;
+        case 'forest':
+          // A stand of trees, not a single forest column on a biome border — the
+          // neighbour tests are what stop this photographing a meadow with one
+          // oak at the edge of frame.
+          return (
+            biome === Biome.Forest &&
+            h > SEA_LEVEL + 4 &&
+            h < 88 &&
+            gen.biomeAt(x + 20, z) === Biome.Forest &&
+            gen.biomeAt(x, z + 20) === Biome.Forest
+          );
+        case 'tundra':
+          // Where the conifers grow.
+          return (
+            biome === Biome.Tundra && h > SEA_LEVEL + 3 && gen.biomeAt(x + 20, z) === Biome.Tundra
+          );
       }
     };
 
@@ -1476,7 +1520,7 @@ export class Game {
    * aims the camera back.
    */
   debugViewFeature(
-    want: 'mountain' | 'canyon' | 'deep-ocean' | 'island' | 'plateau' | 'jungle' | 'desert',
+    want: TerrainTarget,
     distance = 90,
     rise = 8,
   ): { x: number; z: number; height: number; fromX: number; fromZ: number; drop: number } | null {

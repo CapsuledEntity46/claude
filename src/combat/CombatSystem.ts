@@ -2,8 +2,8 @@ import * as THREE from 'three';
 import type { GameContext } from '../core/Context';
 import type { Input } from '../core/Input';
 import type { Enemy } from '../entities/Enemy';
-import { Block, blockDef, blockDrop, isSolid, isTargetable } from '../world/blocks';
-import { facingFromYaw, makeMeta } from '../world/shapes';
+import { Block, blockDef, blockDrop, isSolid, isTargetable, type BlockDef } from '../world/blocks';
+import { facingFromYaw, makeMeta, shapeHugsFace } from '../world/shapes';
 import type { RaycastHit } from '../world/World';
 import { PLAYER_HALF_WIDTH, PLAYER_HEIGHT } from '../player/Player';
 import { ammoItemFor, item, itemForBlock, type ItemDef } from './items';
@@ -465,9 +465,9 @@ export class CombatSystem {
       this.diag.lastPress = `item=${active?.id ?? 'none'} kind=${active?.kind ?? 'none'} state=${this.state} cd=${this.useCooldown.toFixed(2)}`;
     }
 
-    // Dedicated mining while a placeable is selected (blocks and torches).
-    if (active?.kind === 'block' || active?.kind === 'torch') {
-      if (input.isMouseDown(0)) this.mine(dt, ctx, 1);
+    // Dedicated mining while a placeable or a tool is selected.
+    if (active?.kind === 'block' || active?.kind === 'torch' || active?.kind === 'tool') {
+      if (input.isMouseDown(0)) this.mine(dt, ctx, active);
       else this.resetMining();
       return;
     }
@@ -697,7 +697,7 @@ export class CombatSystem {
     }
   }
 
-  private mine(dt: number, ctx: GameContext, speed: number): void {
+  private mine(dt: number, ctx: GameContext, held: ItemDef | null): void {
     this.diag.mineCalls++;
     const hit = ctx.world.raycast(ctx.player.eyePosition, ctx.player.lookDirection, REACH, isTargetable);
     if (!hit) {
@@ -713,12 +713,17 @@ export class CombatSystem {
       this.miningTarget = { x: hit.x, y: hit.y, z: hit.z };
     }
 
-    const hardness = blockDef(hit.block).hardness;
+    const def = blockDef(hit.block);
+    const hardness = def.hardness;
     if (!Number.isFinite(hardness)) {
       ctx.log('This block will not break.', 'info');
       return;
     }
 
+    // The right tool is faster; the wrong one is no better than hands. Hands are
+    // the baseline of 1, which is what every block's hardness was tuned against.
+    const tool = held?.tool;
+    const speed = tool && tool.kind === def.fastestWith ? tool.speed : 1;
     this.miningProgress += (dt * speed) / Math.max(0.1, hardness);
     if (this.rng() < dt * 22) this.spawnBlockParticles(ctx, hit.x, hit.y, hit.z, 1);
     // Pitched by hardness, so you can hear stone from soil. Rate-limited inside the
@@ -728,14 +733,35 @@ export class CombatSystem {
       pitch: Math.max(0.6, 1.4 - hardness * 0.25),
     });
 
-    if (this.miningProgress >= 1) this.breakBlock(ctx, hit.x, hit.y, hit.z);
+    if (this.miningProgress >= 1) this.breakBlock(ctx, hit.x, hit.y, hit.z, held);
   }
 
-  private breakBlock(ctx: GameContext, x: number, y: number, z: number): void {
+  /**
+   * Whether what is in hand is good enough to *collect* this block.
+   *
+   * Separate from whether it can break it, deliberately. Everything breaks
+   * bare-handed; the tool decides whether you get to keep anything, which is the
+   * rule that makes a better pickaxe worth making rather than merely quicker.
+   */
+  private canCollect(def: BlockDef, held: ItemDef | null): boolean {
+    if (!def.requiresTool) return true;
+    const tool = held?.tool;
+    return !!tool && tool.kind === def.requiresTool && tool.tier >= def.requiresTier;
+  }
+
+  /** Test hook: breaks a block as though the given tool were in hand. */
+  debugBreakBlock(ctx: GameContext, x: number, y: number, z: number, held: ItemDef | null): boolean {
+    const before = this.diag.breaks;
+    this.breakBlock(ctx, x, y, z, held);
+    return this.diag.breaks > before;
+  }
+
+  private breakBlock(ctx: GameContext, x: number, y: number, z: number, held: ItemDef | null = null): void {
     const id = ctx.world.getBlock(x, y, z);
+    const def = blockDef(id);
     ctx.sound('breakBlock', {
       position: new THREE.Vector3(x + 0.5, y + 0.5, z + 0.5),
-      pitch: Math.max(0.6, 1.35 - blockDef(id).hardness * 0.22),
+      pitch: Math.max(0.6, 1.35 - def.hardness * 0.22),
     });
     this.resetMining();
     if (!ctx.world.setBlock(x, y, z, Block.Air)) {
@@ -746,12 +772,23 @@ export class CombatSystem {
 
     this.spawnBlockParticles(ctx, x, y, z, 14, id);
 
+    // Wrong tool: the block still breaks, and yields nothing. Said out loud,
+    // because an absent drop is otherwise indistinguishable from a bug.
+    if (!this.canCollect(def, held)) {
+      ctx.log(`${def.name} needs a ${def.requiresTool} to collect.`, 'info');
+      return;
+    }
+
     const drop = blockDrop(id);
     if (drop === null) return;
     const asItem = itemForBlock(drop);
     if (!asItem) return;
-    const leftover = ctx.player.inventory.add(asItem.id, 1);
-    if (leftover > 0) ctx.log('Your bag is full.', 'info');
+
+    // Dropped into the world as a physical item rather than teleported into the
+    // bag. It falls, lands, spins, and is picked up by walking over it — which is
+    // also what makes a full bag visible instead of silent, since the drop simply
+    // stays on the floor.
+    ctx.dropItem(new THREE.Vector3(x + 0.5, y + 0.45, z + 0.5), asItem.id, 1);
   }
 
   private spawnBlockParticles(ctx: GameContext, x: number, y: number, z: number, amount: number, id?: number): void {
@@ -942,8 +979,9 @@ export class CombatSystem {
 
     // One sound for the shot, outside the pellet loop: a blunderbuss spawns
     // several projectiles and firing per pellet would be both a buzz and much
-    // louder than one report.
-    ctx.sound(profile.muzzleFlash ? 'gunshot' : 'bowLoose', { volume: profile.muzzleFlash ? 1 : 0.7 });
+    // louder than one report. Black powder only — a loosed bowstring was a thin
+    // synthetic snap that undersold the shot rather than selling it.
+    if (profile.muzzleFlash) ctx.sound('gunshot');
 
     if (profile.muzzleFlash) {
       ctx.particles.cone(origin, look, 22, 7, 0.35, { color: 0xffd070, size: 0.13, life: 0.22, gravity: -3, drag: 3 });
@@ -1650,13 +1688,24 @@ function lookForClass(cls: string, ammo: string): 'arrow' | 'bolt' | 'bullet' | 
  */
 function placementMeta(block: Block, hit: RaycastHit, playerYaw: number): number {
   const def = blockDef(block);
-  if (def.shape === 'cube' || def.shape === 'torch') return 0;
+  if (def.shape === 'cube' || def.shape === 'torch' || def.shape === 'post') return 0;
 
   // Face the player: the block should present its front to whoever placed it.
-  const facing = facingFromYaw(playerYaw + Math.PI);
+  let facing = facingFromYaw(playerYaw + Math.PI);
+
+  // Walls and plates are *surfaces*, so the face you pointed at decides where they
+  // sit rather than which way you happen to be looking. Pointing at the side of a
+  // block and getting a wall somewhere else in the voxel is the single most
+  // confusing thing a thin piece can do.
+  if (shapeHugsFace(def.shape)) {
+    if (hit.nx > 0) facing = 3;
+    else if (hit.nx < 0) facing = 1;
+    else if (hit.nz > 0) facing = 0;
+    else if (hit.nz < 0) facing = 2;
+  }
 
   let upper = false;
-  if (def.shape === 'slab' || def.shape === 'stairs' || def.shape === 'wedge') {
+  if (def.shape === 'slab' || def.shape === 'stairs' || def.shape === 'wedge' || def.shape === 'plate') {
     if (hit.ny > 0) upper = false;
     else if (hit.ny < 0) upper = true;
     else {
@@ -1665,6 +1714,11 @@ function placementMeta(block: Block, hit: RaycastHit, playerYaw: number): number
       upper = fraction > 0.5;
     }
   }
+
+  // A beam reads as a rafter near the ceiling and as a kerb near the floor, and
+  // `shapeBoxes` flips it on the upper bit — so a beam placed on top of a surface
+  // should sit high, which is the opposite of a slab.
+  if (def.shape === 'beam') upper = hit.ny <= 0;
 
   return makeMeta(facing, upper);
 }

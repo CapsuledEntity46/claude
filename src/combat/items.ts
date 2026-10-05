@@ -1,4 +1,4 @@
-import { Block, PLACEABLE, blockDef } from '../world/blocks';
+import { Block, PLACEABLE, blockDef, type ToolClass } from '../world/blocks';
 import { meleeModes } from './types';
 import type {
   AmmoType,
@@ -13,7 +13,7 @@ import type {
   WeaponDef,
 } from './types';
 
-export type ItemKind = 'weapon' | 'armor' | 'shield' | 'spell' | 'block' | 'consumable' | 'ammo' | 'torch';
+export type ItemKind = 'weapon' | 'armor' | 'shield' | 'spell' | 'block' | 'consumable' | 'ammo' | 'torch' | 'tool';
 
 export interface ItemDef {
   id: string;
@@ -34,6 +34,22 @@ export interface ItemDef {
   ammo?: AmmoType;
   block?: Block;
   torch?: TorchDef;
+  tool?: ToolDef;
+}
+
+export interface ToolDef {
+  /** Which family of blocks this is the right instrument for. */
+  kind: ToolClass;
+  /**
+   * Tier, against a block's `requiresTier`.
+   *
+   * 1 wood, 2 stone, 3 iron. A block requiring a higher tier than the tool in
+   * hand still breaks; it just yields nothing, which is the whole reason to go
+   * and make a better one.
+   */
+  tier: number;
+  /** Mining speed multiplier when used on the blocks it suits. */
+  speed: number;
 }
 
 export interface TorchDef {
@@ -521,6 +537,50 @@ defs.push(
   },
 );
 
+// --- Tools ------------------------------------------------------------------
+
+/**
+ * Mining instruments.
+ *
+ * Tools are not weapons and deliberately make poor ones: they carry a feeble
+ * `melee` fallback so being caught holding one is a real cost, which is what stops
+ * a pickaxe from simply being the best item in the game. The tier is what gates
+ * ore — a wooden pick will break iron ore and get nothing for it.
+ */
+function tool(id: string, name: string, glyph: string, def: ToolDef, blurb: string): ItemDef {
+  return {
+    id,
+    name,
+    glyph,
+    kind: 'tool',
+    tier: def.tier,
+    stackable: false,
+    maxStack: 1,
+    blurb,
+    tool: def,
+    weapon: {
+      class: 'melee',
+      twoHanded: false,
+      melee: {
+        swing: swing(Math.round(2 + def.tier), 2.3, { type: 'blunt', stamina: 9, maxTargets: 1, knockback: 3 }),
+      },
+    },
+  };
+}
+
+defs.push(
+  tool('wood_pickaxe', 'Wooden Pickaxe', '⛏️', { kind: 'pickaxe', tier: 1, speed: 2.4 },
+    'Breaks stone. Too soft for ore — it will shatter it and leave you nothing.'),
+  tool('stone_pickaxe', 'Stone Pickaxe', '⛏️', { kind: 'pickaxe', tier: 2, speed: 3.6 },
+    'Hard enough for iron ore, not for gold.'),
+  tool('iron_pickaxe', 'Iron Pickaxe', '⛏️', { kind: 'pickaxe', tier: 3, speed: 5.2 },
+    'Cuts anything the world is made of, gold ore included.'),
+  tool('stone_axe', 'Stone Axe', '🪓', { kind: 'axe', tier: 2, speed: 3.4 },
+    'For timber. Fells a tree in a fraction of the time your hands would.'),
+  tool('stone_shovel', 'Stone Shovel', '🥄', { kind: 'shovel', tier: 2, speed: 3.4 },
+    'For soil, sand and snow.'),
+);
+
 // --- Light sources ----------------------------------------------------------
 
 defs.push({
@@ -595,9 +655,15 @@ export function tryItem(id: string): ItemDef | undefined {
   return ITEMS.get(id);
 }
 
-/** Maps a block id back to its inventory item, for mining drops. */
+/**
+ * Maps a block id back to its inventory item, for mining drops.
+ *
+ * Matches on the `block` field alone rather than on `kind === 'block'`. The torch
+ * is a hand-held light that *also* places, so its kind is `torch` — and keying on
+ * the kind meant a placed torch, mined back up, resolved to no item and vanished.
+ */
 export function itemForBlock(block: Block): ItemDef | undefined {
-  for (const d of ITEMS.values()) if (d.kind === 'block' && d.block === block) return d;
+  for (const d of ITEMS.values()) if (d.block === block) return d;
   return undefined;
 }
 

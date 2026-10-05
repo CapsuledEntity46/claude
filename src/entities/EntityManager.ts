@@ -164,9 +164,6 @@ export class EntityManager implements EnemyWorld {
       Math.max(0.5, enemy.radius * 2.2),
       4.2 + enemy.radius,
     );
-    // Pitched by body size, so an ogre falling and a goblin falling are different
-    // events even when you only hear them.
-    this.ctx.sound('enemyDeath', { position: enemy.center, pitch: Math.max(0.5, 1.4 - enemy.radius * 1.4) });
   }
 
   // ---------------------------------------------------------------- lifecycle

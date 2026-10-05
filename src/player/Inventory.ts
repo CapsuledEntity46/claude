@@ -332,13 +332,17 @@ export class Inventory {
     inv.add('block_cobblestone', 48);
     inv.add('block_planks', 32);
     inv.add('torch', 8);
+    // A pickaxe from the start. Stone and ore cannot be *collected* without one,
+    // and discovering that by mining a hillside and receiving nothing is a worse
+    // introduction to the rule than simply having the tool in hand.
+    inv.add('wood_pickaxe');
 
     inv.equip('shortsword');
     inv.equip('wooden_buckler');
     inv.equip('quilted_armor');
     inv.equip('torch');
 
-    inv.hotbar = ['shortsword', 'shortbow', 'flames', 'sparks', 'mending_hand', 'torch', 'block_cobblestone', 'healing_draught'];
+    inv.hotbar = ['shortsword', 'wood_pickaxe', 'shortbow', 'flames', 'mending_hand', 'torch', 'block_cobblestone', 'healing_draught'];
     inv.select(0);
     return inv;
   }

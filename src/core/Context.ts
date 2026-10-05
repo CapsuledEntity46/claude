@@ -87,4 +87,13 @@ export interface GameContext {
    * system under test should be able to run without one.
    */
   sound(id: SoundId, options?: PlayOptions): void;
+
+  /**
+   * Drops an item into the world as a physical, collectible entity.
+   *
+   * Mining used to add straight to the inventory, which is quick to write and
+   * wrong in two ways: there is nothing to see, and a full bag silently destroyed
+   * the drop. A real entity falls, rests, spins and waits.
+   */
+  dropItem(position: THREE.Vector3, itemId: string, qty?: number): void;
 }

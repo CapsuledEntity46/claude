@@ -2,6 +2,13 @@ import type { SoundId } from '../audio/Audio';
 import { describeMode, item } from '../combat/items';
 import { availableModes } from '../combat/types';
 import { BAG_CAPACITY, type BagTab, type EquipSlot } from '../player/Inventory';
+import {
+  CRAFTING_RECIPES,
+  craft,
+  hasIngredients,
+  type Recipe,
+  type RecipeGroup,
+} from '../player/Crafting';
 import type { Player } from '../player/Player';
 import { ABILITY_INFO, ABILITY_KEYS, abilityModifier, type AbilityScores } from '../player/PointBuy';
 import { ABILITY_MAX } from '../player/Stats';
@@ -31,6 +38,9 @@ function el<T extends HTMLElement>(id: string): T {
  * Rebuilt from scratch whenever it changes — it is only visible while the game
  * is paused, so there is no reason to diff anything.
  */
+/** Which tab of the character sheet is showing. */
+export type SheetPane = 'gear' | 'skills' | 'crafting';
+
 export class Screens {
   private root = el<HTMLDivElement>('sheet');
   private statsHost = el<HTMLElement>('sheet-stats');
@@ -40,11 +50,14 @@ export class Screens {
   private abilityHost = el<HTMLElement>('sheet-abilities');
   private gearPane = el<HTMLDivElement>('pane-gear');
   private skillsPane = el<HTMLDivElement>('pane-skills');
+  private craftHost = el<HTMLElement>('sheet-crafting');
+  private craftPane = el<HTMLDivElement>('pane-crafting');
   private gearTab = el<HTMLButtonElement>('tab-gear');
   private skillsTab = el<HTMLButtonElement>('tab-skills');
+  private craftTab = el<HTMLButtonElement>('tab-crafting');
 
   /** Which top-level tab is showing. Remembered across openings. */
-  private pane: 'gear' | 'skills' = 'gear';
+  private pane: SheetPane = 'gear';
 
   /**
    * The bag slot being dragged, if any.
@@ -84,14 +97,28 @@ export class Screens {
       this.sound('uiSelect');
       this.showPane('skills');
     });
+    this.craftTab.addEventListener('click', () => {
+      this.sound('uiSelect');
+      this.showPane('crafting');
+    });
   }
+
+  /**
+   * Whether a workbench is in reach, supplied by the game.
+   *
+   * A callback because the answer depends on the voxel world, which the sheet has
+   * no business holding — and it has to be asked afresh every refresh rather than
+   * cached, since the player can walk away from the bench with the sheet open.
+   */
+  benchNearby: () => boolean = () => false;
 
   get isOpen(): boolean {
     return !this.root.classList.contains('hidden');
   }
 
-  open(player: Player): void {
+  open(player: Player, pane?: SheetPane): void {
     this.player = player;
+    if (pane) this.pane = pane;
     this.root.classList.remove('hidden');
     this.refresh();
   }
@@ -113,7 +140,120 @@ export class Screens {
     this.renderSkills(this.player);
     this.renderBag(this.player);
     this.renderHotbar(this.player);
+    this.renderCrafting(this.player);
     this.applyPane();
+  }
+
+  // ---------------------------------------------------------------- crafting
+
+  /**
+   * The crafting tab.
+   *
+   * Recipes are grouped and every one is always listed, with the ones you cannot
+   * currently make dimmed rather than hidden: a list that only shows what is
+   * already possible cannot tell you what to go and look for, which is most of
+   * what a recipe list is for. Each row says what it needs and how much of it you
+   * have, so a shortfall is readable without counting the bag yourself.
+   */
+  private renderCrafting(player: Player): void {
+    const bench = this.benchNearby();
+    this.craftHost.replaceChildren();
+    this.craftHost.append(heading('Crafting'));
+
+    const status = document.createElement('div');
+    status.className = `craft-bench${bench ? ' ready' : ''}`;
+    status.textContent = bench
+      ? '🛠️  At a workbench — everything below is available.'
+      : '🛠️  No workbench in reach. Craft one from 4 planks, place it, and stand next to it.';
+    this.craftHost.append(status);
+
+    const groups: { group: RecipeGroup; label: string }[] = [
+      { group: 'tools', label: 'Tools' },
+      { group: 'parts', label: 'Building parts' },
+      { group: 'building', label: 'Materials' },
+      { group: 'light', label: 'Light' },
+    ];
+
+    for (const { group, label } of groups) {
+      const recipes = CRAFTING_RECIPES.filter((r) => r.group === group);
+      if (recipes.length === 0) continue;
+
+      const section = document.createElement('div');
+      section.className = 'craft-group';
+      const title = document.createElement('h2');
+      title.textContent = label;
+      section.append(title);
+
+      const list = document.createElement('div');
+      list.className = 'craft-list';
+      for (const recipe of recipes) list.append(this.recipeRow(player, recipe, bench));
+      section.append(list);
+      this.craftHost.append(section);
+    }
+  }
+
+  private recipeRow(player: Player, recipe: Recipe, bench: boolean): HTMLElement {
+    const out = item(recipe.output);
+    const affordable = hasIngredients(player.inventory, recipe);
+    const blocked = !affordable || (recipe.bench && !bench);
+
+    const row = document.createElement('div');
+    row.className = `recipe${blocked ? ' blocked' : ''}`;
+
+    const icon = document.createElement('div');
+    icon.className = 'ricon';
+    applyIcon(icon, out.id, itemGlyph(out));
+
+    const body = document.createElement('div');
+    const name = document.createElement('div');
+    name.className = 'rname';
+    name.innerHTML = '';
+    const strong = document.createElement('b');
+    strong.textContent = recipe.outputQty > 1 ? `${out.name} ×${recipe.outputQty}` : out.name;
+    name.append(strong);
+    if (recipe.bench) {
+      const tag = document.createElement('span');
+      tag.textContent = ' · bench';
+      tag.style.color = 'var(--muted)';
+      tag.style.fontSize = '11.5px';
+      name.append(tag);
+    }
+
+    const note = document.createElement('div');
+    note.className = 'rnote';
+    note.textContent = recipe.note;
+
+    const ing = document.createElement('div');
+    ing.className = 'ring';
+    recipe.inputs.forEach((input, index) => {
+      const have = player.inventory.count(input.itemId);
+      const span = document.createElement('span');
+      span.className = have >= input.qty ? 'have' : 'lack';
+      span.textContent = `${item(input.itemId).name} ${have}/${input.qty}`;
+      if (index > 0) ing.append(document.createTextNode(' · '));
+      ing.append(span);
+    });
+
+    body.append(name, note, ing);
+
+    const button = document.createElement('button');
+    button.textContent = 'Craft';
+    button.disabled = blocked;
+    button.title = recipe.bench && !bench ? 'Needs a workbench nearby' : affordable ? '' : 'Missing ingredients';
+    button.addEventListener('click', () => {
+      const result = craft(player.inventory, recipe, this.benchNearby());
+      if (result === 'ok') {
+        this.sound('uiSpend');
+        player.syncEquipmentDerived();
+        this.onChange();
+      } else {
+        this.sound('uiDeny');
+      }
+      this.refresh();
+    });
+
+    row.append(icon, body, button);
+    return row;
   }
 
   // ---------------------------------------------------------------- stats
@@ -216,7 +356,7 @@ export class Screens {
 
   // ---------------------------------------------------------------- panes
 
-  private showPane(pane: 'gear' | 'skills'): void {
+  private showPane(pane: SheetPane): void {
     this.pane = pane;
     this.applyPane();
   }
@@ -229,12 +369,14 @@ export class Screens {
    * not when its nodes were created.
    */
   private applyPane(): void {
-    const skills = this.pane === 'skills';
-    this.gearPane.classList.toggle('hidden', skills);
-    this.skillsPane.classList.toggle('hidden', !skills);
-    this.gearTab.classList.toggle('active', !skills);
-    this.skillsTab.classList.toggle('active', skills);
-    if (skills) requestAnimationFrame(() => this.layoutBranches());
+    const pane = this.pane;
+    this.gearPane.classList.toggle('hidden', pane !== 'gear');
+    this.skillsPane.classList.toggle('hidden', pane !== 'skills');
+    this.craftPane.classList.toggle('hidden', pane !== 'crafting');
+    this.gearTab.classList.toggle('active', pane === 'gear');
+    this.skillsTab.classList.toggle('active', pane === 'skills');
+    this.craftTab.classList.toggle('active', pane === 'crafting');
+    if (pane === 'skills') requestAnimationFrame(() => this.layoutBranches());
   }
 
   /**

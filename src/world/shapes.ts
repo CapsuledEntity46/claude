@@ -10,7 +10,34 @@
  * wedges — all of which are just different box lists.
  */
 
-export type BlockShape = 'cube' | 'slab' | 'stairs' | 'wedge' | 'pane' | 'torch' | 'door' | 'fence';
+/**
+ * The building kit.
+ *
+ * A voxel world does not have to be built out of voxels. Terrain is a grid because
+ * that is the game, but a *structure* made only of full cubes can only ever be a
+ * box with holes in it — so the pieces below are the architectural vocabulary:
+ * walls thinner than a block, posts and beams to frame with, and plates for thin
+ * floors and ceilings. Each is still one voxel's worth of space, which keeps
+ * placement, collision and the mesher unchanged; what varies is the geometry
+ * inside it.
+ */
+export type BlockShape =
+  | 'cube'
+  | 'slab'
+  | 'stairs'
+  | 'wedge'
+  | 'pane'
+  | 'torch'
+  | 'door'
+  | 'fence'
+  /** A thin vertical panel against one face of the voxel. Partition walls. */
+  | 'wall'
+  /** A square column up the middle of the voxel. Pillars and corner posts. */
+  | 'post'
+  /** A horizontal bar across the voxel, at head height. Lintels and rafters. */
+  | 'beam'
+  /** A very thin floor or ceiling panel. Boarding, suspended ceilings. */
+  | 'plate';
 
 /** An axis-aligned box inside the unit cube, coordinates in [0, 1]. */
 export interface ShapeBox {
@@ -145,6 +172,28 @@ const DOOR_CLOSED: readonly ShapeBox[] = [box(0, 0, 0, 1, 1, 0.18)];
 const DOOR_OPEN: readonly ShapeBox[] = [box(0, 0, 0, 0.18, 1, 1)];
 
 /**
+ * A partition wall: thicker than a pane, thinner than a block, flush to one face.
+ *
+ * Against the face rather than down the middle, unlike the pane. A wall is a
+ * boundary, and a boundary that floats half a block inside the voxel leaves a lip
+ * on both sides — you can see it where two walls meet at a corner, and you can
+ * feel it, because the collision box does the same thing.
+ */
+const WALL_BASE: readonly ShapeBox[] = [box(0, 0, 0, 1, 1, 0.28)];
+
+/** A pillar. Not orientable: a square column looks the same from every side. */
+const POST_BOXES: readonly ShapeBox[] = [box(0.31, 0, 0.31, 0.69, 1, 0.69)];
+
+/**
+ * A beam, spanning the voxel at head height.
+ *
+ * High in the voxel rather than centred, so a run of them reads as rafters you
+ * walk under rather than as a fence you climb over — and so a beam placed along
+ * the top of a wall sits where a lintel would.
+ */
+const BEAM_BASE: readonly ShapeBox[] = [box(0, 0.6, 0.32, 1, 0.92, 0.68)];
+
+/**
  * The boxes making up a block, in unit-cube space.
  *
  * Returns the shared FULL_CUBE array for ordinary blocks so the common path
@@ -188,6 +237,25 @@ export function shapeBoxes(shape: BlockShape, meta: number): readonly ShapeBox[]
     case 'torch':
       return TORCH_BOXES;
 
+    case 'wall':
+      return WALL_BASE.map((b) => rotate(b, metaFacing(meta)));
+
+    case 'post':
+      return POST_BOXES;
+
+    case 'beam':
+      // Rotated by facing, and flipped to the floor when placed on a ceiling, so
+      // the same piece serves as a rafter and as a kerb.
+      return BEAM_BASE.map((b) => {
+        const rotated = rotate(b, metaFacing(meta));
+        return metaIsUpper(meta) ? rotated : flipY(rotated);
+      });
+
+    case 'plate':
+      // Thinner than a slab by design: a slab is a half step you stand on, a plate
+      // is boarding. At slab thickness there would be no reason for both.
+      return metaIsUpper(meta) ? [box(0, 0.88, 0, 1, 1, 1)] : [box(0, 0, 0, 1, 0.12, 1)];
+
     default:
       return FULL_CUBE;
   }
@@ -196,6 +264,17 @@ export function shapeBoxes(shape: BlockShape, meta: number): readonly ShapeBox[]
 /** True when this shape fills the whole voxel, and so can cull its neighbours. */
 export function shapeIsFullCube(shape: BlockShape): boolean {
   return shape === 'cube';
+}
+
+/**
+ * True when a shape is placed against the face that was clicked rather than
+ * standing in the middle of its voxel.
+ *
+ * Walls and plates are surfaces, so which face you pointed at decides where they
+ * go; posts and beams are objects, so they sit where the voxel is.
+ */
+export function shapeHugsFace(shape: BlockShape): boolean {
+  return shape === 'wall' || shape === 'plate';
 }
 
 /**

@@ -23,8 +23,9 @@ npm run dev     # then open the printed localhost URL
 | `RMB` | Guard · place a block · **aim** a bow or grenade · open a door |
 | `X` | Cycle the build tool's shape |
 | `R` | Reload a firearm, or sample a block with the build tool |
+| `E` | Use what you are looking at — a workbench opens the crafting tab |
 | `1`–`8` / wheel | Hotbar · the wheel scrolls menus while one is open |
-| `Tab` | Character sheet: abilities, skill tree, equipment, bag |
+| `Tab` | Character sheet: equipment, crafting, abilities, skill tree |
 | `F5` / `F9` | Save / load · `Esc` pause |
 | `M` · `[` `]` | Mute · volume down / up |
 
@@ -154,15 +155,108 @@ promise rather than a hard build.
 
 ## Building
 
-Blocks are not all cubes. A block carries a shape and an orientation byte, which
-gives stairs, slabs, panes, doors, fences, and roof wedges — all of them just
-different lists of boxes used for both geometry and collision. Slabs really are
-half-height steps, stairs really are walkable, and an open door really is a hole.
+**A voxel world does not have to be built out of voxels.** Terrain is a grid
+because that is the game, but a structure made only of full cubes can only ever be
+a box with holes in it. A block carries a shape and an orientation byte, so what
+you build with is an architectural kit:
 
-Shaped pieces orient themselves to face you when placed, and stairs and slabs pick
-a top or bottom half from where on the face you clicked, so you can run a
-staircase downwards without walking round to the other side. Doors open on
-right-click rather than stacking another door against themselves.
+| Piece | Shape | What it is for |
+| --- | --- | --- |
+| **Wall** | Thin panel, flush to one face | Interior partitions. Thinner than a block, thicker than glass |
+| **Post** | Column up the middle | Frame a building, then fill between the posts |
+| **Beam** | Bar high in the voxel | Rafters and lintels — you walk *under* them |
+| **Plate** | Very thin floor or ceiling | Board an upper storey without losing head height |
+| **Slab** | Half block | A step you can actually stand on |
+| **Stairs** | Walkable steps | Real geometry, not a ramp |
+| **Pane / Door** | Glazed frame, swinging leaf | An open door is a genuine hole |
+| **Fence / Wedge** | Rails, sloped roofing | |
+
+Every one of them is a list of boxes used for *both* geometry and collision, so
+what you see is what you walk into.
+
+Two placement rules make the thin pieces usable:
+
+- **Surfaces go where you pointed; objects go in the voxel.** A wall or a plate is
+  a boundary, so the face you clicked decides which side of the block it lands on.
+  A post or a beam is an object and sits in the middle regardless. Pointing at the
+  side of a block and getting a wall somewhere else in the voxel is the single most
+  confusing thing a thin piece can do.
+- **A wall sits flush to its face, not down the middle.** The pane is centred,
+  which is right for glass in a frame and wrong for masonry: a wall set back half a
+  block leaves a lip where two of them meet at a corner, and the collision box does
+  the same thing, so you can feel it as well as see it.
+
+Stairs, slabs and plates pick a top or bottom half from where on the face you
+clicked, so a staircase can be run downwards without walking round to the other
+side. Beams invert that on purpose — placed on top of a surface a beam sits *high*,
+where a lintel would.
+
+## Mining drops things
+
+Breaking a block now drops it. The block becomes a small spinning item on the
+ground, which falls, lands, and is collected by walking over it — the same entity
+enemies already dropped loot as, so it bobs and spins and waits.
+
+It used to go straight into the bag, which is quicker to write and wrong twice
+over: there is nothing to see, and a full bag silently destroyed the drop. Now a
+full bag simply leaves it on the floor.
+
+Finding this turned up a bug worth describing. A drop is resolved by looking up the
+block's inventory item, and items are generated only for blocks in `PLACEABLE` — so
+**wood, leaves, ore and snow dropped nothing at all**, silently, because they had
+nowhere to drop *to*. Chopping down a tree gave you an empty hand. A unit check now
+walks every breakable block and asserts its drop resolves to a real item, which
+also caught a mined torch vanishing (its item has kind `torch`, not `block`, so the
+lookup missed it) and lava claiming to drop itself.
+
+### Tools decide what you keep
+
+| Tool | Tier | Mines |
+| --- | :-: | --- |
+| Wooden pickaxe | 1 | Stone, cobble, brick |
+| Stone pickaxe | 2 | …and iron ore |
+| Iron pickaxe | 3 | …and gold ore |
+| Stone axe | 2 | Timber, fast |
+| Stone shovel | 2 | Soil, sand, snow |
+
+**Everything breaks bare-handed. The tool decides whether you get to keep it.** A
+wooden pickaxe will break iron ore and leave you nothing, which is the rule that
+makes a better pickaxe worth making rather than merely quicker. The refusal is said
+out loud in the log, because an absent drop is otherwise indistinguishable from a
+bug — which is exactly how the missing-item bug above went unnoticed.
+
+You start with a wooden pickaxe. Discovering the rule by mining a hillside and
+receiving nothing is a worse introduction to it than having the tool in hand.
+
+## Crafting
+
+A third tab on the character sheet, and a workbench to use it at. Place a bench,
+stand near it or look at it and press `E`, and the crafting tab opens.
+
+A recipe is a list of ingredients and an output — **not** a grid of shaped
+patterns. The interesting decision in this game is what to make, not remembering
+where to put the sticks.
+
+Recipes split by where they can be made, and the three that need no bench are
+exactly the ones that bootstrap: **planks** from a log, the **workbench** itself,
+and a first **wooden pickaxe**. Everything else wants a bench, which is what gives
+the bench a reason to exist beyond being craftable. The building kit above is all
+crafted, which is how those pieces become available at all.
+
+Three details:
+
+- **Every recipe is always listed**, with the ones you cannot currently make
+  dimmed rather than hidden. A list that only shows what is already possible cannot
+  tell you what to go and look for, which is most of what a recipe list is for.
+  Each row shows what it needs against what you have.
+- **A refused craft consumes nothing.** Ingredients are checked in full before any
+  are removed; removing as it goes and bailing part way would silently eat the
+  first ingredient of a recipe you could not afford, which reads as the game
+  stealing from you. A craft that cannot fit its output puts the ingredients back.
+- **Recipes name blocks through the enum, not through item ids.** Block items are
+  generated from block *names*, so a hand-written `block_stone_beam` quietly
+  stopped existing the moment the block was called "Stone Lintel". Going through
+  `Block` makes that a compile error.
 
 ## The world
 
@@ -542,7 +636,7 @@ The palette is small because that is what the material is:
 | Sword stroke | Noise through a bandpass sweeping up and away — the *sweep* is the effect; a static band is a hiss, not a movement |
 | Hit on a body | Low sine thud with a slap of noise on the front |
 | Hit on mail | Partials at non-integer ratios, which is what separates struck steel from a bell |
-| Gunshot | A crack, a lowpassed body, and a tail |
+| Gunshot | A crack, a lowpassed body, and a tail. The only ranged sound left |
 | Growl | Low sawtooth, pitch wandering, under a closing lowpass |
 | Level up | A rising major triad — the only melodic sound in the game, which is what makes it read as a reward |
 
@@ -565,9 +659,11 @@ Four things that took care:
   because correlated signals sum linearly while uncorrelated ones sum as the square
   root. The shot fires once outside the pellet loop for the same reason.
 
-- **Rain is a bed, not ten thousand one-shots.** A raindrop is not worth a voice, and
-  the voices would sum to a buzz rather than to rainfall. It is a looping noise
-  filter whose gain the weather ramps.
+- **A continuous bed has nowhere to hide.** Rain was one, and it went the same way
+  as the footsteps: filtered noise is a convincing *hiss* and an unconvincing
+  rainfall, and unlike a one-shot it is there for as long as the weather lasts. The
+  mechanism remains for the underwater rumble, which is supposed to sound like a
+  filter sweep.
 
 - **Positional, but cheaply.** Distance attenuation and a stereo pan from the
   camera's right vector, rather than a `PannerNode` per voice doing HRTF
@@ -584,12 +680,16 @@ is the one UI sound that rises in pitch, and a refusal — an unaffordable respe
 locked skill node, a drop onto a slot that will not take it — is short and *flat*,
 because any pitch movement reads as something having happened.
 
-**Three sounds were built and then removed:** footsteps, landings and water splashes.
-Each was convincing on its own and maddening in play — at the rate they fire, a
-synthesised noise burst reads as a tick rather than as a footfall, and there is no
-amount of tuning that fixes a sound you hear twice a second. The smoke suite asserts
-they stay at zero plays, because they are the kind of thing that gets helpfully
-reintroduced.
+**Six sounds were built and then removed.** Footsteps, landings and water splashes
+each fired too often: a synthesised noise burst reads as a *tick* rather than as a
+footfall, and no amount of tuning fixes a sound you hear twice a second. Rain was a
+continuous bed with the same problem and nowhere to hide. The loosed bowstring was a
+thin snap that undersold the shot rather than selling it, and the enemy death sound
+fought the pixel-shatter burst it was supposed to accompany.
+
+The smoke suite asserts the movement three stay at zero plays, because they are
+exactly the kind of thing that gets helpfully reintroduced. Knowing which sounds to
+*delete* turned out to be most of the work.
 
 **Testing sound is the interesting part.** There is no frame to screenshot, and
 headless Chromium may have no audio device at all — so the engine counts what the
@@ -1084,7 +1184,7 @@ Some notes on the parts that are less obvious than they look:
 ## Tests
 
 ```bash
-npm test            # typecheck + 358 unit checks
+npm test            # typecheck + 381 unit checks
 npm run test:unit   # damage model, mesher, terrain determinism, inventory
 npm run test:smoke  # boots the real build in headless Chromium and plays it
 npm run survey      # terrain statistics over a 6000-block square

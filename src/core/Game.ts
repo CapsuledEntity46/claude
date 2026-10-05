@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { AudioEngine } from '../audio/Audio';
 import { CombatSystem } from '../combat/CombatSystem';
-import { blockCollisionBoxes, blockDef } from '../world/blocks';
+import { blockCollisionBoxes, blockDef, isTargetable } from '../world/blocks';
 import { CHUNK_SY } from '../world/Chunk';
 import { makeMeta, shapeBoxes } from '../world/shapes';
 import { ITEMS, item, tryItem } from '../combat/items';
@@ -25,7 +25,7 @@ import { xpToReach } from '../player/Stats';
 import { pointsSpentOnSkills, respecCost, totalSkillPoints } from '../player/Skills';
 import { readSave, writeSave, type SaveData, SAVE_VERSION } from '../save/Save';
 import { Hud } from '../ui/Hud';
-import { Screens } from '../ui/Screens';
+import { Screens, type SheetPane } from '../ui/Screens';
 import { Block } from '../world/blocks';
 import { Biome, SEA_LEVEL } from '../world/TerrainGen';
 import { TimeOfDay } from '../world/TimeOfDay';
@@ -210,6 +210,9 @@ export class Game {
       () => this.closeSheet(),
       (id) => this.audio.play(id),
     );
+    // Asked afresh on every sheet refresh, not cached: the player can walk away
+    // from the bench with the sheet open.
+    this.screens.benchNearby = () => this.benchNearby();
 
     this.scene.background = new THREE.Color(SKY_COLOR);
     // Fog hides chunk pop-in at the streaming frontier.
@@ -465,6 +468,7 @@ export class Game {
       log: (message, cls: LogClass = 'info') => this.hud.log(message, cls),
       floater: (worldPosition, text, cls: FloaterClass) => this.hud.floater(worldPosition, text, cls),
       sound: (id, options) => this.audio.play(id, options),
+      dropItem: (position, itemId, qty = 1) => this.pickups.spawnLoot(position, [{ itemId, qty }]),
     };
   }
 
@@ -534,10 +538,10 @@ export class Game {
 
   private loadoutApplied = false;
 
-  private openSheet(): void {
+  private openSheet(pane?: SheetPane): void {
     this.mode = 'sheet';
     this.input.releaseLock();
-    this.screens.open(this.player);
+    this.screens.open(this.player, pane);
     this.audio.play('uiOpen');
   }
 
@@ -766,6 +770,7 @@ export class Game {
     this.elapsed += dt;
     this.ctx.time = this.elapsed;
 
+    this.handleInteract();
     this.handlePlayKeys();
 
     // Environment first: spawn pressure and enemy sight both read daylight.
@@ -925,10 +930,9 @@ export class Game {
       return;
     }
 
-    // Rain is a bed rather than thousands of one-shots: a drop is not worth a voice,
-    // and correlated voices sum to a buzz rather than to rainfall.
-    const rain = this.underwater ? 0 : Math.min(1, this.weather.rainRate * 0.9);
-    this.audio.setAmbient('rain', rain * 0.5, 1500, 0.5);
+    // No rain bed. Filtered noise is a convincing *hiss* and an unconvincing
+    // rainfall, and unlike a one-shot it is there continuously for as long as the
+    // weather lasts, so there is nowhere for it to hide.
     // Submerged, everything above the surface is replaced by a low rumble.
     this.audio.setAmbient('wind', this.underwater ? 0.33 : 0, 220, 0.8);
 
@@ -942,6 +946,50 @@ export class Game {
     } else {
       this.thunderTimer = 4 + Math.random() * 8;
     }
+  }
+
+  /**
+   * True when a workbench is within arm's reach.
+   *
+   * Scans the voxels around the player rather than tracking placed benches in a
+   * map. A bench is a block like any other — it can be mined, blown up by a
+   * grenade, or buried — and a cache would have to be invalidated by every one of
+   * those. The scan is a 7x5x7 box of typed-array reads once per interaction,
+   * which is nothing.
+   */
+  benchNearby(): boolean {
+    const p = this.player.position;
+    const px = Math.floor(p.x);
+    const py = Math.floor(p.y);
+    const pz = Math.floor(p.z);
+    for (let dy = -2; dy <= 2; dy++) {
+      for (let dz = -3; dz <= 3; dz++) {
+        for (let dx = -3; dx <= 3; dx++) {
+          if (this.world.getBlock(px + dx, py + dy, pz + dz) === Block.Workbench) return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  /**
+   * `E` — interact with whatever is in front of you.
+   *
+   * Only the workbench answers at the moment. Doors are deliberately left on
+   * right-click: that is already how they work, and moving them here would break
+   * the muscle memory of everyone who has built one.
+   */
+  private handleInteract(): void {
+    if (!this.input.wasPressed('KeyE')) return;
+
+    const hit = this.world.raycast(this.player.eyePosition, this.player.lookDirection, 4.5, isTargetable);
+    const lookingAtBench = hit && this.world.getBlock(hit.x, hit.y, hit.z) === Block.Workbench;
+
+    if (lookingAtBench || this.benchNearby()) {
+      this.openSheet('crafting');
+      return;
+    }
+    this.hud.log('Nothing here to use.', 'info');
   }
 
   private handlePlayKeys(): void {
@@ -982,6 +1030,7 @@ export class Game {
       projectiles: this.projectiles.count,
       projectilesFired: this.projectiles.spawnedTotal,
       orbs: this.pickups.orbCount,
+      drops: this.pickups.dropCount,
       playerX: Number(this.player.position.x.toFixed(2)),
       playerY: Number(this.player.position.y.toFixed(2)),
       playerZ: Number(this.player.position.z.toFixed(2)),
@@ -1311,6 +1360,39 @@ export class Game {
    */
   debugAudio(): Record<string, unknown> {
     return this.audio.debugState();
+  }
+
+  /** Removes every loose drop, so a test can measure what one action produces. */
+  debugClearDrops(): void {
+    this.pickups.clearDrops();
+  }
+
+  /**
+   * Breaks the block the player is looking at, with the right tool for it.
+   *
+   * A test that wants to prove *dropping* works should not also have to win the
+   * argument about tools: mining the arena floor by hand now correctly yields
+   * nothing, because stone needs a pickaxe. This supplies one.
+   */
+  debugMineFacingBlock(): boolean {
+    const hit = this.world.raycast(this.player.eyePosition, this.player.lookDirection, 5.2, isTargetable);
+    if (!hit) return false;
+    return this.combat.debugBreakBlock(this.ctx, hit.x, hit.y, hit.z, item('iron_pickaxe'));
+  }
+
+  /**
+   * Teleports the player onto the nearest loose item drop.
+   *
+   * Drops do not home in the way experience orbs do — you have to walk over them —
+   * so a test that wants to prove collection works has to close the distance
+   * somehow, and driving the movement keys for an unknown number of frames is far
+   * more fragile than simply standing on it.
+   */
+  debugWalkToNearestDrop(): boolean {
+    const target = this.pickups.nearestDropPosition(this.player.center);
+    if (!target) return false;
+    this.player.position.set(target.x, this.player.position.y, target.z);
+    return true;
   }
 
   /** Mutes or unmutes, for tests that would rather not synthesise anything. */

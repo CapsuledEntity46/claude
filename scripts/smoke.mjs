@@ -801,9 +801,39 @@ try {
       `(mode ${mineState.mode}, holding ${mineState.activeItem}, last: ${mineState.lastReason})`,
   );
 
-  // The arena floor is cobblestone, so breaking it should add to that stack.
-  const cobbleStock = await page.evaluate(() => window.__voxelquest.debugItemCount('block_cobblestone'));
-  check('broken block dropped into the bag', cobbleStock > 48, `cobble ${cobbleStock} (started at 48)`);
+  // A broken block now drops a physical item rather than teleporting into the bag,
+  // so what has to be true is that an entity appeared — and then that walking over
+  // it collects it. Asserting the bag directly would have been testing the old
+  // behaviour and would have passed for the wrong reason if the entity never spawned.
+  // Cleared first, because enemy loot from the combat section is also lying around
+  // and would make this pass without a block having dropped anything at all.
+  const dropped = await page.evaluate(async () => {
+    const g = window.__voxelquest;
+    g.debugClearDrops();
+    const before = g.debugSnapshot().drops;
+    g.debugMineFacingBlock();
+    await new Promise((r) => setTimeout(r, 400));
+    return { before, after: g.debugSnapshot().drops };
+  });
+  check(
+    'breaking a block drops a collectible item',
+    dropped.before === 0 && dropped.after > 0,
+    `${dropped.before} -> ${dropped.after} item(s) on the ground`,
+  );
+
+  const pickedUp = await page.evaluate(async () => {
+    const g = window.__voxelquest;
+    const before = g.debugItemCount('block_cobblestone');
+    // Drops do not home in on the player the way orbs do, so close the distance.
+    g.debugWalkToNearestDrop();
+    await new Promise((r) => setTimeout(r, 1200));
+    return { before, after: g.debugItemCount('block_cobblestone'), left: g.debugSnapshot().drops };
+  });
+  check(
+    'walking over a dropped block collects it',
+    pickedUp.after > pickedUp.before,
+    `cobble ${pickedUp.before} -> ${pickedUp.after}, ${pickedUp.left} still on the ground`,
+  );
 
   // Place a block back into the hole.
   const cobbleBefore = await page.evaluate(() => window.__voxelquest.debugItemCount('block_cobblestone'));

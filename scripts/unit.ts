@@ -9,7 +9,7 @@
  * Run with: npm run test:unit
  */
 import { Box3, Vector3, type BufferGeometry, type Mesh, type Object3D } from 'three';
-import { item } from '../src/combat/items';
+import { ITEMS, item, itemForBlock, tryItem } from '../src/combat/items';
 import {
   bladeGeometry,
   bowModel,
@@ -43,6 +43,7 @@ import {
 import { GESTURE_CONFIG, GestureTracker, classifyGesture } from '../src/combat/GestureTracker';
 import { ARCHETYPES, FISH, pickArchetype } from '../src/entities/archetypes';
 import { Inventory } from '../src/player/Inventory';
+import { CRAFTING_RECIPES, craft } from '../src/player/Crafting';
 import { PlayerStats, xpToReach } from '../src/player/Stats';
 import {
   ABILITY_KEYS,
@@ -80,8 +81,8 @@ import {
 } from '../src/player/Skills';
 import { goldForKill, rollGold } from '../src/entities/loot';
 import { ARCHETYPES } from '../src/entities/archetypes';
-import { Block, blockCollisionBoxes, blockDef, isLightSource, isTargetable, isSolid} from '../src/world/blocks';
-import { facingFromYaw, makeMeta, metaIsOpen, metaIsUpper, shapeBoxes } from '../src/world/shapes';
+import { Block, PLACEABLE, blockCollisionBoxes, blockDef, blockDrop, isLightSource, isTargetable, isSolid} from '../src/world/blocks';
+import { facingFromYaw, makeMeta, metaIsOpen, metaIsUpper, shapeBoxes, shapeHugsFace } from '../src/world/shapes';
 import { BAG_CAPACITY, tabForItem } from '../src/player/Inventory';
 import { CHUNK_SX, CHUNK_SY, CHUNK_SZ, Chunk, voxelIndex } from '../src/world/Chunk';
 import { meshChunk } from '../src/world/ChunkMesher';
@@ -2770,9 +2771,222 @@ section('underground features');
   );
 }
 
+// ------------------------------------------------------------ building and drops
+
+section('mining drops');
+
+// The bug that started this: a drop is looked up by finding the block's generated
+// item, and only PLACEABLE blocks get one — so chopping a tree or mining ore broke
+// the block and silently produced nothing at all. Anything breakable that drops
+// something must have somewhere for that something to go.
+{
+  const orphans: string[] = [];
+  for (let id = 1; id < 64; id++) {
+    const def = blockDef(id);
+    if (!def || def.name === 'Air') continue;
+    if (!Number.isFinite(def.hardness)) continue; // bedrock cannot be broken
+    const drop = blockDrop(id);
+    if (drop === null) continue;
+    if (!itemForBlock(drop)) orphans.push(`${def.name} -> ${blockDef(drop).name}`);
+  }
+  check(
+    'every breakable block has an item to drop into',
+    orphans.length === 0,
+    orphans.length === 0 ? 'all drops resolve to an item' : `no item for: ${orphans.join(', ')}`,
+  );
+}
+
+check(
+  'stone drops cobblestone, not itself',
+  blockDrop(Block.Stone) === Block.Cobble,
+  'quarried stone is rubble until you work it',
+);
+check('bedrock drops nothing', blockDrop(Block.Bedrock) === null);
+
+// Tool gating. Breaking is always possible; *collecting* is what the tool decides.
+{
+  const ore = blockDef(Block.IronOre);
+  const gold = blockDef(Block.GoldOre);
+  const dirt = blockDef(Block.Dirt);
+  check(
+    'ore requires a pickaxe, and better ore requires a better one',
+    ore.requiresTool === 'pickaxe' && gold.requiresTool === 'pickaxe' && gold.requiresTier > ore.requiresTier,
+    `iron tier ${ore.requiresTier}, gold tier ${gold.requiresTier}`,
+  );
+  check('soft ground needs no tool at all', dirt.requiresTool === undefined, 'hands are fine for dirt');
+  check(
+    'a tool exists for every tier a block demands',
+    (() => {
+      const tiers = new Map<string, number>();
+      for (const def of ITEMS.values()) {
+        if (!def.tool) continue;
+        tiers.set(def.tool.kind, Math.max(tiers.get(def.tool.kind) ?? 0, def.tool.tier));
+      }
+      for (let id = 1; id < 64; id++) {
+        const def = blockDef(id);
+        if (!def?.requiresTool) continue;
+        if ((tiers.get(def.requiresTool) ?? 0) < def.requiresTier) return false;
+      }
+      return true;
+    })(),
+    'nothing in the world is uncollectable',
+  );
+}
+
+section('building parts');
+
+// Every shape has to stay inside its own voxel, or it pokes through the block next
+// door and the collision boxes disagree with the geometry.
+{
+  const shapes = ['cube', 'slab', 'stairs', 'wedge', 'pane', 'door', 'fence', 'torch', 'wall', 'post', 'beam', 'plate'] as const;
+  let escaped = '';
+  for (const shape of shapes) {
+    for (let meta = 0; meta < 16; meta++) {
+      for (const b of shapeBoxes(shape, meta)) {
+        for (let axis = 0; axis < 3; axis++) {
+          if (b.min[axis] < -1e-9 || b.max[axis] > 1 + 1e-9 || b.min[axis] >= b.max[axis]) {
+            escaped = `${shape} meta ${meta}`;
+          }
+        }
+      }
+    }
+  }
+  check('every block shape stays inside its own voxel', escaped === '', escaped || `${shapes.length} shapes checked`);
+}
+
+check(
+  'a wall is thinner than a block but thicker than a pane',
+  (() => {
+    const wall = shapeBoxes('wall', makeMeta(0))[0];
+    const pane = shapeBoxes('pane', makeMeta(0))[0];
+    const wallThickness = wall.max[2] - wall.min[2];
+    const paneThickness = pane.max[2] - pane.min[2];
+    return wallThickness < 0.5 && wallThickness > paneThickness;
+  })(),
+  'a partition, not a sheet of glass and not a cube',
+);
+check(
+  'a wall sits flush against a face rather than floating mid-voxel',
+  shapeBoxes('wall', makeMeta(0))[0].min[2] === 0,
+  'a wall set back from the face leaves a lip where two of them meet',
+);
+check(
+  'a plate is thinner than a slab',
+  shapeBoxes('plate', makeMeta(0))[0].max[1] < shapeBoxes('slab', makeMeta(0))[0].max[1],
+  'otherwise there would be no reason for both',
+);
+check(
+  'a beam sits high in its voxel, so you walk under it',
+  shapeBoxes('beam', makeMeta(0, true))[0].min[1] > 0.5,
+  'a rafter, not a kerb',
+);
+check(
+  'a post is a column with gaps on all four sides',
+  (() => {
+    const b = shapeBoxes('post', 0)[0];
+    return b.min[0] > 0 && b.max[0] < 1 && b.min[2] > 0 && b.max[2] < 1 && b.max[1] === 1;
+  })(),
+);
+check(
+  'walls and plates hug the clicked face; posts and beams do not',
+  shapeHugsFace('wall') && shapeHugsFace('plate') && !shapeHugsFace('post') && !shapeHugsFace('beam'),
+  'a surface goes where you pointed, an object goes in the voxel',
+);
+check(
+  'rotating a wall moves it to all four faces',
+  new Set([0, 1, 2, 3].map((f) => JSON.stringify(shapeBoxes('wall', makeMeta(f as 0 | 1 | 2 | 3))))).size === 4,
+  'four facings, four distinct positions',
+);
+
+section('crafting');
+
+// A recipe naming an unregistered item would be a row that only fails when
+// clicked, and `item()` throws on an unknown id — so the table is filtered at load.
+// This asserts the filter never had anything to do.
+check(
+  'every recipe resolves to real items',
+  CRAFTING_RECIPES.length > 0 &&
+    CRAFTING_RECIPES.every((r) => !!tryItem(r.output) && r.inputs.every((i) => !!tryItem(i.itemId))),
+  `${CRAFTING_RECIPES.length} recipes`,
+);
+check(
+  'the building parts are all craftable',
+  (() => {
+    const parts = [
+      Block.StoneWall, Block.PlankWall, Block.BrickWall,
+      Block.StonePost, Block.PlankPost,
+      Block.PlankBeam, Block.StoneBeam,
+      Block.PlankPlate, Block.StonePlate,
+      Block.Workbench, Block.Door, Block.Window, Block.Fence,
+    ];
+    const outputs = new Set(CRAFTING_RECIPES.map((r) => r.output));
+    return parts.every((b) => {
+      const def = itemForBlock(b);
+      return !!def && outputs.has(def.id);
+    });
+  })(),
+  'nothing in the kit is unobtainable',
+);
+check(
+  'the bootstrap needs no workbench',
+  (() => {
+    const byHand = CRAFTING_RECIPES.filter((r) => !r.bench).map((r) => r.id);
+    return byHand.includes('planks') && byHand.includes('workbench') && byHand.includes('wood_pickaxe');
+  })(),
+  'planks, the bench itself, and a first pickaxe',
+);
+
+{
+  const inv = new Inventory();
+  const planks = itemForBlock(Block.Planks)!.id;
+  const wood = itemForBlock(Block.Wood)!.id;
+  const benchItem = itemForBlock(Block.Workbench)!.id;
+
+  inv.add(wood, 1);
+  const plankRecipe = CRAFTING_RECIPES.find((r) => r.id === 'planks')!;
+  check(
+    'crafting consumes the inputs and grants the output',
+    craft(inv, plankRecipe, false) === 'ok' && inv.count(wood) === 0 && inv.count(planks) === 4,
+    `${inv.count(planks)} planks from one log`,
+  );
+
+  const benchRecipe = CRAFTING_RECIPES.find((r) => r.id === 'workbench')!;
+  check(
+    'a recipe you cannot afford is refused',
+    craft(inv, benchRecipe, false) === 'ok' && inv.count(planks) === 0 && inv.count(benchItem) === 1,
+    'four planks became one bench',
+  );
+  check('and then there is nothing left to make it from', craft(inv, benchRecipe, false) === 'missing');
+
+  // Bench gating, and the thing that matters most: a refused craft must not have
+  // eaten anything. Removing as it goes and bailing part way would silently
+  // destroy the first ingredient of a recipe you could not afford.
+  const inv2 = new Inventory();
+  inv2.add(itemForBlock(Block.Cobble)!.id, 3);
+  inv2.add(planks, 2);
+  const stonePick = CRAFTING_RECIPES.find((r) => r.id === 'stone_pickaxe')!;
+  check(
+    'a bench recipe is refused away from a bench',
+    craft(inv2, stonePick, false) === 'needs-bench',
+    'needs-bench',
+  );
+  check(
+    'a refused craft consumes nothing',
+    inv2.count(itemForBlock(Block.Cobble)!.id) === 3 && inv2.count(planks) === 2,
+    'ingredients untouched',
+  );
+  check(
+    'the same recipe succeeds at a bench',
+    craft(inv2, stonePick, true) === 'ok' && inv2.count('stone_pickaxe') === 1,
+    'stone pickaxe made',
+  );
+}
+
+
 console.log(`\n${passed} passed, ${failures.length} failed`);
 if (failures.length > 0) {
   console.log(`FAILED: ${failures.join(', ')}`);
   process.exit(1);
 }
 console.log('ALL UNIT CHECKS PASSED');
+

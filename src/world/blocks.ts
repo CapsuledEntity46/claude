@@ -52,7 +52,23 @@ export const enum Block {
   Terracotta = 32,
   /** A paler band, so canyon walls read as layered rather than flat. */
   PaleTerracotta = 33,
+
+  // --- the building kit, and the bench you make it at ---------------------
+  /** Interactive: standing near one unlocks the heavier recipes. */
+  Workbench = 34,
+  StoneWall = 35,
+  PlankWall = 36,
+  BrickWall = 37,
+  StonePost = 38,
+  PlankPost = 39,
+  PlankBeam = 40,
+  StoneBeam = 41,
+  PlankPlate = 42,
+  StonePlate = 43,
 }
+
+/** The three tool families. */
+export type ToolClass = 'pickaxe' | 'axe' | 'shovel';
 
 export type RGB = readonly [number, number, number];
 
@@ -80,6 +96,18 @@ export interface BlockDef {
   readonly interactive: boolean;
   /** Grouped into the Materials tab, and exempt from carry weight. */
   readonly material: boolean;
+  /**
+   * Tool class needed to collect this block at all.
+   *
+   * Mining it bare-handed still breaks the block, just slowly and for nothing —
+   * which is the rule that gives a pickaxe a reason to exist. `undefined` means
+   * hands are fine, which is true of most of the world.
+   */
+  readonly requiresTool?: ToolClass;
+  /** Minimum tool tier that counts. Gold ore wants better than a wooden pick. */
+  readonly requiresTier: number;
+  /** Tool class that mines this fastest, whether or not one is required. */
+  readonly fastestWith?: ToolClass;
 }
 
 interface DefOptions {
@@ -90,6 +118,9 @@ interface DefOptions {
   oriented?: boolean;
   interactive?: boolean;
   material?: boolean;
+  requiresTool?: ToolClass;
+  requiresTier?: number;
+  fastestWith?: ToolClass;
 }
 
 function def(
@@ -120,6 +151,11 @@ function def(
     oriented: opts.oriented ?? false,
     interactive: opts.interactive ?? false,
     material: opts.material ?? true,
+    requiresTool: opts.requiresTool,
+    requiresTier: opts.requiresTier ?? 1,
+    // Defaults to whatever is required, so a block only names its best tool when
+    // that differs from its mandatory one.
+    fastestWith: opts.fastestWith ?? opts.requiresTool,
   };
 }
 
@@ -137,19 +173,19 @@ export const BLOCKS: readonly BlockDef[] = (() => {
 
   put(AIR);
   put(def(Block.Grass, 'Grass', '🟩', 0.5, [0.44, 0.33, 0.2], [0.36, 0.62, 0.28], [0.4, 0.29, 0.18]));
-  put(def(Block.Dirt, 'Dirt', '🟫', 0.5, [0.44, 0.33, 0.2]));
-  put(def(Block.Stone, 'Stone', '⬜', 1.4, [0.49, 0.49, 0.52]));
-  put(def(Block.Cobble, 'Cobblestone', '🧱', 1.6, [0.42, 0.42, 0.45]));
-  put(def(Block.Sand, 'Sand', '🟨', 0.45, [0.85, 0.79, 0.56]));
-  put(def(Block.Wood, 'Wood', '🪵', 1.0, [0.42, 0.31, 0.18], [0.55, 0.42, 0.26], [0.55, 0.42, 0.26]));
+  put(def(Block.Dirt, 'Dirt', '🟫', 0.5, [0.44, 0.33, 0.2], undefined, undefined, { fastestWith: 'shovel' }));
+  put(def(Block.Stone, 'Stone', '⬜', 1.4, [0.49, 0.49, 0.52], undefined, undefined, { requiresTool: 'pickaxe' }));
+  put(def(Block.Cobble, 'Cobblestone', '🧱', 1.6, [0.42, 0.42, 0.45], undefined, undefined, { requiresTool: 'pickaxe' }));
+  put(def(Block.Sand, 'Sand', '🟨', 0.45, [0.85, 0.79, 0.56], undefined, undefined, { fastestWith: 'shovel' }));
+  put(def(Block.Wood, 'Wood', '🪵', 1.0, [0.42, 0.31, 0.18], [0.55, 0.42, 0.26], [0.55, 0.42, 0.26], { fastestWith: 'axe' }));
   put(def(Block.Leaves, 'Leaves', '🍃', 0.25, [0.22, 0.46, 0.2], [0.24, 0.5, 0.22], [0.2, 0.4, 0.18], { opaque: false }));
-  put(def(Block.Planks, 'Planks', '🟧', 0.9, [0.65, 0.48, 0.28]));
-  put(def(Block.IronOre, 'Iron Ore', '⛏️', 2.2, [0.55, 0.5, 0.47]));
-  put(def(Block.GoldOre, 'Gold Ore', '🪙', 2.6, [0.6, 0.55, 0.35]));
-  put(def(Block.Snow, 'Snow', '⬜', 0.4, [0.92, 0.94, 0.98]));
+  put(def(Block.Planks, 'Planks', '🟧', 0.9, [0.65, 0.48, 0.28], undefined, undefined, { fastestWith: 'axe' }));
+  put(def(Block.IronOre, 'Iron Ore', '⛏️', 2.2, [0.55, 0.5, 0.47], undefined, undefined, { requiresTool: 'pickaxe', requiresTier: 2 }));
+  put(def(Block.GoldOre, 'Gold Ore', '🪙', 2.6, [0.6, 0.55, 0.35], undefined, undefined, { requiresTool: 'pickaxe', requiresTier: 3 }));
+  put(def(Block.Snow, 'Snow', '⬜', 0.4, [0.92, 0.94, 0.98], undefined, undefined, { fastestWith: 'shovel' }));
   put(def(Block.Water, 'Water', '🌊', 0, [0.18, 0.36, 0.62], [0.2, 0.4, 0.7], [0.16, 0.3, 0.55], { solid: false, opaque: false, material: false }));
   put(def(Block.Bedrock, 'Bedrock', '⬛', Infinity, [0.14, 0.14, 0.16], undefined, undefined, { material: false }));
-  put(def(Block.Brick, 'Brick', '🟥', 1.8, [0.55, 0.27, 0.22]));
+  put(def(Block.Brick, 'Brick', '🟥', 1.8, [0.55, 0.27, 0.22], undefined, undefined, { requiresTool: 'pickaxe' }));
   put(def(Block.Glass, 'Glass', '🪟', 0.3, [0.72, 0.85, 0.9], [0.72, 0.85, 0.9], [0.72, 0.85, 0.9], { opaque: false }));
   put(def(Block.Torchstone, 'Glowstone', '💡', 0.6, [0.95, 0.8, 0.42], [1.0, 0.88, 0.5], [0.9, 0.74, 0.38], { emissive: 0.55 }));
 
@@ -170,6 +206,30 @@ export const BLOCKS: readonly BlockDef[] = (() => {
   put(def(Block.Door, 'Door', '🚪', 1.0, [0.6, 0.42, 0.24], [0.66, 0.48, 0.28], [0.52, 0.36, 0.2], { shape: 'door', oriented: true, interactive: true }));
   put(def(Block.Fence, 'Fence', '🚧', 0.7, [0.58, 0.43, 0.25], undefined, undefined, { shape: 'fence', oriented: true, solid: true }));
   put(def(Block.Shingles, 'Roof Shingles', '🏠', 1.0, [0.42, 0.26, 0.24], [0.5, 0.31, 0.28], [0.36, 0.22, 0.2], { shape: 'wedge', oriented: true }));
+
+  // --- the building kit -----------------------------------------------------
+  //
+  // Walls, posts, beams and plates. The point of these is that a structure built
+  // only from full cubes can only ever be a box with holes in it: a wall thinner
+  // than a block gives interior partitions, posts and beams give a frame to hang
+  // them on, and plates give boarding you can floor a storey with. All crafted at
+  // a workbench from the plain block they are made of.
+  put(def(Block.StoneWall, 'Stone Wall', '🧱', 1.4, [0.5, 0.5, 0.53], undefined, undefined, { shape: 'wall', oriented: true, requiresTool: 'pickaxe' }));
+  put(def(Block.PlankWall, 'Plank Wall', '🟫', 0.85, [0.65, 0.48, 0.28], undefined, undefined, { shape: 'wall', oriented: true, fastestWith: 'axe' }));
+  put(def(Block.BrickWall, 'Brick Wall', '🟥', 1.7, [0.55, 0.27, 0.22], undefined, undefined, { shape: 'wall', oriented: true, requiresTool: 'pickaxe' }));
+  put(def(Block.StonePost, 'Stone Post', '🏛️', 1.4, [0.52, 0.52, 0.55], undefined, undefined, { shape: 'post', requiresTool: 'pickaxe' }));
+  put(def(Block.PlankPost, 'Plank Post', '🪵', 0.85, [0.6, 0.44, 0.26], undefined, undefined, { shape: 'post', fastestWith: 'axe' }));
+  put(def(Block.PlankBeam, 'Plank Beam', '➖', 0.85, [0.62, 0.46, 0.27], undefined, undefined, { shape: 'beam', oriented: true, fastestWith: 'axe' }));
+  put(def(Block.StoneBeam, 'Stone Lintel', '➖', 1.4, [0.5, 0.5, 0.53], undefined, undefined, { shape: 'beam', oriented: true, requiresTool: 'pickaxe' }));
+  put(def(Block.PlankPlate, 'Plank Boarding', '▭', 0.8, [0.66, 0.49, 0.29], undefined, undefined, { shape: 'plate', oriented: true, fastestWith: 'axe' }));
+  put(def(Block.StonePlate, 'Stone Flagging', '▭', 1.3, [0.51, 0.51, 0.54], undefined, undefined, { shape: 'plate', oriented: true, requiresTool: 'pickaxe' }));
+
+  // The bench. Interactive, so looking at one and pressing E opens the crafting
+  // tab; standing near one is also what unlocks the recipes that need it.
+  put(def(Block.Workbench, 'Workbench', '🛠️', 1.1, [0.52, 0.38, 0.22], [0.68, 0.52, 0.32], [0.46, 0.33, 0.19], {
+    interactive: true,
+    fastestWith: 'axe',
+  }));
 
   // --- dungeon set ----------------------------------------------------------
   put(def(Block.DungeonBrick, 'Dungeon Brick', '🧱', 2.2, [0.34, 0.34, 0.38]));
@@ -269,6 +329,9 @@ export function blockDrop(id: number): Block | null {
     case Block.Bedrock:
     case Block.Air:
     case Block.Water:
+    // Lava fell through to the default and claimed to drop itself, which only
+    // looked harmless because there is no lava item for it to have resolved to.
+    case Block.Lava:
       return null;
     default:
       return id as Block;
@@ -299,4 +362,29 @@ export const PLACEABLE: readonly Block[] = [
   Block.MossyBrick,
   Block.Terracotta,
   Block.PaleTerracotta,
+
+  // The building kit.
+  Block.Workbench,
+  Block.StoneWall,
+  Block.PlankWall,
+  Block.BrickWall,
+  Block.StonePost,
+  Block.PlankPost,
+  Block.PlankBeam,
+  Block.StoneBeam,
+  Block.PlankPlate,
+  Block.StonePlate,
+
+  // Not here for placement so much as for *collection*. An item is generated for
+  // every placeable block and mining looks the drop up in that table, so a block
+  // missing from this list silently drops nothing — which is why chopping a tree
+  // or mining ore used to yield an empty hand. They are all reasonable things to
+  // build with anyway.
+  Block.Wood,
+  Block.Leaves,
+  Block.Snow,
+  Block.IronOre,
+  Block.GoldOre,
+  Block.CrackedBrick,
+  Block.Rubble,
 ];

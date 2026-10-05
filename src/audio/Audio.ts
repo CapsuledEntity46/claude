@@ -58,10 +58,8 @@ export type SoundId =
   | 'enemyAggro'
   | 'enemyAttack'
   | 'enemyHurt'
-  | 'enemyDeath'
   // ranged
   | 'bowDraw'
-  | 'bowLoose'
   | 'gunshot'
   | 'reload'
   | 'crossbow'
@@ -314,7 +312,7 @@ export class AudioEngine {
    * one-shots — a thousand raindrop voices a second would exhaust the voice budget
    * and still sound worse than the noise they would be approximating.
    */
-  setAmbient(name: 'rain' | 'lava' | 'wind', level: number, frequency = 900, q = 0.7): void {
+  setAmbient(name: 'lava' | 'wind', level: number, frequency = 900, q = 0.7): void {
     const target = Math.max(0, Math.min(1, level));
     if (!this.ctx || !this.master || !this.noiseBuffer) return;
 
@@ -626,24 +624,11 @@ export class AudioEngine {
         this.burst(out, { duration: 0.12, from: 800 * p, to: 300 * p, q: 1 });
         break;
       }
-      case 'enemyDeath': {
-        const out = o(0.7, gain * 0.8);
-        this.tone(out, { duration: 0.6, from: 300 * p, to: 70 * p, type: 'sawtooth', gain: 0.45 });
-        // The shatter: a bright noise tail, to match the pixel burst on screen.
-        this.burst(out, { duration: 0.5, from: 2400 * p, to: 400 * p, q: 0.5 });
-        break;
-      }
 
       // --- ranged ---------------------------------------------------------
       case 'bowDraw': {
         const out = o(0.6, gain * 0.5);
         this.burst(out, { duration: 0.55, from: 260 * p, to: 700 * p, q: 6 });
-        break;
-      }
-      case 'bowLoose': {
-        const out = o(0.34, gain * 0.8);
-        this.tone(out, { duration: 0.1, from: 420 * p, to: 180 * p, type: 'triangle', gain: 0.5 });
-        this.burst(out, { duration: 0.3, from: 1800 * p, to: 600 * p, q: 0.8 });
         break;
       }
       case 'gunshot': {

@@ -307,6 +307,31 @@ export class PickupManager {
     this.group.name = 'pickups';
   }
 
+  /** Removes every loose drop. Tests use it to measure one action in isolation. */
+  clearDrops(): void {
+    for (const drop of this.drops) this.group.remove(drop.mesh);
+    this.drops.length = 0;
+  }
+
+  /** Loose item drops lying in the world, waiting to be walked over. */
+  get dropCount(): number {
+    return this.drops.length;
+  }
+
+  /** Position of the closest loose drop, for diagnostics and tests. */
+  nearestDropPosition(from: THREE.Vector3): THREE.Vector3 | null {
+    let best: THREE.Vector3 | null = null;
+    let bestDistance = Infinity;
+    for (const drop of this.drops) {
+      const distance = drop.position.distanceToSquared(from);
+      if (distance < bestDistance) {
+        bestDistance = distance;
+        best = drop.position;
+      }
+    }
+    return best ? best.clone() : null;
+  }
+
   get orbCount(): number {
     return this.orbs.length;
   }

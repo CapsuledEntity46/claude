@@ -519,10 +519,19 @@ button#play:hover, button#respawn:hover { background: var(--gold); color: #14110
 #sheet-crafting .recipe .ricon {
   width: 38px; height: 38px; display: grid; place-items: center;
   font-size: 21px; border: 1px solid var(--edge); background: #1b1822;
+  /* Clipped and shrunk rather than trusted. Where colour emoji are unavailable the
+     icon falls back to initials, and anything longer than two characters used to
+     spill across the recipe name next to it. */
+  overflow: hidden; flex: none;
 }
-#sheet-crafting .recipe .rname { font-size: 14px; color: var(--ink); }
+#sheet-crafting .recipe .ricon.glyph-text { font-size: 12px; letter-spacing: 0; }
+
+/* The text column must be allowed to shrink. A grid child defaults to min-content,
+   so a long unbroken word widens the column instead of wrapping inside it. */
+#sheet-crafting .recipe > div:nth-child(2) { min-width: 0; }
+#sheet-crafting .recipe .rname { font-size: 14px; color: var(--ink); overflow-wrap: anywhere; }
 #sheet-crafting .recipe .rname b { color: var(--gold); font-weight: 600; }
-#sheet-crafting .recipe .rnote { font-size: 11.5px; color: var(--muted); margin-top: 2px; line-height: 1.35; }
+#sheet-crafting .recipe .rnote { font-size: 11.5px; color: var(--muted); margin-top: 2px; line-height: 1.35; overflow-wrap: anywhere; }
 #sheet-crafting .recipe .ring { font-size: 11.5px; margin-top: 4px; }
 #sheet-crafting .recipe .ring .have { color: #9ccf78; }
 #sheet-crafting .recipe .ring .lack { color: #d08a7a; }

@@ -202,7 +202,9 @@ export class Screens {
 
     const icon = document.createElement('div');
     icon.className = 'ricon';
-    applyIcon(icon, out.id, itemGlyph(out));
+    // (node, glyph, name) — passing the item id as the glyph rendered the raw id
+    // as text, which overflowed the 38px box and lay across the recipe name.
+    applyIcon(icon, itemGlyph(out), out.name);
 
     const body = document.createElement('div');
     const name = document.createElement('div');

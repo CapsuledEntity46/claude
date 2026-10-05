@@ -2771,6 +2771,45 @@ section('underground features');
   );
 }
 
+// ---------------------------------------------------------------- enemy pacing
+
+section('enemy pacing');
+
+// The evasion budget, pinned.
+//
+// Melee archetypes used to be so slow that nothing could catch a walking player,
+// which made them harmless. Raising them too far produced the opposite problem: an
+// enemy that arrives before you can react and then presses inside its own reach,
+// where it is awkward to hit back. The rule that makes a fight readable is that
+// *walking* is enough to open a gap from almost everything, with one fast outlier.
+{
+  const walk = new PlayerStats().moveSpeed;
+  const melee = ARCHETYPES.filter((a) => a.melee && !a.ranged && !a.passive);
+  const faster = melee.filter((a) => a.speed >= walk);
+  check(
+    'a walking player can open a gap on all but one melee archetype',
+    faster.length <= 1,
+    `walk ${walk.toFixed(2)}; faster: ${faster.map((a) => `${a.id} ${a.speed}`).join(', ') || 'none'}`,
+  );
+  // But they must not be so slow that they can never close one either, which is
+  // what made them harmless in the first place.
+  const crawlers = melee.filter((a) => a.speed < walk * 0.7);
+  check(
+    'no melee archetype is so slow it can never engage',
+    crawlers.length === 0,
+    crawlers.length === 0 ? `slowest ${Math.min(...melee.map((a) => a.speed))}` : `too slow: ${crawlers.map((a) => a.id).join(', ')}`,
+  );
+  // And every telegraph has to be long enough to read and react to.
+  const twitchy = melee.filter((a) => (a.melee?.windup ?? 0) < 0.35);
+  check(
+    'every melee telegraph gives time to react',
+    twitchy.length === 0,
+    twitchy.length === 0
+      ? `shortest windup ${Math.min(...melee.map((a) => a.melee!.windup))}s`
+      : `too fast: ${twitchy.map((a) => `${a.id} ${a.melee!.windup}s`).join(', ')}`,
+  );
+}
+
 // ------------------------------------------------------------ building and drops
 
 section('mining drops');

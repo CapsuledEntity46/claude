@@ -676,19 +676,28 @@ export class Enemy {
     // the player. Shoving the player around while flailing made fights unwinnable
     // except by retreating in a straight line.
     if (melee && distance <= melee.reach * MELEE_ENGAGE) {
-      // Circle, but lean *inwards* rather than outwards.
+      // Circle at striking distance, holding a band rather than pulling in.
       //
-      // The old version eased away from the player whenever it was inside 55% of its
-      // own reach, which sounds reasonable and in practice meant the cooldown kept
-      // expiring with the player just out of range. An enemy waiting for its next
-      // swing should be closing the door, not opening it — so the only lateral
-      // movement here is the circle, and the radial component pulls in.
+      // Three behaviours have been tried here and the first two were both wrong.
+      // Easing *outwards* whenever inside 55% of its reach meant the cooldown kept
+      // expiring with the player out of range, and the enemy never committed.
+      // Leaning unconditionally *inwards* fixed that and overshot: the enemy ended
+      // up pressed against the player, inside its own reach, where it is awkward to
+      // hit back because the player's attack cone starts in front of them.
+      //
+      // So: close if out past 0.85 of reach, back off if inside 0.5 of it, and
+      // otherwise just orbit. The band is what keeps a fight at sword's length.
       const strafe = new THREE.Vector3(-Math.cos(this.yaw), 0, Math.sin(this.yaw));
       const sign = this.jitter > 0.5 ? 1 : -1;
       const target = this.position.clone().addScaledVector(strafe, sign * 3);
-      const toPlayer = ctx.player.position.clone().sub(this.position).setY(0);
-      if (toPlayer.lengthSq() > 1e-4) target.addScaledVector(toPlayer.normalize(), 1.2);
-      this.steerTowards(target, this.currentSpeed * 0.75);
+      const reach = melee.reach;
+      const radial = ctx.player.position.clone().sub(this.position).setY(0);
+      if (radial.lengthSq() > 1e-4) {
+        radial.normalize();
+        if (distance > reach * 0.85) target.addScaledVector(radial, 1.1);
+        else if (distance < reach * 0.5) target.addScaledVector(radial, -1.1);
+      }
+      this.steerTowards(target, this.currentSpeed * 0.7);
       return;
     }
 
@@ -760,13 +769,16 @@ export class Enemy {
       const away = this.position.clone().sub(ctx.player.position).setY(0);
       if (away.lengthSq() < 1e-4) away.set(1, 0, 0);
       this.steerTowards(this.position.clone().addScaledVector(away.normalize(), 5), this.currentSpeed * 0.75);
-    } else if (this.pendingAttack === 'melee') {
-      // Step into the blow. A swing is a committed movement, not a stationary
-      // animation, and following the target through the telegraph is what makes the
-      // reach check at the end of it mean anything. Deliberately a little slower
-      // than a full chase, so the lunge still reads as a wind-up and the player can
-      // out-pace it — by sprinting, which now costs real stamina.
-      this.steerTowards(ctx.player.position, this.currentSpeed * 0.8);
+    } else if (this.pendingAttack === 'melee' && distance > this.archetype.melee!.reach * 0.8) {
+      // Step into the blow, but only to close a gap — never to crowd.
+      //
+      // A swing is a committed movement, and following the target through the
+      // telegraph is what makes the reach check at the end of it mean anything.
+      // At a full chase speed, though, the enemy arrives *inside* the player: it
+      // ends up closer than its own reach, which both looks wrong and makes it
+      // hard to hit back, since the player's own attack cone starts in front of
+      // them. So the lunge is slow, and it stops once inside striking distance.
+      this.steerTowards(ctx.player.position, this.currentSpeed * 0.45);
     } else {
       this.velocity.x *= 0.8;
       this.velocity.z *= 0.8;

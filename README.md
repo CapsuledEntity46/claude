@@ -517,7 +517,7 @@ because the old numbers cancelled each other out:
 | --- | :-: | :-: |
 | Recovery rate | 22/s | 11/s |
 | Delay before recovery starts | none | 0.95 s |
-| Longsword swing / thrust | 11 / 9 | 15 / 19 |
+| Longsword swing / thrust | 11 / 9 | 12 / 15 |
 
 **The delay matters more than the rate.** With none at all, recovery resumed on the
 very next frame — so a melee cycle of about half a second clawed back most of what
@@ -537,6 +537,13 @@ stamina, which meant running flat out forever by releasing and re-pressing: a si
 frame under the threshold handed control to the recovery branch, which immediately
 re-armed it. Bottoming out now latches sprinting off until a quarter of the bar is
 back.
+
+Costs came back down about 20% after playtesting. The first pass priced a longsword
+swing at 15 and a thrust at 19, which was affordable on its own and not affordable
+*together with an escape* — you spent the bar attacking and then had nothing left to
+run on. That interaction is also why melee enemy speeds came down: an evasion option
+that costs no stamina is what makes an expensive attack survivable, so the speeds and
+the costs are really one change.
 
 Builds still matter: Constitution adds 5% recovery per modifier point, Long Wind 15%
 per rank, and Tireless Arm discounts attacks by 12% per rank down to a floor.
@@ -572,10 +579,29 @@ They were, and it was four compounding things rather than low damage numbers:
   kept expiring with the player just out of range. The circle now leans inwards.
 
 - **Nothing could catch a walking player.** Every melee archetype was slower than
-  the player's 4.6 walk except the spider. They now sit at or above it — a goblin at
-  4.4, a skirmisher at 5.0, a spider at 5.7 — while sprinting (7.1) still escapes
-  everything. That is deliberate: sprint should be the answer to being swarmed, and
-  it now costs real stamina to use.
+  the player's ~4.5 walk except the spider.
+
+The first fix for that last one overshot, and the correction is the more
+interesting half. Raising melee speeds *above* a walk meant the only escape was
+sprinting — and since attacking had already spent the stamina, there was no sprint
+left to escape with. The rule now is that **walking is enough to open a gap on
+everything except the giant spider**, which is the one fast outlier on purpose. A
+unit check pins the relationship from both ends: nothing may be fast enough to make
+walking futile, and nothing so slow it can never engage.
+
+Two further reasons they felt crowding, both from the same playtest:
+
+- **They lunged through the whole telegraph at near-chase speed**, which closed the
+  gap and then kept going, so the enemy ended up pressed *inside* its own reach —
+  awkward to hit back, because the player's attack cone starts in front of them.
+  The lunge is slower now and stops once inside striking distance.
+- **The circle leaned unconditionally inwards.** That was itself a fix for an
+  earlier version which eased outwards and so never committed; the third attempt
+  holds a *band* — close outside 0.85 of reach, back off inside 0.5, orbit between.
+  The band is what keeps a fight at sword's length.
+
+Telegraphs were lengthened back out too (0.38s at the shortest, asserted), so there
+is time to read one and step away.
 
 Daytime population also doubled. The pressure floor of 0.3 rounded the cap down to
 the hard minimum of two hostiles, so daylight was not merely safer than night, it
@@ -1184,12 +1210,13 @@ Some notes on the parts that are less obvious than they look:
 ## Tests
 
 ```bash
-npm test            # typecheck + 381 unit checks
+npm test            # typecheck + 384 unit checks
 npm run test:unit   # damage model, mesher, terrain determinism, inventory
 npm run test:smoke  # boots the real build in headless Chromium and plays it
 npm run survey      # terrain statistics over a 6000-block square
 npm run perf        # chunk generation and meshing cost per chunk
 npm run shots:terrain  # photographs each terrain feature
+npm run shots:craft    # photographs the crafting tab and measures its layout
 npm run trees       # elevation of every tree species
 npm run geom        # triangles in view, and which blocks emit them
 npm run tiles       # re-bakes assets/blocks/*.glb into public/textures/

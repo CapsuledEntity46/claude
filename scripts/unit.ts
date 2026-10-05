@@ -1859,6 +1859,100 @@ section('direction modifiers');
   );
 }
 
+// ------------------------------------------------------------ stamina economy
+
+section('stamina');
+
+// A thrust reaches further, lands faster, bypasses five times the armour, crits
+// twice as often and crits harder. It used to also cost *less* stamina than a
+// swing, which left no reason to ever swing: price is the only axis left to
+// balance it on, so it has to be the one that goes the other way.
+{
+  const both = ['dagger', 'shortsword', 'longsword', 'halberd'];
+  const offenders = both.filter((id) => {
+    const melee = item(id).weapon!.melee;
+    return !melee.swing || !melee.thrust || melee.thrust.stamina <= melee.swing.stamina;
+  });
+  check(
+    'a thrust costs more stamina than a swing on every weapon that has both',
+    offenders.length === 0,
+    offenders.length === 0
+      ? both
+          .map((id) => `${id} ${item(id).weapon!.melee.swing!.stamina}/${item(id).weapon!.melee.thrust!.stamina}`)
+          .join(', ')
+      : `cheaper thrust on: ${offenders.join(', ')}`,
+  );
+}
+
+{
+  const stats = new PlayerStats();
+  // Point buy starts at 8 across the board, so both modifiers are -1.
+  check('a baseline character has 90 stamina', stats.maxStamina === 90, `${stats.maxStamina}`);
+
+  // The recovery delay is the part that makes the pool matter. Without it recovery
+  // resumed the frame after a spend, so a melee cycle of about half a second
+  // clawed back most of its own cost and the bar never visibly moved.
+  stats.spendStamina(40);
+  const afterSpend = stats.stamina;
+  stats.update(0.5, false, false);
+  check(
+    'stamina does not recover during the delay after a spend',
+    Math.abs(stats.stamina - afterSpend) < 1e-9,
+    `${afterSpend} -> ${stats.stamina.toFixed(2)} after 0.5s`,
+  );
+
+  // Past the delay it comes back, but at a rate that is felt: 11/s before the
+  // weight and Constitution terms, against the 22/s that used to refill the whole
+  // bar in four and a half seconds.
+  //
+  // Measured over a tick that is wholly past the delay. The gate is evaluated once
+  // per tick rather than sub-tick, so a tick straddling the threshold recovers for
+  // its whole duration — immaterial at frame-sized steps, but it makes a one-second
+  // step the wrong thing to measure a rate with.
+  stats.update(0.5, false, false);
+  const beforeRate = stats.stamina;
+  stats.update(1.0, false, false);
+  const rate = stats.stamina - beforeRate;
+  check(
+    'stamina recovers at about 10 a second once the delay has passed',
+    rate > 9 && rate < 12,
+    `${rate.toFixed(2)}/s (11 base, less 5% for a -1 Constitution modifier)`,
+  );
+
+  // Sprinting counts as spending, so it cannot be feathered to dodge the delay.
+  const beforeSprint = stats.stamina;
+  stats.update(0.5, true, false);
+  check('sprinting drains rather than recovers', stats.stamina < beforeSprint, `${stats.stamina.toFixed(1)}`);
+}
+
+// Running yourself out locks sprinting until a quarter of the bar is back. The old
+// gate re-armed at one point of stamina, so holding shift forever worked: a single
+// frame under the threshold handed control to the recovery branch, which
+// immediately re-armed it.
+{
+  const stats = new PlayerStats();
+  for (let i = 0; i < 200; i++) stats.update(0.1, true, false);
+  check('sprinting to exhaustion empties the bar', stats.stamina <= 0.5, `${stats.stamina.toFixed(2)}`);
+  check('an exhausted character cannot sprint', !stats.canSprint(), 'latched off');
+
+  // A little back is not enough.
+  for (let i = 0; i < 4; i++) stats.update(0.25, false, false);
+  const partial = stats.stamina;
+  check(
+    'a sliver of stamina does not re-arm sprinting',
+    partial > 0 && partial < stats.maxStamina * 0.25 && !stats.canSprint(),
+    `${partial.toFixed(1)} of ${stats.maxStamina}, still latched`,
+  );
+
+  // A quarter of the bar does.
+  for (let i = 0; i < 40; i++) stats.update(0.25, false, false);
+  check(
+    'recovering a quarter of the bar re-arms sprinting',
+    stats.stamina >= stats.maxStamina * 0.25 && stats.canSprint(),
+    `${stats.stamina.toFixed(1)} of ${stats.maxStamina}`,
+  );
+}
+
 // Every stroke must have a screen vector, and only the thrust may be the zero vector —
 // the hit-cone bias and the view model both read this table.
 check(

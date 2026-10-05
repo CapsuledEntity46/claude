@@ -163,6 +163,10 @@ class Projectile {
     const dot = this.velocity.dot(normal);
     this.velocity.addScaledVector(normal, -2 * dot).multiplyScalar(0.36);
     ctx.particles.burst(contact, 3, 1.6, { color: 0x998877, size: 0.05, life: 0.25, gravity: 12 });
+    // Pitched by how hard it struck, so a grenade settling into a corner is a
+    // quieter, lower series of taps than the first impact.
+    const force = Math.min(1, this.velocity.length() / 14);
+    ctx.sound('bounce', { position: contact, volume: 0.3 + force * 0.7, pitch: 0.8 + force * 0.5 });
   }
 
   private hitPlayer(ctx: GameContext, at: THREE.Vector3): void {
@@ -220,6 +224,7 @@ class Projectile {
 
   private detonate(ctx: GameContext): void {
     this.dead = true;
+    ctx.sound('explosion', { position: this.position });
     ctx.explode(
       this.position,
       this.req.aoeRadius ?? 3,

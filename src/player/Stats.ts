@@ -47,6 +47,37 @@ const SPELL_SLOT_REGEN_SECONDS = 24;
 const REGEN_DELAY = 7;
 const REGEN_PER_SECOND = 1.6;
 
+/**
+ * Stamina recovered per second once recovery has started.
+ *
+ * Was 22, which refilled the whole bar in four and a half seconds and made the
+ * resource decorative: a swing's wind-up and recovery alone regenerated about
+ * what the swing had just cost, so attacking from a standstill was free.
+ */
+const STAMINA_PER_SECOND = 11;
+
+/**
+ * Seconds after spending stamina before any of it comes back.
+ *
+ * This matters more than the rate. With no delay at all, recovery resumed on the
+ * very next frame, so a melee cycle of roughly half a second clawed back half its
+ * own cost before it had even finished — the bar simply never moved. A pause
+ * slightly longer than a weapon's full swing is what turns stamina into something
+ * you spend and then wait for.
+ */
+const STAMINA_RECOVERY_DELAY = 0.95;
+
+/**
+ * Fraction of the bar that must come back before sprinting is allowed again.
+ *
+ * Sprint used to re-arm at one point of stamina, which meant running flat out
+ * forever by releasing and re-pressing: a single frame under the threshold handed
+ * control back to the recovery branch, which immediately re-armed it. Having run
+ * yourself out should cost something, so the latch stays shut until a quarter of
+ * the bar is back.
+ */
+const SPRINT_RECOVER_FRACTION = 0.25;
+
 /** Total XP required to reach a given level. */
 export function xpToReach(level: number): number {
   if (level <= 1) return 0;
@@ -118,6 +149,11 @@ export class PlayerStats {
 
   /** Seconds since the player last took a hit, for out-of-combat regeneration. */
   timeSinceDamage = REGEN_DELAY;
+
+  /** Seconds since stamina was last spent, for the recovery delay. */
+  timeSinceStamina = STAMINA_RECOVERY_DELAY;
+  /** Set when stamina bottoms out; blocks sprinting until enough is back. */
+  private sprintLocked = false;
 
   /** Total equipment weight, set by the Player each frame. */
   weight = 0;
@@ -355,8 +391,18 @@ export class PlayerStats {
     this.timeSinceDamage = 0;
   }
 
+  /**
+   * True while the player has run themselves out and not yet recovered enough to
+   * sprint again. Exposed so the HUD can show the bar as spent rather than just
+   * short.
+   */
+  get winded(): boolean {
+    return this.sprintLocked;
+  }
+
   update(dt: number, sprinting: boolean, blocking: boolean): void {
     this.timeSinceDamage += dt;
+    this.timeSinceStamina += dt;
 
     // Slow out-of-combat healing. Without it, one bad fight at low level puts the
     // player into an unrecoverable spiral with no way back but potions.
@@ -366,16 +412,26 @@ export class PlayerStats {
       this.hp = Math.min(this.maxHp, this.hp + Math.max(0.2, rate) * dt);
     }
 
-    // Stamina: drains while sprinting or holding guard, otherwise recovers.
+    // Stamina: drains while sprinting or holding guard, otherwise recovers — but
+    // only once the recovery delay since the last spend has elapsed. Sprinting and
+    // blocking both count as spending, so neither can be feathered to dodge it.
     if (sprinting) {
       this.stamina = Math.max(0, this.stamina - 14 * dt);
+      this.timeSinceStamina = 0;
     } else if (blocking) {
       this.stamina = Math.max(0, this.stamina - 5 * dt);
-    } else {
+      this.timeSinceStamina = 0;
+    } else if (this.timeSinceStamina >= STAMINA_RECOVERY_DELAY) {
       const regen =
-        22 * Math.max(0.4, 1 - this.weight * 0.07) * (1 + this.modifier('con') * 0.05 + this.mods.staminaRegen);
+        STAMINA_PER_SECOND *
+        Math.max(0.4, 1 - this.weight * 0.07) *
+        (1 + this.modifier('con') * 0.05 + this.mods.staminaRegen);
       this.stamina = Math.min(this.maxStamina, this.stamina + regen * dt);
     }
+
+    // Having bottomed out locks sprinting until a quarter of the bar is back.
+    if (this.stamina <= 0.5) this.sprintLocked = true;
+    else if (this.stamina >= this.maxStamina * SPRINT_RECOVER_FRACTION) this.sprintLocked = false;
 
     // Guard recovers only while not actively blocking.
     if (!blocking) {
@@ -404,7 +460,15 @@ export class PlayerStats {
   spendStamina(amount: number): boolean {
     if (this.stamina < amount) return false;
     this.stamina -= amount;
+    // Restarts the recovery delay, so a sequence of blows never regenerates
+    // between its own strokes.
+    this.timeSinceStamina = 0;
     return true;
+  }
+
+  /** True when sprinting is permitted: not winded, and something left to burn. */
+  canSprint(): boolean {
+    return !this.sprintLocked && this.stamina > 1;
   }
 
   resetForRespawn(): void {

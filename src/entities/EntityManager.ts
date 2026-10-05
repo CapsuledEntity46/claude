@@ -100,7 +100,7 @@ export class EntityManager implements EnemyWorld {
   alert(position: THREE.Vector3, radius: number): void {
     const r2 = radius * radius;
     for (const e of this.list) {
-      if (!e.dead && EntityManager.isThreat(e) && e.center.distanceToSquared(position) <= r2) e.alert();
+      if (!e.dead && EntityManager.isThreat(e) && e.center.distanceToSquared(position) <= r2) e.alert(this.ctx);
     }
   }
 
@@ -164,6 +164,9 @@ export class EntityManager implements EnemyWorld {
       Math.max(0.5, enemy.radius * 2.2),
       4.2 + enemy.radius,
     );
+    // Pitched by body size, so an ogre falling and a goblin falling are different
+    // events even when you only hear them.
+    this.ctx.sound('enemyDeath', { position: enemy.center, pitch: Math.max(0.5, 1.4 - enemy.radius * 1.4) });
   }
 
   // ---------------------------------------------------------------- lifecycle
@@ -236,7 +239,11 @@ export class EntityManager implements EnemyWorld {
    * could never put down a wall without a fight.
    */
   private spawnPressure(ctx: GameContext): number {
-    return 0.3 + (1 - ctx.daylight) * 0.7;
+    // The daytime floor was 0.3, which at low level rounded the cap down to the
+    // hard minimum of two hostiles — so daylight was not merely safer than night,
+    // it was empty, and a fight was almost always one enemy at a time with no
+    // reason to retreat or use ground. Night is still twice as dangerous.
+    return 0.5 + (1 - ctx.daylight) * 0.5;
   }
 
   /** Maximum simultaneous hostiles. Plateaus rather than growing without bound. */
@@ -244,7 +251,7 @@ export class EntityManager implements EnemyWorld {
     const level = ctx.player.stats.level;
     // sqrt growth: 4 at level 1, 8 by level 9, 13 by level 34 — not 34.
     const base = 3 + Math.floor(Math.sqrt(level) * 1.7);
-    return Math.max(2, Math.round(base * this.spawnPressure(ctx)));
+    return Math.max(3, Math.round(base * this.spawnPressure(ctx)));
   }
 
   private trySpawn(dt: number, ctx: GameContext): void {

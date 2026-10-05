@@ -1875,6 +1875,43 @@ try {
   // invalidate the streaming queue, or a shrunken ring is never serviced and a
   // widened one never fills. That failure is invisible from the frame rate — the
   // world simply stops at a radius nothing is asking about any more.
+  // Audio. The least observable feature in the game: there is no frame to
+  // screenshot, and this headless Chromium may have no audio device at all. The
+  // engine therefore counts what the game *asked* to play independently of whether
+  // anything was audible, which is the only way to tell "no sound was written" from
+  // "no speakers are attached".
+  console.log('\n[audio]');
+  const audio = await page.evaluate(() => window.__voxelquest.debugAudio());
+  check(
+    'the audio engine started',
+    audio.started === true,
+    `state ${audio.state}, active ${audio.active}, volume ${audio.volume}`,
+  );
+  check(
+    'the game has played sounds',
+    audio.totalPlays > 0,
+    `${audio.totalPlays} plays across ${audio.distinct} distinct sounds`,
+  );
+  // By this point the suite has swung weapons, mined, fought and fired, so the
+  // events that matter most should all have been heard from. Named individually
+  // rather than counted, because a total only proves *something* made a noise.
+  for (const id of ['swing', 'hitFlesh', 'step', 'dig', 'breakBlock', 'enemyHurt']) {
+    check(`'${id}' is wired to its event`, (audio.counts?.[id] ?? 0) > 0, `${audio.counts?.[id] ?? 0} plays`);
+  }
+  check(
+    'the voice budget is not leaking',
+    typeof audio.voices === 'number' && audio.voices <= 24,
+    `${audio.voices} voices in flight`,
+  );
+  const muting = await page.evaluate(() => {
+    const g = window.__voxelquest;
+    const on = g.debugSetMuted(true);
+    const before = g.debugAudio().totalPlays;
+    g.debugSetMuted(false);
+    return { on, before };
+  });
+  check('muting is reachable from the debug surface', muting.on === true, `muted ${muting.on}`);
+
   const governor = await page.evaluate(() => window.__voxelquest.debugViewGovernor());
   check(
     'the view governor reports its state',

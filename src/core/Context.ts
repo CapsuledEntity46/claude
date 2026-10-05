@@ -1,4 +1,5 @@
 import type * as THREE from 'three';
+import type { PlayOptions, SoundId } from '../audio/Audio';
 import type { DamageInput, DamageType } from '../combat/types';
 import type { Enemy } from '../entities/Enemy';
 import type { Particles } from '../fx/Particles';
@@ -77,4 +78,13 @@ export interface GameContext {
 
   log(message: string, cls?: LogClass): void;
   floater(worldPosition: THREE.Vector3, text: string, cls: FloaterClass): void;
+
+  /**
+   * Plays a sound, optionally at a world position.
+   *
+   * On the context rather than reached for directly, for the same reason `log` and
+   * `floater` are: an enemy should not hold a reference to the audio engine, and a
+   * system under test should be able to run without one.
+   */
+  sound(id: SoundId, options?: PlayOptions): void;
 }

@@ -26,6 +26,7 @@ npm run dev     # then open the printed localhost URL
 | `1`–`8` / wheel | Hotbar |
 | `Tab` | Character sheet: abilities, skill tree, equipment, bag |
 | `F5` / `F9` | Save / load · `Esc` pause |
+| `M` · `[` `]` | Mute · volume down / up |
 
 You can see what you are holding. Weapons, torches, shields, spells, and blocks
 all have a first-person model, and the weapon travels the way you moved the mouse
@@ -413,6 +414,39 @@ thrash the chunk streamer. It also checks that writing the view distance
 invalidates the streaming queue, because a widened ring that does not is simply
 never serviced and nothing reports a problem.
 
+## Stamina is a resource, not a formality
+
+Attacking costs real stamina now, and getting it back takes time. Three changes,
+because the old numbers cancelled each other out:
+
+| | Before | Now |
+| --- | :-: | :-: |
+| Recovery rate | 22/s | 11/s |
+| Delay before recovery starts | none | 0.95 s |
+| Longsword swing / thrust | 11 / 9 | 15 / 19 |
+
+**The delay matters more than the rate.** With none at all, recovery resumed on the
+very next frame — so a melee cycle of about half a second clawed back most of what
+the swing had just cost, and the bar never visibly moved however the rate was tuned.
+A pause slightly longer than a full swing is what turns stamina into something you
+spend and then wait for. Sprinting and blocking both restart it, so neither can be
+feathered to dodge it.
+
+**A thrust now costs more than a swing, not less.** It reaches further, lands
+faster, bypasses five times as much armour, crits twice as often and crits harder.
+It used to pay for all that with *less* stamina, which left no reason to ever swing
+at anything. Price is the only axis left to balance it on, and a unit check holds
+the ordering for every weapon that has both.
+
+**Running yourself out now costs something.** Sprint used to re-arm at one point of
+stamina, which meant running flat out forever by releasing and re-pressing: a single
+frame under the threshold handed control to the recovery branch, which immediately
+re-armed it. Bottoming out now latches sprinting off until a quarter of the bar is
+back.
+
+Builds still matter: Constitution adds 5% recovery per modifier point, Long Wind 15%
+per rank, and Tireless Arm discounts attacks by 12% per rank down to a floor.
+
 ## Enemies
 
 Each archetype has its own silhouette. Goblins are hunched and spindly, with swept
@@ -421,6 +455,37 @@ tusked with the head sunk between the shoulders; skeletons show ribs through the
 chest under a helmet; cultists are a robe with no legs and two lights in an empty
 hood; the ogre is a potbellied slab with arms that reach the ground; the giant
 spider is a banded bulb on eight jointed legs.
+
+### Why melee enemies used to be harmless
+
+They were, and it was four compounding things rather than low damage numbers:
+
+- **Every melee enemy retreated after every swing.** `recover` led unconditionally
+  into a `backoff` that walked four units away, and the enemy then had to re-close a
+  gap it had opened itself. This was the single biggest cause. A minority still do it
+  — keyed on the enemy's own fixed jitter, so a given enemy is consistently a presser
+  or a circler rather than flickering between the two mid-fight — because the in-out
+  rhythm is worth keeping. Most now press.
+
+- **They froze during the telegraph.** Committing to a swing cut velocity to 30% and
+  then damped it further every frame, so for the 0.3–0.95 s of the wind-up the enemy
+  stood still while the player walked out of the reach re-check at the end of it. A
+  swing is a committed *movement*; melee attackers now keep most of their momentum
+  and step into the blow.
+
+- **They eased away while waiting on a cooldown.** Inside 55% of its own reach an
+  enemy nudged outwards, which sounds sensible and in practice meant the cooldown
+  kept expiring with the player just out of range. The circle now leans inwards.
+
+- **Nothing could catch a walking player.** Every melee archetype was slower than
+  the player's 4.6 walk except the spider. They now sit at or above it — a goblin at
+  4.4, a skirmisher at 5.0, a spider at 5.7 — while sprinting (7.1) still escapes
+  everything. That is deliberate: sprint should be the answer to being swarmed, and
+  it now costs real stamina to use.
+
+Daytime population also doubled. The pressure floor of 0.3 rounded the cap down to
+the hard minimum of two hostiles, so daylight was not merely safer than night, it
+was empty. Night is still twice as dangerous.
 
 Before this they were all the same five boxes — torso, head, two arms, two legs —
 recoloured and rescaled per archetype, which meant the single thing a player most
@@ -462,6 +527,62 @@ drawing it.
 
 Weather rolls between clear skies, ground fog, rain, and storms. Fog and rain
 both pull your view distance in; a storm darkens the sky enough to matter.
+
+## Sound is synthesised, not sampled
+
+There are no audio files. Every sound is built at the moment it plays from
+oscillators and filtered noise, for the same reason there are no model files: a
+sample you can only change in an editor cannot be tuned against the game, and a
+world that streams its own terrain should not also be waiting on a megabyte of wav.
+
+The palette is small because that is what the material is:
+
+| Sound | How |
+| --- | --- |
+| Sword stroke | Noise through a bandpass sweeping up and away — the *sweep* is the effect; a static band is a hiss, not a movement |
+| Hit on a body | Low sine thud with a slap of noise on the front |
+| Hit on mail | Partials at non-integer ratios, which is what separates struck steel from a bell |
+| Gunshot | A crack, a lowpassed body, and a tail |
+| Growl | Low sawtooth, pitch wandering, under a closing lowpass |
+| Level up | A rising major triad — the only melodic sound in the game, which is what makes it read as a reward |
+
+Pitch carries information rather than decoration. A hit is pitched by the target's
+size, so an ogre and a goblin are different events even unseen; a mining tick is
+pitched by the block's hardness, so you can hear stone from soil; a swing is pitched
+by the weapon's reach, because that is the best available proxy for how much steel
+is moving.
+
+Four things that took care:
+
+- **The context must start inside the click.** A browser refuses to create an
+  `AudioContext` without a user gesture, and one created early lands in `suspended`
+  and stays there with no error — silent audio that looks like working audio. It is
+  started from the same handler that locks the pointer.
+
+- **Bursts need a retrigger floor.** A blunderbuss spawns a projectile per pellet, a
+  mining tick repeats at the frame rate, three orbs land together. Without a minimum
+  gap these phase-align into a buzz that is also much *louder* than any one of them,
+  because correlated signals sum linearly while uncorrelated ones sum as the square
+  root. The shot fires once outside the pellet loop for the same reason.
+
+- **Rain is a bed, not ten thousand one-shots.** A raindrop is not worth a voice, and
+  the voices would sum to a buzz rather than to rainfall. It is a looping noise
+  filter whose gain the weather ramps.
+
+- **Positional, but cheaply.** Distance attenuation and a stereo pan from the
+  camera's right vector, rather than a `PannerNode` per voice doing HRTF
+  convolution. In a first-person game the useful information is "how far" and "which
+  side", and that is two multiplies.
+
+`M` mutes; `[` and `]` set the volume, persisted to `localStorage`. There is no
+options screen to put a slider in, and a game with no way to turn the sound down is
+a game people mute at the browser tab instead.
+
+**Testing sound is the interesting part.** There is no frame to screenshot, and
+headless Chromium may have no audio device at all — so the engine counts what the
+game *asked* to play independently of whether anything was audible. That is what
+lets the smoke suite assert that swinging a sword makes a noise, and tell "nothing
+was wired up" apart from "no speakers are attached".
 
 ## Torches, shields, and the off hand
 
@@ -636,6 +757,7 @@ src/
   fx/          Low-poly item and creature models, particles,
                view model, trails, rain, stars, sun and moon, lights, cracks, arc
   ui/          HUD, minimap and compass, character sheet, icon fallback
+  audio/       Procedurally synthesised sound effects
   save/        IndexedDB persistence
 assets/        Authored source art. Block GLBs, not shipped to the browser
 public/        Baked block tiles, served as-is
@@ -949,7 +1071,7 @@ Some notes on the parts that are less obvious than they look:
 ## Tests
 
 ```bash
-npm test            # typecheck + 349 unit checks
+npm test            # typecheck + 358 unit checks
 npm run test:unit   # damage model, mesher, terrain determinism, inventory
 npm run test:smoke  # boots the real build in headless Chromium and plays it
 npm run survey      # terrain statistics over a 6000-block square
@@ -1075,4 +1197,5 @@ streaming, spawning, or aim.
   (`npm run geom`). The frame-rate governor works around it by trading view
   distance; removing it properly is the largest performance item left.
 - Doors are a single block tall; stack two for a full doorway.
-- No audio.
+- Sound is synthesised, not sampled, so it is stylised rather than realistic. There
+  is no music, and no mixer beyond a master volume.

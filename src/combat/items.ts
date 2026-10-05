@@ -69,7 +69,7 @@ function swing(damage: number, reach: number, o: MeleeOpts = {}): MeleeAttack {
     arcDeg: o.arcDeg ?? 55,
     windup: o.windup ?? 0.22,
     recovery: o.recovery ?? 0.3,
-    stamina: o.stamina ?? 8,
+    stamina: o.stamina ?? 11,
     armorPierce: o.armorPierce ?? 0.1,
     maxTargets: o.maxTargets ?? 3,
     knockback: o.knockback ?? 4.5,
@@ -80,6 +80,12 @@ function swing(damage: number, reach: number, o: MeleeOpts = {}): MeleeAttack {
  * A thrust commits along a narrow line: less damage spread, more reach, and it
  * bypasses roughly half the target's flat armour. The answer to iron plate when
  * you have no blunt weapon in the bag.
+ *
+ * **Costlier than a swing, not cheaper.** A thrust reaches further, lands faster,
+ * bypasses five times as much armour, crits twice as often and crits harder; it
+ * used to pay for all of that with *less* stamina than a swing, which left no
+ * reason to ever swing at anything. The price is the only axis left to balance it
+ * on, since every other one is already in the thrust's favour.
  */
 function thrust(damage: number, reach: number, o: MeleeOpts = {}): MeleeAttack {
   return {
@@ -90,7 +96,7 @@ function thrust(damage: number, reach: number, o: MeleeOpts = {}): MeleeAttack {
     arcDeg: o.arcDeg ?? 19,
     windup: o.windup ?? 0.16,
     recovery: o.recovery ?? 0.24,
-    stamina: o.stamina ?? 6,
+    stamina: o.stamina ?? 15,
     armorPierce: o.armorPierce ?? 0.5,
     maxTargets: o.maxTargets ?? 1,
     knockback: o.knockback ?? 2.5,
@@ -165,12 +171,12 @@ const defs: ItemDef[] = [];
 // --- Melee: attack modes follow the weapon's shape -------------------------
 
 defs.push(
-  melee('Fists', '👊', 0, [swing(2, 2.0, { type: 'blunt', stamina: 4, maxTargets: 1, windup: 0.12, recovery: 0.18, knockback: 2 })],
+  melee('Fists', '👊', 0, [swing(2, 2.0, { type: 'blunt', stamina: 5, maxTargets: 1, windup: 0.12, recovery: 0.18, knockback: 2 })],
     'No edge, no point. Only knuckles.'),
 
   melee('Dagger', '🗡️', 1, [
-    thrust(5, 2.4, { windup: 0.1, recovery: 0.16, stamina: 4, armorPierce: 0.6 }),
-    swing(4, 2.2, { windup: 0.12, recovery: 0.18, stamina: 4, maxTargets: 1 }),
+    thrust(5, 2.4, { windup: 0.1, recovery: 0.16, stamina: 8, armorPierce: 0.6 }),
+    swing(4, 2.2, { windup: 0.12, recovery: 0.18, stamina: 6, maxTargets: 1 }),
   ], 'Point and edge both, but neither has any mass behind it.'),
 
   melee('Shortsword', '⚔️', 2, [
@@ -179,33 +185,33 @@ defs.push(
   ], 'A blade is sharp along the sides and pointed at the tip, so it can do both.'),
 
   melee('Longsword', '⚔️', 4, [
-    swing(13, 3.3, { windup: 0.28, recovery: 0.34, stamina: 11 }),
-    thrust(11, 4.1, { windup: 0.2, recovery: 0.3, stamina: 9, armorPierce: 0.55 }),
+    swing(13, 3.3, { windup: 0.28, recovery: 0.34, stamina: 15 }),
+    thrust(11, 4.1, { windup: 0.2, recovery: 0.3, stamina: 19, armorPierce: 0.55 }),
   ], 'Heavy enough to cleave, long enough to reach. The generalist.', true),
 
   melee('Rapier', '🤺', 3, [
-    thrust(11, 4.3, { windup: 0.14, recovery: 0.2, stamina: 6, armorPierce: 0.68 }),
+    thrust(11, 4.3, { windup: 0.14, recovery: 0.2, stamina: 16, armorPierce: 0.68 }),
   ], 'All point, no cutting edge worth the name. Thrust only — but it finds gaps in plate.'),
 
   melee('Spear', '🔻', 3, [
-    thrust(12, 5.0, { windup: 0.2, recovery: 0.3, stamina: 8, armorPierce: 0.55, knockback: 5 }),
+    thrust(12, 5.0, { windup: 0.2, recovery: 0.3, stamina: 18, armorPierce: 0.55, knockback: 5 }),
   ], 'A point on a pole. Nothing to swing with, but nothing else reaches this far.', true),
 
   melee('Mace', '🔨', 3, [
-    swing(12, 2.8, { type: 'blunt', windup: 0.26, recovery: 0.34, stamina: 10, armorPierce: 0.05, knockback: 6 }),
+    swing(12, 2.8, { type: 'blunt', windup: 0.26, recovery: 0.34, stamina: 14, armorPierce: 0.05, knockback: 6 }),
   ], 'Blunt all over, so it can only swing — and plate armour does nothing against it.'),
 
   melee('Warhammer', '⚒️', 5, [
-    swing(19, 3.0, { type: 'blunt', windup: 0.4, recovery: 0.46, stamina: 15, armorPierce: 0.05, knockback: 9, maxTargets: 2 }),
+    swing(19, 3.0, { type: 'blunt', windup: 0.4, recovery: 0.46, stamina: 21, armorPierce: 0.05, knockback: 9, maxTargets: 2 }),
   ], 'Slow, exhausting, and it turns an armoured knight into a sack of broken parts.', true),
 
   melee('Battleaxe', '🪓', 4, [
-    swing(16, 3.1, { windup: 0.34, recovery: 0.4, stamina: 13, maxTargets: 4, knockback: 6 }),
+    swing(16, 3.1, { windup: 0.34, recovery: 0.4, stamina: 18, maxTargets: 4, knockback: 6 }),
   ], 'A wedge on a handle. No tip to thrust with, but it sweeps through a crowd.', true),
 
   melee('Halberd', '🔱', 5, [
-    swing(15, 3.6, { windup: 0.36, recovery: 0.42, stamina: 13, maxTargets: 3, knockback: 6 }),
-    thrust(14, 5.2, { windup: 0.24, recovery: 0.32, stamina: 10, armorPierce: 0.6, knockback: 5 }),
+    swing(15, 3.6, { windup: 0.36, recovery: 0.42, stamina: 18, maxTargets: 3, knockback: 6 }),
+    thrust(14, 5.2, { windup: 0.24, recovery: 0.32, stamina: 22, armorPierce: 0.6, knockback: 5 }),
   ], 'An axe head and a spike on the same shaft, so it genuinely does both jobs.', true),
 );
 

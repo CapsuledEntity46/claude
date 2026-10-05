@@ -21,6 +21,19 @@ type AIState = 'idle' | 'chase' | 'windup' | 'recover' | 'reposition' | 'backoff
  */
 const MELEE_ENGAGE = 1.05;
 
+/**
+ * Share of melee enemies that give ground after a swing instead of pressing on.
+ *
+ * Compared against the enemy's own fixed `jitter`, so each one is permanently a
+ * presser or a circler rather than deciding afresh every stroke. It used to be
+ * effectively 1.0 — every enemy retreated four units after every blow and then had
+ * to re-close a gap of its own making, which for any archetype slower than a
+ * walking player meant it rarely landed a second hit. Keeping a minority of them
+ * doing it preserves the readable in-out rhythm of a fight without handing the
+ * player a free reset after every exchange.
+ */
+const BACKOFF_CHANCE = 0.35;
+
 // Creature bodies come from fx/creatures. Only the health bar quad is shared.
 const GEO = {
   bar: new THREE.PlaneGeometry(1, 1),
@@ -244,7 +257,8 @@ export class Enemy {
     // `update` is guarded on `!this.aggro`, so it never ran again and the state never
     // left 'idle'. Shooting something from a distance did nothing but chip its health
     // while it wandered about.
-    this.alert();
+    this.alert(ctx);
+    ctx.sound('enemyHurt', { position: this.center, pitch: Math.max(0.6, 1.4 - this.radius * 1.1) });
 
     // Getting hit interrupts a wind-up, which rewards aggressive play.
     if (this.state === 'windup' && result.damage > this.maxHp * 0.08) {
@@ -295,9 +309,15 @@ export class Enemy {
   }
 
   /** Wakes the enemy — used by loud noises like gunfire and explosions. */
-  alert(): void {
+  alert(ctx?: GameContext): void {
+    const waking = !this.aggro;
     this.aggro = true;
     if (this.state === 'idle') this.state = 'chase';
+    // Guarded on the edge: `alert` is also called by every hit and by any nearby
+    // gunshot, and a growl on each of those is a stuck record.
+    if (waking && ctx) {
+      ctx.sound('enemyAggro', { position: this.center, pitch: Math.max(0.55, 1.5 - this.radius * 1.3) });
+    }
   }
 
   /** Drops pursuit and goes back to wandering. */
@@ -420,10 +440,18 @@ export class Enemy {
         this.stateTimer -= dt;
         if (this.stateTimer <= 0) {
           if (!this.aggro) this.state = 'idle';
-          else if (this.archetype.melee) {
-            // Disengage briefly so the player gets a window to answer.
+          else if (this.archetype.melee && this.jitter < BACKOFF_CHANCE) {
+            // Disengage so the player gets a window to answer — but only sometimes.
+            //
+            // This used to happen after *every* swing, and it was the single reason
+            // melee enemies were harmless. The retreat walks four units out and the
+            // enemy then has to re-close a gap it opened itself, which on archetypes
+            // slower than a walking player meant it effectively never got a second
+            // blow in. Keyed on the enemy's own fixed jitter rather than a fresh
+            // roll, so a given enemy is consistently a presser or a circler instead
+            // of flickering between the two mid-fight.
             this.state = 'backoff';
-            this.stateTimer = 0.35 + this.jitter * 0.4;
+            this.stateTimer = 0.3 + this.jitter * 0.3;
           } else {
             this.state = 'chase';
           }
@@ -629,7 +657,7 @@ export class Enemy {
     }
 
     if (ranged && distance <= ranged.standoff * 1.6 && this.attackCooldown <= 0 && this.hasLineOfSight(ctx, distance)) {
-      this.beginAttack('ranged', ranged.windup);
+      this.beginAttack('ranged', ranged.windup, ctx);
       return;
     }
 
@@ -640,7 +668,7 @@ export class Enemy {
     // distance roughly constant, so an enemy that arrived in that band orbited the
     // player indefinitely without ever swinging — which is exactly what it looked like.
     if (melee && distance <= melee.reach * MELEE_ENGAGE && this.attackCooldown <= 0) {
-      this.beginAttack('melee', melee.windup);
+      this.beginAttack('melee', melee.windup, ctx);
       return;
     }
 
@@ -648,17 +676,19 @@ export class Enemy {
     // the player. Shoving the player around while flailing made fights unwinnable
     // except by retreating in a straight line.
     if (melee && distance <= melee.reach * MELEE_ENGAGE) {
+      // Circle, but lean *inwards* rather than outwards.
+      //
+      // The old version eased away from the player whenever it was inside 55% of its
+      // own reach, which sounds reasonable and in practice meant the cooldown kept
+      // expiring with the player just out of range. An enemy waiting for its next
+      // swing should be closing the door, not opening it — so the only lateral
+      // movement here is the circle, and the radial component pulls in.
       const strafe = new THREE.Vector3(-Math.cos(this.yaw), 0, Math.sin(this.yaw));
       const sign = this.jitter > 0.5 ? 1 : -1;
       const target = this.position.clone().addScaledVector(strafe, sign * 3);
-      // Ease outwards only if genuinely inside its own guard, and only a little: a
-      // bigger nudge walks it out of strike range, so the cooldown expires with the
-      // player too far away and it never commits.
-      if (distance < melee.reach * 0.55) {
-        const away = this.position.clone().sub(ctx.player.position).setY(0);
-        if (away.lengthSq() > 1e-4) target.addScaledVector(away.normalize(), 0.8);
-      }
-      this.steerTowards(target, this.currentSpeed * 0.5);
+      const toPlayer = ctx.player.position.clone().sub(this.position).setY(0);
+      if (toPlayer.lengthSq() > 1e-4) target.addScaledVector(toPlayer.normalize(), 1.2);
+      this.steerTowards(target, this.currentSpeed * 0.75);
       return;
     }
 
@@ -689,18 +719,32 @@ export class Enemy {
 
     const ranged = this.archetype.ranged;
     if (ranged && this.attackCooldown <= 0 && this.hasLineOfSight(ctx, distance)) {
-      this.beginAttack('ranged', ranged.windup);
+      this.beginAttack('ranged', ranged.windup, ctx);
       return;
     }
     if (this.stateTimer <= 0 || (ranged && distance > ranged.standoff)) this.state = 'chase';
   }
 
-  private beginAttack(kind: 'melee' | 'ranged', windup: number): void {
+  /**
+   * Commits to a stroke.
+   *
+   * A melee attacker keeps most of its momentum, because it is about to need it.
+   * Cutting velocity to 30% here planted the enemy for the whole telegraph — 0.3 to
+   * 0.95 seconds, during which a walking player covers two to four blocks — and the
+   * reach re-check at the end of the wind-up then failed against anything that had
+   * not politely stood still. Ranged attackers still plant: a bowman steadying a
+   * shot is the behaviour we want, and `doWindup` gives it ground to retreat over.
+   */
+  private beginAttack(kind: 'melee' | 'ranged', windup: number, ctx?: GameContext): void {
     this.state = 'windup';
     this.stateTimer = windup;
     this.pendingAttack = kind;
-    this.velocity.x *= 0.3;
-    this.velocity.z *= 0.3;
+    // The telegraph is the player's cue to move, so it has to be audible even when
+    // the enemy is off screen — which, with no pathfinding, is often behind you.
+    if (ctx) ctx.sound('enemyAttack', { position: this.center, pitch: Math.max(0.55, 1.45 - this.radius * 1.2) });
+    const bleed = kind === 'melee' ? 0.85 : 0.3;
+    this.velocity.x *= bleed;
+    this.velocity.z *= bleed;
   }
 
   private pendingAttack: 'melee' | 'ranged' = 'melee';
@@ -716,6 +760,13 @@ export class Enemy {
       const away = this.position.clone().sub(ctx.player.position).setY(0);
       if (away.lengthSq() < 1e-4) away.set(1, 0, 0);
       this.steerTowards(this.position.clone().addScaledVector(away.normalize(), 5), this.currentSpeed * 0.75);
+    } else if (this.pendingAttack === 'melee') {
+      // Step into the blow. A swing is a committed movement, not a stationary
+      // animation, and following the target through the telegraph is what makes the
+      // reach check at the end of it mean anything. Deliberately a little slower
+      // than a full chase, so the lunge still reads as a wind-up and the player can
+      // out-pace it — by sprinting, which now costs real stamina.
+      this.steerTowards(ctx.player.position, this.currentSpeed * 0.8);
     } else {
       this.velocity.x *= 0.8;
       this.velocity.z *= 0.8;

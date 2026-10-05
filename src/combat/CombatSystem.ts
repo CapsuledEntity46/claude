@@ -561,6 +561,10 @@ export class CombatSystem {
     this.stateDuration = attack.windup;
     this.timer = attack.windup;
 
+    // Pitched down by the weapon's reach, which is the best single proxy available
+    // for how much steel is moving: a dagger whips, a halberd heaves.
+    ctx.sound(attack.mode === 'thrust' ? 'thrust' : 'swing', { pitch: Math.max(0.6, 1.5 - attack.reach * 0.18) });
+
     // Deliberately no camera kick here. Moving the camera during a melee attack
     // reads as the view glitching or clipping rather than as the weapon swinging;
     // all of the motion belongs to the weapon itself. Recoil remains on firearms,
@@ -655,6 +659,15 @@ export class CombatSystem {
         critMultiplier: attack.mode === 'thrust' ? 2.0 : 1.7,
       };
       ctx.enemies.damageEnemy(enemy, input, eye, attack.knockback);
+
+      // What you hit matters more than what you hit it with. An armoured target
+      // rings; an unarmoured one thuds — which is the same lesson the damage model
+      // teaches, delivered through the ears a fraction of a second sooner.
+      const armoured = enemy.defense.armor >= 4;
+      ctx.sound(armoured ? 'hitArmour' : 'hitFlesh', {
+        position: enemy.center,
+        pitch: Math.max(0.7, 1.35 - enemy.radius * 0.6),
+      });
     }
 
     if (hits.length > 0) {
@@ -708,12 +721,22 @@ export class CombatSystem {
 
     this.miningProgress += (dt * speed) / Math.max(0.1, hardness);
     if (this.rng() < dt * 22) this.spawnBlockParticles(ctx, hit.x, hit.y, hit.z, 1);
+    // Pitched by hardness, so you can hear stone from soil. Rate-limited inside the
+    // engine rather than here, because the tick rate is the frame rate.
+    ctx.sound('dig', {
+      position: new THREE.Vector3(hit.x + 0.5, hit.y + 0.5, hit.z + 0.5),
+      pitch: Math.max(0.6, 1.4 - hardness * 0.25),
+    });
 
     if (this.miningProgress >= 1) this.breakBlock(ctx, hit.x, hit.y, hit.z);
   }
 
   private breakBlock(ctx: GameContext, x: number, y: number, z: number): void {
     const id = ctx.world.getBlock(x, y, z);
+    ctx.sound('breakBlock', {
+      position: new THREE.Vector3(x + 0.5, y + 0.5, z + 0.5),
+      pitch: Math.max(0.6, 1.35 - blockDef(id).hardness * 0.22),
+    });
     this.resetMining();
     if (!ctx.world.setBlock(x, y, z, Block.Air)) {
       this.diag.lastReason = `break rejected at ${x},${y},${z} (block ${id})`;
@@ -757,6 +780,7 @@ export class CombatSystem {
       if (ctx.world.toggleBlock(hit.x, hit.y, hit.z)) {
         this.useCooldown = 0.25;
         this.placeTimer = 0.18;
+        ctx.sound('doorOpen', { position: new THREE.Vector3(hit.x + 0.5, hit.y + 0.5, hit.z + 0.5) });
         return;
       }
     }
@@ -854,6 +878,9 @@ export class CombatSystem {
     this.reloadingWeapon = active.id;
     this.stateDuration = profile.reloadTime;
     this.timer = profile.reloadTime;
+    // A crossbow is cranked; a firearm is rammed. Different mechanisms, and the
+    // reload is long enough that the difference is worth hearing.
+    ctx.sound(profile.muzzleFlash ? 'reload' : 'crossbow');
     return true;
   }
 
@@ -912,6 +939,11 @@ export class CombatSystem {
     }
 
     this.shotCounter++;
+
+    // One sound for the shot, outside the pellet loop: a blunderbuss spawns
+    // several projectiles and firing per pellet would be both a buzz and much
+    // louder than one report.
+    ctx.sound(profile.muzzleFlash ? 'gunshot' : 'bowLoose', { volume: profile.muzzleFlash ? 1 : 0.7 });
 
     if (profile.muzzleFlash) {
       ctx.particles.cone(origin, look, 22, 7, 0.35, { color: 0xffd070, size: 0.13, life: 0.22, gravity: -3, drag: 3 });
@@ -1307,16 +1339,21 @@ export class CombatSystem {
         life: 0.3,
         gravity: 12,
       });
+      ctx.sound('block');
       if (stats.guard <= 0) {
         ctx.log('Your guard breaks!', 'hurt');
         stats.stamina = Math.max(0, stats.stamina - 25);
+        stats.timeSinceStamina = 0;
         player.blocking = false;
+        ctx.sound('guardBreak');
       }
     }
 
     damage = Math.max(1, Math.round(damage * 10) / 10);
     stats.hp -= damage;
     stats.noteDamageTaken();
+    // Pitched by how hard it hurt, relative to the pool it came out of.
+    if (!blocked) ctx.sound('hurt', { pitch: Math.max(0.75, 1.2 - damage / Math.max(1, stats.maxHp)) });
 
     ctx.floater(player.center, `-${damage}`, 'hurt');
     // Kick the camera away from the hit so damage has physical weight.

@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { AudioEngine } from '../audio/Audio';
 import { CombatSystem } from '../combat/CombatSystem';
 import { blockCollisionBoxes, blockDef } from '../world/blocks';
 import { CHUNK_SY } from '../world/Chunk';
@@ -124,6 +125,7 @@ export class Game {
   private world: World;
   private player: Player;
   private particles = new Particles();
+  private audio = new AudioEngine();
   private pickups: PickupManager;
   private entities: EntityManager;
   private projectiles = new ProjectileManager();
@@ -168,6 +170,12 @@ export class Game {
    * return to vsync, climb back to nine, stutter, and repeat for the whole
    * session. Lowering the ceiling on distress means the cost is paid once.
    */
+  /** Scratch basis vectors for the audio listener. Reused, not allocated per frame. */
+  private audioRight = new THREE.Vector3();
+  private audioUp = new THREE.Vector3();
+  private audioForward = new THREE.Vector3();
+  private thunderTimer = 6;
+
   private governorCeiling = RENDER_DISTANCE;
   private smoothedFrameMs = 16.7;
   private governorDistressFor = 0;
@@ -233,13 +241,18 @@ export class Game {
     this.player = new Player(Inventory.startingKit());
 
     this.pickups = new PickupManager({
-      onXp: (amount) => this.grantXp(amount),
+      onXp: (amount) => {
+        this.audio.play('orbXp');
+        this.grantXp(amount);
+      },
       onMana: (amount) => {
         const restored = this.player.stats.restoreMana(amount);
+        this.audio.play('orbMana');
         if (restored > 0) this.hud.log(`Absorbed ${Math.round(restored)} mana.`, 'magic');
       },
       onGold: (amount) => {
         this.player.stats.addGold(amount);
+        this.audio.play('orbGold');
         this.hud.log(`Picked up ${Math.round(amount)} gold.`, 'good');
       },
       onItem: (stack) => this.collectItem(stack),
@@ -448,6 +461,7 @@ export class Game {
         this.combat.explode(this.ctx, position, radius, damage, type, pierce, blockDamage, hostile, sourceName),
       log: (message, cls: LogClass = 'info') => this.hud.log(message, cls),
       floater: (worldPosition, text, cls: FloaterClass) => this.hud.floater(worldPosition, text, cls),
+      sound: (id, options) => this.audio.play(id, options),
     };
   }
 
@@ -500,6 +514,11 @@ export class Game {
     this.mode = 'playing';
     this.hud.setMenuVisible(false);
     this.input.requestLock();
+    // Must happen inside the click handler. A browser will not start an
+    // AudioContext without a user gesture, and one created outside a gesture lands
+    // in `suspended` and stays there with no error — silent audio that looks like
+    // working audio.
+    this.audio.resume();
 
     // `?loadout=all` fills the bags with everything, for looking at the models and
     // trying the weapons without grinding for drops. Applied once, not on every
@@ -516,19 +535,58 @@ export class Game {
     this.mode = 'sheet';
     this.input.releaseLock();
     this.screens.open(this.player);
+    this.audio.play('uiOpen');
   }
 
   private closeSheet(): void {
     if (this.mode !== 'sheet') return;
     this.mode = 'playing';
     this.input.requestLock();
+    this.audio.play('uiClose');
   }
 
   private onPlayerDeath(sourceName: string): void {
     this.mode = 'dead';
     this.input.releaseLock();
+    this.audio.play('death');
+    this.audio.clearAmbience();
     this.hud.showDeath(sourceName, this.player.stats.level);
     this.hud.log(`You were slain by ${sourceName}.`, 'hurt');
+  }
+
+  /**
+   * Turns this frame's movement events into sound.
+   *
+   * `Player` records them rather than playing them, because it is pure physics and
+   * is built in tests with no game around it. Drained immediately after its update
+   * so nothing can accumulate across frames.
+   */
+  private drainMovementSounds(): void {
+    const events = this.player.moveEvents;
+    const feet = this.player.position;
+
+    if (events.jumped) this.audio.play('jump');
+    if (events.landed > 0) {
+      // Scaled by the drop, so stepping off a kerb and falling off a cliff are not
+      // the same noise.
+      this.audio.play('land', {
+        volume: Math.min(1.4, 0.45 + events.landed * 0.12),
+        pitch: Math.max(0.6, 1.1 - events.landed * 0.03),
+      });
+    }
+    if (events.entered) this.audio.play('splash');
+    for (let i = 0; i < events.footsteps; i++) {
+      // Pitched off the block underfoot, so sand, stone and turf are audibly
+      // different ground. Sampled one block down from the feet.
+      const under = this.world.getBlock(Math.floor(feet.x), Math.floor(feet.y - 0.2), Math.floor(feet.z));
+      const hardness = blockDef(under).hardness;
+      this.audio.play('step', { pitch: Math.max(0.65, 1.3 - (Number.isFinite(hardness) ? hardness : 1) * 0.2) });
+    }
+
+    events.jumped = false;
+    events.landed = 0;
+    events.entered = false;
+    events.footsteps = 0;
   }
 
   private respawn(): void {
@@ -563,6 +621,7 @@ export class Game {
         'good',
       );
       stats.syncSkills();
+      this.audio.play('levelUp');
       this.particles.burst(this.player.center, 40, 4, {
         color: 0xd5a0ff,
         size: 0.14,
@@ -684,6 +743,7 @@ export class Game {
     if (this.mode === 'playing') this.governView(dt);
 
     this.handleGlobalKeys();
+    this.updateAudio(dt);
 
     if (this.mode === 'playing') {
       this.step(dt);
@@ -733,6 +793,7 @@ export class Game {
     this.world.update(this.player.position.x, this.player.position.z);
     this.combat.update(dt, this.input, this.ctx);
     this.player.update(dt, this.input, this.world);
+    this.drainMovementSounds();
     this.entities.update(dt, this.ctx);
     this.projectiles.update(dt, this.ctx);
     this.pickups.update(dt, this.ctx);
@@ -848,17 +909,71 @@ export class Game {
     }
     if (this.input.wasPressed('F5')) void this.save();
     if (this.input.wasPressed('F9')) void this.load();
+    if (this.input.wasPressed('KeyM')) {
+      const muted = this.audio.toggleMute();
+      if (muted) this.audio.clearAmbience();
+      this.hud.log(muted ? 'Sound off.' : 'Sound on.', 'info');
+    }
+    // Volume, on the bracket keys. There is no options screen to put a slider in,
+    // and a game with no way to turn the sound down is a game people mute at the
+    // tab instead.
+    if (this.input.wasPressed('BracketLeft')) {
+      this.audio.setVolume(this.audio.masterVolume - 0.1);
+      this.hud.log(`Volume ${Math.round(this.audio.masterVolume * 100)}%.`, 'info');
+    }
+    if (this.input.wasPressed('BracketRight')) {
+      this.audio.setVolume(this.audio.masterVolume + 0.1);
+      this.hud.log(`Volume ${Math.round(this.audio.masterVolume * 100)}%.`, 'info');
+    }
+  }
+
+  /**
+   * Keeps the ears on the camera and the weather beds at the right level.
+   *
+   * The right vector comes from the camera matrix rather than from the player's
+   * yaw, because panning is defined against what is actually on screen — and the
+   * view model has its own camera, so deriving it from anything else drifts.
+   */
+  private updateAudio(dt: number): void {
+    this.audio.update(dt);
+    this.camera.matrixWorld.extractBasis(this.audioRight, this.audioUp, this.audioForward);
+    this.audio.setListener(this.camera.position, this.audioRight);
+
+    if (this.mode !== 'playing') {
+      this.audio.clearAmbience();
+      return;
+    }
+
+    // Rain is a bed rather than thousands of one-shots: a drop is not worth a voice,
+    // and correlated voices sum to a buzz rather than to rainfall.
+    const rain = this.underwater ? 0 : Math.min(1, this.weather.rainRate * 0.9);
+    this.audio.setAmbient('rain', rain * 0.5, 1500, 0.5);
+    // Submerged, everything above the surface is replaced by a low rumble.
+    this.audio.setAmbient('wind', this.underwater ? 0.33 : 0, 220, 0.8);
+
+    // Thunder, on the storms only, at random intervals.
+    if (this.weather.kind === 'storm') {
+      this.thunderTimer -= dt;
+      if (this.thunderTimer <= 0) {
+        this.thunderTimer = 7 + Math.random() * 16;
+        this.audio.play('thunder', { volume: 0.5 + Math.random() * 0.4 });
+      }
+    } else {
+      this.thunderTimer = 4 + Math.random() * 8;
+    }
   }
 
   private handlePlayKeys(): void {
     const slot = this.input.hotbarPressed();
     if (slot >= 0) {
+      if (this.player.inventory.selected !== slot) this.audio.play('uiSelect');
       this.player.inventory.select(slot);
       this.player.syncEquipmentDerived();
     }
     if (this.input.wheelDelta !== 0) {
       this.player.inventory.cycle(this.input.wheelDelta > 0 ? 1 : -1);
       this.player.syncEquipmentDerived();
+      this.audio.play('uiSelect');
     }
   }
 
@@ -1203,6 +1318,24 @@ export class Game {
   /** Per-tile contrast of the block atlas, for telling a flat tile from a missing one. */
   debugAtlasStats(): Record<string, unknown> {
     return this.world.debugAtlasStats();
+  }
+
+  /**
+   * Audio engine state, including a play count per sound.
+   *
+   * Sound is the least observable feature in the game: there is no frame to
+   * screenshot and headless Chromium may have no audio device at all. The engine
+   * therefore counts what the game *asked* for independently of whether anything
+   * was audible, which is what makes "swinging a sword makes a noise" assertable.
+   */
+  debugAudio(): Record<string, unknown> {
+    return this.audio.debugState();
+  }
+
+  /** Mutes or unmutes, for tests that would rather not synthesise anything. */
+  debugSetMuted(muted: boolean): boolean {
+    if (this.audio.isMuted !== muted) this.audio.toggleMute();
+    return this.audio.isMuted;
   }
 
   /**

@@ -31,6 +31,19 @@ export class Player {
 
   onGround = false;
   inWater = false;
+
+  /**
+   * One-frame movement events, drained by `Game` each tick to drive audio.
+   *
+   * A record rather than a callback or a context reference: `Player` is pure
+   * physics and is constructed in tests with no game around it, and threading a
+   * service interface through it just to make a footstep noise would invert that.
+   * `Game` reads these immediately after `player.update`, so nothing accumulates.
+   */
+  readonly moveEvents = { jumped: false, landed: 0, entered: false, footsteps: 0 };
+  /** Distance walked since the last footstep, in blocks. */
+  private stepDistance = 0;
+  private wasInWater = false;
   /** True while any part of the player is inside lava. */
   inLava = false;
   /** Seconds of lava contact not yet billed as damage. */
@@ -146,6 +159,8 @@ export class Player {
       Math.floor(this.position.z),
     );
     this.inWater = feetBlock === Block.Water || eyeBlock === Block.Water;
+    if (this.inWater && !this.wasInWater) this.moveEvents.entered = true;
+    this.wasInWater = this.inWater;
     // Lava swims like water — you sink into it rather than stand on it — and
     // burns for as long as you are in it. Without the damage the deep tunnels
     // would be a scenic hazard that costs nothing to wade through.
@@ -162,8 +177,25 @@ export class Player {
       this.lavaBurn = 0;
     }
 
+    const beforeX = this.position.x;
+    const beforeZ = this.position.z;
+
     this.applyMovement(dt, input);
     this.integrate(dt, world);
+
+    // Footsteps are paced by distance covered, not by time: stride length is a
+    // property of the legs, so a sprinting player takes them faster without any
+    // separate rate for sprinting, and a player walking into a wall takes none.
+    if (this.onGround && !this.inWater) {
+      this.stepDistance += Math.hypot(this.position.x - beforeX, this.position.z - beforeZ);
+      const stride = this.sprinting ? 2.1 : 1.65;
+      while (this.stepDistance >= stride) {
+        this.stepDistance -= stride;
+        this.moveEvents.footsteps++;
+      }
+    } else {
+      this.stepDistance = 0;
+    }
 
     this.stats.update(dt, this.sprinting, this.blocking);
 
@@ -193,8 +225,11 @@ export class Player {
     if (input.isDown('KeyD')) ix += 1;
 
     const moving = ix !== 0 || iz !== 0;
+    // `canSprint` rather than a bare stamina test: running yourself out latches
+    // sprinting off until a quarter of the bar is back, so it cannot be held
+    // indefinitely by releasing and re-pressing at the bottom of the bar.
     this.sprinting =
-      moving && input.isDown('ShiftLeft') && this.stats.stamina > 1 && !this.blocking && !this.inWater;
+      moving && input.isDown('ShiftLeft') && this.stats.canSprint() && !this.blocking && !this.inWater;
 
     let speed = this.stats.moveSpeed;
     if (this.sprinting) speed *= SPRINT_MULTIPLIER;
@@ -232,6 +267,7 @@ export class Player {
       if (input.isDown('Space') && this.onGround) {
         this.velocity.y = JUMP_SPEED;
         this.onGround = false;
+        this.moveEvents.jumped = true;
       }
       this.velocity.y = Math.max(TERMINAL_VELOCITY, this.velocity.y - GRAVITY * dt);
     }
@@ -316,6 +352,9 @@ export class Player {
     if (this.fallStart === null) return;
     const distance = this.fallStart - this.position.y;
     this.fallStart = null;
+    // Recorded even for a trivial drop, since every landing should thump; the
+    // height is passed on so the sound can scale with it.
+    this.moveEvents.landed = Math.max(this.moveEvents.landed, distance);
     if (distance > 4) {
       // Sure Footing absorbs part of the landing.
       const damage = Math.round((distance - 4) * 3.2 * this.stats.fallDamageScale);

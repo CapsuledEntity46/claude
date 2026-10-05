@@ -79,10 +79,26 @@ export class Input {
 
     canvas.addEventListener('contextmenu', (e) => e.preventDefault());
 
-    window.addEventListener('wheel', (e) => {
-      e.preventDefault();
-      this.wheelDelta += e.deltaY;
-    }, { passive: false });
+    /**
+     * The wheel belongs to the hotbar while playing and to the page otherwise.
+     *
+     * This used to call `preventDefault` unconditionally on `window`, which is to
+     * say it swallowed *every* scroll in the document — so the character sheet,
+     * whose panels are taller than the viewport and scroll by design, could not be
+     * scrolled with the wheel at all. Gating on the pointer lock is exactly the
+     * right test: the lock is held while playing and released by every menu, so
+     * the wheel cycles the hotbar in play and scrolls the DOM in the UI, with no
+     * list of element ids to keep in step.
+     */
+    window.addEventListener(
+      'wheel',
+      (e) => {
+        if (!this.locked) return;
+        e.preventDefault();
+        this.wheelDelta += e.deltaY;
+      },
+      { passive: false },
+    );
 
     document.addEventListener('mousemove', (e) => {
       if (!this.locked || !this.enabled) return;

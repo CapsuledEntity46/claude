@@ -1,3 +1,4 @@
+import type { SoundId } from '../audio/Audio';
 import { describeMode, item } from '../combat/items';
 import { availableModes } from '../combat/types';
 import { BAG_CAPACITY, type BagTab, type EquipSlot } from '../player/Inventory';
@@ -62,11 +63,27 @@ export class Screens {
   /** Scroll offset per tab, so switching back does not jump to the top. */
   private scrollByTab: Record<BagTab, number> = { main: 0, tools: 0, materials: 0 };
 
-  constructor(onChange: () => void) {
+  /**
+   * Plays a UI sound.
+   *
+   * A callback rather than an `AudioEngine` reference, for the same reason the
+   * sheet does not hold the `Game`: it is a DOM view, and the only thing it needs
+   * from the audio system is permission to make a noise.
+   */
+  private sound: (id: SoundId) => void;
+
+  constructor(onChange: () => void, sound: (id: SoundId) => void = () => {}) {
     this.onChange = onChange;
+    this.sound = sound;
     el<HTMLButtonElement>('sheet-close').addEventListener('click', () => this.close());
-    this.gearTab.addEventListener('click', () => this.showPane('gear'));
-    this.skillsTab.addEventListener('click', () => this.showPane('skills'));
+    this.gearTab.addEventListener('click', () => {
+      this.sound('uiSelect');
+      this.showPane('gear');
+    });
+    this.skillsTab.addEventListener('click', () => {
+      this.sound('uiSelect');
+      this.showPane('skills');
+    });
   }
 
   get isOpen(): boolean {
@@ -174,8 +191,11 @@ export class Screens {
       if (score >= ABILITY_MAX) plus.title = `${info.name} is at the cap of ${ABILITY_MAX}`;
       plus.addEventListener('click', () => {
         if (stats.spend(key)) {
+          this.sound('uiSpend');
           player.syncEquipmentDerived();
           this.refresh();
+        } else {
+          this.sound('uiDeny');
         }
       });
 
@@ -369,7 +389,11 @@ export class Screens {
           ? `You have ${stats.gold} of the ${cost} gold needed.`
           : `Refunds all ${spent} spent skill point${spent === 1 ? '' : 's'}. Abilities are not affected.`;
     respec.addEventListener('click', () => {
-      if (!stats.respecSkills(cost)) return;
+      if (!stats.respecSkills(cost)) {
+        this.sound('uiDeny');
+        return;
+      }
+      this.sound('uiRespec');
       player.syncEquipmentDerived();
       this.refresh();
     });
@@ -457,7 +481,11 @@ export class Screens {
           // The whole disc is the button now, which is a much larger target than
           // the 20px "+" it replaces.
           disc.addEventListener('click', () => {
-            if (!player.buySkill(node.id)) return;
+            if (!player.buySkill(node.id)) {
+              this.sound('uiDeny');
+              return;
+            }
+            this.sound('uiSpend');
             this.refresh();
           });
         }
@@ -614,6 +642,7 @@ export class Screens {
     cell.addEventListener('dragstart', (event) => {
       this.dragging = { itemId, index, tab };
       cell.classList.add('dragging');
+      this.sound('uiSelect');
       // Some payload has to be set or Firefox refuses to start the drag at all.
       event.dataTransfer?.setData('text/plain', itemId);
       if (event.dataTransfer) event.dataTransfer.effectAllowed = 'move';
@@ -650,7 +679,11 @@ export class Screens {
       target.classList.remove('drop-ok', 'drop-bad');
       const held = this.dragging;
       this.dragging = null;
-      if (!held || !accepts(held.itemId)) return;
+      if (!held || !accepts(held.itemId)) {
+        this.sound('uiDeny');
+        return;
+      }
+      this.sound('uiEquip');
       onDrop(held.itemId);
     });
   }
@@ -698,6 +731,7 @@ export class Screens {
       }
 
       cell.addEventListener('click', () => {
+        this.sound('uiSelect');
         player.inventory.select(slot);
         player.syncEquipmentDerived();
         this.refresh();
@@ -705,6 +739,7 @@ export class Screens {
       // Right-click clears, so a slot can be freed without finding a replacement.
       cell.addEventListener('contextmenu', (event) => {
         event.preventDefault();
+        this.sound('uiDrop');
         player.inventory.assignToHotbar(slot, null);
         this.refresh();
       });
@@ -762,6 +797,7 @@ export class Screens {
       const used = player.inventory.slots(tab).filter(Boolean).length;
       button.textContent = `${label} ${used}/${BAG_CAPACITY[tab]}`;
       button.addEventListener('click', () => {
+        this.sound('uiSelect');
         this.activeTab = tab;
         this.refresh();
       });
@@ -829,6 +865,7 @@ export class Screens {
     const def = item(stack.itemId);
 
     if (drop) {
+      this.sound('uiDrop');
       player.inventory.removeAtBagIndex(index, stack.qty, tab);
       // Also clear it off the hotbar so no dead reference is left behind.
       player.inventory.hotbar.forEach((id, slot) => {
@@ -839,6 +876,7 @@ export class Screens {
     }
 
     if (def.kind === 'weapon' || def.kind === 'shield' || def.kind === 'armor') {
+      this.sound('uiEquip');
       player.inventory.equip(def.id);
       player.syncEquipmentDerived();
       // Weapons also want a hotbar home so they can be re-drawn quickly.
@@ -846,6 +884,7 @@ export class Screens {
         player.inventory.assignToHotbar(player.inventory.selected, def.id);
       }
     } else {
+      this.sound('uiSelect');
       player.inventory.assignToHotbar(player.inventory.selected, def.id);
     }
     this.refresh();

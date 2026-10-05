@@ -1615,9 +1615,46 @@ try {
   // The sheet must render all four branches, the connectors, and the respec button.
   await page.evaluate(() => window.__voxelquest.debugOpenSheet());
   await page.waitForTimeout(400);
+
+  // The wheel has to scroll the sheet.
+  //
+  // It did not: the input layer held a `wheel` listener on `window` that called
+  // preventDefault unconditionally, which swallowed every scroll in the document.
+  // The sheet's panels are taller than the viewport and scroll by design, so the
+  // lower half of a full bag was simply unreachable with the mouse. The listener
+  // now defers whenever the pointer lock is released, which every menu does.
+  const scrolled = await page.evaluate(async () => {
+    const panel = document.querySelector('#sheet .sheet-inner');
+    const bag = document.querySelector('#sheet-bag .bag-scroll');
+    const target = bag && bag.scrollHeight > bag.clientHeight + 8 ? bag : panel;
+    if (!target) return { ok: false, why: 'no scroll container' };
+    target.scrollTop = 0;
+    const scrollable = target.scrollHeight > target.clientHeight + 8;
+    target.dispatchEvent(new WheelEvent('wheel', { deltaY: 400, bubbles: true, cancelable: true }));
+    // A real wheel gesture is applied by the browser, so drive the scroll the way
+    // the browser would and assert only that nothing cancelled the event.
+    const event = new WheelEvent('wheel', { deltaY: 400, bubbles: true, cancelable: true });
+    const notCancelled = target.dispatchEvent(event);
+    return { ok: true, scrollable, notCancelled, which: target.className };
+  });
+  check(
+    'a wheel event over the sheet is not swallowed by the input layer',
+    scrolled.ok && scrolled.notCancelled === true,
+    `${scrolled.which ?? scrolled.why}; scrollable ${scrolled.scrollable}`,
+  );
+
+  // Clicking around the sheet should make UI noises.
+  const sheetAudioBefore = await page.evaluate(() => window.__voxelquest.debugAudio().counts.uiSelect ?? 0);
+
   // Skills live behind their own tab now, so it has to be activated first.
   await page.evaluate(() => document.getElementById('tab-skills')?.click());
   await page.waitForTimeout(500);
+  const sheetAudioAfter = await page.evaluate(() => window.__voxelquest.debugAudio().counts.uiSelect ?? 0);
+  check(
+    'the character sheet makes a sound when clicked',
+    sheetAudioAfter > sheetAudioBefore,
+    `uiSelect ${sheetAudioBefore} -> ${sheetAudioAfter} after a tab click`,
+  );
   const sheetDom = await page.evaluate(() => ({
     skillsVisible: !document.getElementById('pane-skills')?.classList.contains('hidden'),
     gearHidden: document.getElementById('pane-gear')?.classList.contains('hidden'),
@@ -1895,8 +1932,15 @@ try {
   // By this point the suite has swung weapons, mined, fought and fired, so the
   // events that matter most should all have been heard from. Named individually
   // rather than counted, because a total only proves *something* made a noise.
-  for (const id of ['swing', 'hitFlesh', 'step', 'dig', 'breakBlock', 'enemyHurt']) {
+  for (const id of ['swing', 'hitFlesh', 'dig', 'breakBlock', 'enemyHurt']) {
     check(`'${id}' is wired to its event`, (audio.counts?.[id] ?? 0) > 0, `${audio.counts?.[id] ?? 0} plays`);
+  }
+  // Removed on purpose after play-testing: at the rate these fire, a synthesised
+  // burst reads as a tick rather than as a footfall, and what was convincing in
+  // isolation was maddening after a minute of walking. Asserted so they cannot
+  // creep back in.
+  for (const id of ['step', 'land', 'splash']) {
+    check(`'${id}' stays removed`, (audio.counts?.[id] ?? 0) === 0, `${audio.counts?.[id] ?? 0} plays`);
   }
   check(
     'the voice budget is not leaking',

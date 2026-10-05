@@ -23,7 +23,7 @@ npm run dev     # then open the printed localhost URL
 | `RMB` | Guard · place a block · **aim** a bow or grenade · open a door |
 | `X` | Cycle the build tool's shape |
 | `R` | Reload a firearm, or sample a block with the build tool |
-| `1`–`8` / wheel | Hotbar |
+| `1`–`8` / wheel | Hotbar · the wheel scrolls menus while one is open |
 | `Tab` | Character sheet: abilities, skill tree, equipment, bag |
 | `F5` / `F9` | Save / load · `Esc` pause |
 | `M` · `[` `]` | Mute · volume down / up |
@@ -577,6 +577,19 @@ Four things that took care:
 `M` mutes; `[` and `]` set the volume, persisted to `localStorage`. There is no
 options screen to put a slider in, and a game with no way to turn the sound down is
 a game people mute at the browser tab instead.
+
+The character sheet is audible too, and distinguishes outcomes rather than clicks:
+equipping something is leather and a buckle, dropping it is a thud, spending a point
+is the one UI sound that rises in pitch, and a refusal — an unaffordable respec, a
+locked skill node, a drop onto a slot that will not take it — is short and *flat*,
+because any pitch movement reads as something having happened.
+
+**Three sounds were built and then removed:** footsteps, landings and water splashes.
+Each was convincing on its own and maddening in play — at the rate they fire, a
+synthesised noise burst reads as a tick rather than as a footfall, and there is no
+amount of tuning that fixes a sound you hear twice a second. The smoke suite asserts
+they stay at zero plays, because they are the kind of thing that gets helpfully
+reintroduced.
 
 **Testing sound is the interesting part.** There is no frame to screenshot, and
 headless Chromium may have no audio device at all — so the engine counts what the

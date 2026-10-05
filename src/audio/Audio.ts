@@ -46,10 +46,7 @@ export type SoundId =
   | 'dig'
   | 'breakBlock'
   | 'place'
-  | 'step'
   | 'jump'
-  | 'land'
-  | 'splash'
   | 'doorOpen'
   // player
   | 'hurt'
@@ -85,6 +82,11 @@ export type SoundId =
   | 'uiSelect'
   | 'uiOpen'
   | 'uiClose'
+  | 'uiEquip'
+  | 'uiDrop'
+  | 'uiSpend'
+  | 'uiRespec'
+  | 'uiDeny'
   // weather
   | 'thunder';
 
@@ -108,7 +110,6 @@ export interface PlayOptions {
  */
 const RETRIGGER: Partial<Record<SoundId, number>> = {
   dig: 0.11,
-  step: 0.17,
   orbXp: 0.05,
   orbMana: 0.05,
   orbGold: 0.05,
@@ -555,26 +556,9 @@ export class AudioEngine {
         this.burst(out, { duration: 0.1, from: 900 * p, to: 420 * p, q: 1, curve: 0.5 });
         break;
       }
-      case 'step': {
-        const out = o(0.12, gain * 0.32);
-        this.burst(out, { duration: 0.09, from: 480 * p, to: 180 * p, q: 0.9, curve: 0.5 });
-        break;
-      }
       case 'jump': {
         const out = o(0.16, gain * 0.35);
         this.burst(out, { duration: 0.13, from: 320 * p, to: 680 * p, q: 1.1 });
-        break;
-      }
-      case 'land': {
-        const out = o(0.22, gain * 0.6);
-        this.tone(out, { duration: 0.14, from: 120 * p, to: 55 * p, type: 'sine', gain: 0.9 });
-        this.burst(out, { duration: 0.14, from: 420 * p, to: 150 * p, q: 0.7, curve: 0.6 });
-        break;
-      }
-      case 'splash': {
-        const out = o(0.5, gain * 0.7);
-        this.burst(out, { duration: 0.42, from: 2600 * p, to: 500 * p, q: 0.5 });
-        this.tone(out, { duration: 0.16, from: 300 * p, to: 140 * p, type: 'sine', gain: 0.3 });
         break;
       }
       case 'doorOpen': {
@@ -770,6 +754,42 @@ export class AudioEngine {
       case 'uiClose': {
         const out = o(0.2, gain * 0.35);
         this.tone(out, { duration: 0.16, from: 760 * p, to: 420 * p, type: 'triangle', gain: 0.35 });
+        break;
+      }
+      case 'uiEquip': {
+        // Leather and buckle: a soft noise shift with a small metal tick on the end.
+        const out = o(0.3, gain * 0.5);
+        this.burst(out, { duration: 0.18, from: 900 * p, to: 380 * p, q: 0.8 });
+        this.tone(out, { duration: 0.1, from: 1500 * p, type: 'triangle', gain: 0.18, delay: 0.09 });
+        break;
+      }
+      case 'uiDrop': {
+        const out = o(0.24, gain * 0.45);
+        this.tone(out, { duration: 0.14, from: 300 * p, to: 120 * p, type: 'sine', gain: 0.6 });
+        this.burst(out, { duration: 0.12, from: 700 * p, to: 260 * p, q: 0.9, curve: 0.6 });
+        break;
+      }
+      case 'uiSpend': {
+        // Spending a point is a small reward, so it is the only UI sound with any
+        // pitch movement upwards.
+        const out = o(0.3, gain * 0.45);
+        this.tone(out, { duration: 0.22, from: 740 * p, to: 1110 * p, type: 'triangle', gain: 0.4 });
+        break;
+      }
+      case 'uiRespec': {
+        // Undoing a whole build: a descending pair, deliberately heavier than any
+        // other sheet sound, because it is the one action that cannot be undone.
+        const out = o(0.8, gain * 0.55);
+        this.tone(out, { duration: 0.5, from: 880 * p, to: 330 * p, type: 'triangle', gain: 0.4 });
+        this.tone(out, { duration: 0.55, from: 440 * p, to: 165 * p, type: 'sine', gain: 0.35, delay: 0.1 });
+        this.burst(out, { duration: 0.5, from: 1800 * p, to: 500 * p, q: 0.6 });
+        break;
+      }
+      case 'uiDeny': {
+        // A refusal. Flat and short: no pitch movement, because a rising or falling
+        // tone reads as something having happened.
+        const out = o(0.16, gain * 0.35);
+        this.tone(out, { duration: 0.12, from: 180 * p, type: 'square', gain: 0.3 });
         break;
       }
 

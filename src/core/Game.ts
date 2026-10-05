@@ -206,7 +206,10 @@ export class Game {
 
     this.input = new Input(canvas);
     this.hud.setCamera(this.camera);
-    this.screens = new Screens(() => this.closeSheet());
+    this.screens = new Screens(
+      () => this.closeSheet(),
+      (id) => this.audio.play(id),
+    );
 
     this.scene.background = new THREE.Color(SKY_COLOR);
     // Fog hides chunk pop-in at the streaming frontier.
@@ -563,30 +566,8 @@ export class Game {
    */
   private drainMovementSounds(): void {
     const events = this.player.moveEvents;
-    const feet = this.player.position;
-
     if (events.jumped) this.audio.play('jump');
-    if (events.landed > 0) {
-      // Scaled by the drop, so stepping off a kerb and falling off a cliff are not
-      // the same noise.
-      this.audio.play('land', {
-        volume: Math.min(1.4, 0.45 + events.landed * 0.12),
-        pitch: Math.max(0.6, 1.1 - events.landed * 0.03),
-      });
-    }
-    if (events.entered) this.audio.play('splash');
-    for (let i = 0; i < events.footsteps; i++) {
-      // Pitched off the block underfoot, so sand, stone and turf are audibly
-      // different ground. Sampled one block down from the feet.
-      const under = this.world.getBlock(Math.floor(feet.x), Math.floor(feet.y - 0.2), Math.floor(feet.z));
-      const hardness = blockDef(under).hardness;
-      this.audio.play('step', { pitch: Math.max(0.65, 1.3 - (Number.isFinite(hardness) ? hardness : 1) * 0.2) });
-    }
-
     events.jumped = false;
-    events.landed = 0;
-    events.entered = false;
-    events.footsteps = 0;
   }
 
   private respawn(): void {

@@ -25,6 +25,23 @@ local DataSchema = {}
 
 DataSchema.Version = GameConfig.Data.SchemaVersion
 
+--[[
+	Coerces a value to a finite number, or returns nil.
+
+	`tonumber` is not enough on its own: tonumber(1/0) is inf, not nil, and
+	math.floor/math.clamp happily propagate inf and NaN into saved data. Any
+	non-finite number reaching a profile is corruption, so it is rejected here.
+]]
+local function toFiniteNumber(value: unknown): number?
+	local number = tonumber(value)
+
+	if number == nil or number ~= number or number == math.huge or number == -math.huge then
+		return nil
+	end
+
+	return number
+end
+
 --------------------------------------------------------------------------------
 -- Template
 --------------------------------------------------------------------------------
@@ -44,6 +61,19 @@ DataSchema.Template = {
 		},
 		Crops = {},
 	},
+
+	--[[
+		Planted crops, keyed by STRINGIFIED plot index:
+			Plots = { ["1"] = { SeedId = "Carrot", PlantedAt = 1700000000 } }
+
+		String keys are deliberate. DataStores serialise through JSON, which
+		does not round-trip sparse integer keys - a table with holes comes back
+		with string keys anyway. Using strings from the start keeps the saved
+		and in-memory shapes identical.
+
+		Growth is derived from PlantedAt, so crops keep growing while offline.
+	]]
+	Plots = {},
 
 	Stats = {
 		TotalHarvested = 0,
@@ -110,9 +140,9 @@ function DataSchema.Normalize(data: { [string]: any }): { [string]: any }
 
 	-- Defensive type coercion. Protects against hand-edited saves and against
 	-- bugs in older game versions that wrote the wrong type.
-	data.Cash = math.clamp(math.floor(tonumber(data.Cash) or 0), 0, GameConfig.Economy.MaxCash)
-	data.Level = math.clamp(math.floor(tonumber(data.Level) or 1), 1, GameConfig.Progression.MaxLevel)
-	data.XP = math.max(math.floor(tonumber(data.XP) or 0), 0)
+	data.Cash = math.clamp(math.floor(toFiniteNumber(data.Cash) or 0), 0, GameConfig.Economy.MaxCash)
+	data.Level = math.clamp(math.floor(toFiniteNumber(data.Level) or 1), 1, GameConfig.Progression.MaxLevel)
+	data.XP = math.max(math.floor(toFiniteNumber(data.XP) or 0), 0)
 	data.SchemaVersion = DataSchema.Version
 
 	if type(data.Inventory) ~= "table" then
@@ -128,12 +158,12 @@ function DataSchema.Normalize(data: { [string]: any }): { [string]: any }
 		end
 
 		for itemId, amount in bucket do
-			local count = math.floor(tonumber(amount) or 0)
+			local count = toFiniteNumber(amount)
 
-			if type(itemId) ~= "string" or count <= 0 then
+			if type(itemId) ~= "string" or count == nil or math.floor(count) <= 0 then
 				bucket[itemId] = nil
 			else
-				bucket[itemId] = math.min(count, GameConfig.Inventory.MaxStack)
+				bucket[itemId] = math.min(math.floor(count), GameConfig.Inventory.MaxStack)
 			end
 		end
 	end
@@ -143,6 +173,42 @@ function DataSchema.Normalize(data: { [string]: any }): { [string]: any }
 		if not GameConfig.IsValidCategory(category) then
 			data.Inventory[category] = nil
 		end
+	end
+
+	--------------------------------------------------------------------------
+	-- Plots
+	--------------------------------------------------------------------------
+
+	if type(data.Plots) ~= "table" then
+		data.Plots = {}
+	end
+
+	local now = os.time()
+	local plotCount = GameConfig.Garden.PlotsPerGarden
+
+	for key, entry in data.Plots do
+		local index = toFiniteNumber(key)
+		local plantedAt = if type(entry) == "table" then toFiniteNumber(entry.PlantedAt) else nil
+
+		-- Drop anything that would not map onto a real plot, or that names a
+		-- seed which no longer exists in GameConfig (removed/renamed content).
+		local isUsable = type(key) == "string"
+			and index ~= nil
+			and index == math.floor(index)
+			and index >= 1
+			and index <= plotCount
+			and plantedAt ~= nil
+			and GameConfig.GetSeed(entry.SeedId) ~= nil
+
+		if not isUsable then
+			data.Plots[key] = nil
+			continue
+		end
+
+		-- A PlantedAt in the future would stall growth forever, which is both a
+		-- clock-skew symptom and an obvious tamper target.
+		entry.PlantedAt = math.min(math.floor(plantedAt), now)
+		entry.SeedId = GameConfig.GetSeed(entry.SeedId).Id
 	end
 
 	return data

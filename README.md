@@ -1,15 +1,18 @@
 # RPG Gardening Simulator
 
 A modular Roblox Luau game built on a strict server-authoritative architecture.
-Built in steps; this repository currently contains **Step 1: Data & Stats**.
+Built in steps; this repository currently contains **Step 1 (Data & Stats)** and
+**Step 2 (Plots & Growth Loop)**.
 
 ## Project layout
 
 ```
 src/
 ├── Shared/                       → ReplicatedStorage.Shared
-│   ├── GameConfig.luau           Tunables: economy, XP curve, seed definitions, attribute names
+│   ├── GameConfig.luau           Tunables: economy, XP curve, seeds, garden, growth stages
 │   ├── Types.luau                Shared type definitions for persisted data
+│   ├── Growth.luau               Pure stage math, used by both server and client
+│   ├── Remotes.luau              Lazy remote creation (server) / lookup (client)
 │   ├── Signal.luau               Pure-Luau event (no BindableEvent serialisation cost)
 │   └── TableUtil.luau            DeepCopy / Reconcile
 └── Server/                       → ServerScriptService.Server
@@ -17,11 +20,21 @@ src/
     ├── Data/
     │   ├── DataSchema.luau       Saved data template, migrations, normalisation
     │   └── ProfileStore.luau     Session-locked, auto-saving, backup-mirrored DataStore layer
+    ├── Plots/
+    │   ├── PlotBuilder.luau      Procedurally builds gardens, soil and prompts
+    │   └── CropFactory.luau      Builds the crop model for a seed at a growth stage
     └── Services/
-        └── PlayerDataService.luau  The only module permitted to mutate player data
+        ├── PlayerDataService.luau  The only module permitted to mutate player data
+        └── PlotService.luau        Garden assignment, plant/harvest, growth loop
 ```
 
 Built with [Rojo](https://rojo.space): `rojo serve` or `rojo build -o game.rbxl`.
+
+Nothing needs to be placed in Workspace by hand. `PlotService` creates
+`Workspace.Gardens` at runtime and `PlotBuilder` generates each garden's parts,
+so the game builds and runs from source with no manual Studio setup.
+
+---
 
 ## Step 1: Data & Stats
 
@@ -33,6 +46,7 @@ Built with [Rojo](https://rojo.space): `rojo serve` or `rojo build -o game.rbxl`
 | `Level`     | int    | Clamped to `[1, GameConfig.Progression.MaxLevel]`   |
 | `XP`        | int    | Resets on level up; carries leftover               |
 | `Inventory` | table  | Bucketed: `Seeds` and `Crops`, each `id -> amount` |
+| `Plots`     | table  | Planted crops, keyed by stringified plot index     |
 | `Stats`     | table  | Harvest/plant counters, play time, join count      |
 
 ### Data-loss protection
@@ -44,8 +58,9 @@ pulling in a dependency, so the failure behaviour is explicit and auditable:
   save stamps a `{JobId, Timestamp}` lock. A second server loading the same key
   retries while the lock is being refreshed and **never force-steals from a live
   server** — it gives up with `SessionLocked` instead. A crashed server simply
-  stops refreshing, its lock ages out after `SessionLockExpire`, and the next
-  loader claims it normally. This is what closes the rejoin-duplication exploit.
+  stops refreshing, its lock ages out after `SessionLockExpire` (120s), and the
+  next loader claims it normally. This is what closes the rejoin-duplication
+  exploit.
 - **No blind overwrites.** Every write is an `UpdateAsync` transform that
   re-checks the lock inside the transaction. If ownership was lost, the write is
   cancelled and the stale server discards its changes rather than clobbering the
@@ -74,22 +89,11 @@ replicate server → client only, so this is inherently read-only for clients.
 | `Player`                    | `Cash`, `Level`, `XP`   | Current values                      |
 | `Player`                    | `XPToNextLevel`         | `-1` once max level is reached       |
 | `Player`                    | `DataLoaded`            | Gate gameplay on this being `true`  |
+| `Player`                    | `SelectedSeed`          | Seed the next plant action will use |
 | `Player/Inventory/Seeds`    | `<seedId>`              | Amount held; absent means none      |
 | `Player/Inventory/Crops`    | `<cropId>`              | Amount held; absent means none      |
 
 A `leaderstats` folder is also maintained for the default player list.
-
-Client-side read example:
-
-```lua
-local player = game:GetService("Players").LocalPlayer
-
-local function refresh()
-    print("Cash:", player:GetAttribute("Cash"))
-end
-
-player:GetAttributeChangedSignal("Cash"):Connect(refresh)
-```
 
 ### Server API
 
@@ -126,31 +130,211 @@ PlayerDataService.LevelChanged       -- (player, newLevel, previousLevel)
 PlayerDataService.InventoryChanged   -- (player, category, itemId, newAmount, delta)
 ```
 
-Example of a correct purchase — spend first, grant second, and never trust a
-client-supplied price:
+---
+
+## Step 2: Plots & Growth Loop
+
+### Where each new file goes
+
+| File                            | Destination                                       | Class        |
+| ------------------------------- | ------------------------------------------------- | ------------ |
+| `src/Shared/Growth.luau`        | `ReplicatedStorage.Shared.Growth`                 | ModuleScript |
+| `src/Shared/Remotes.luau`       | `ReplicatedStorage.Shared.Remotes`                | ModuleScript |
+| `src/Server/Plots/PlotBuilder.luau` | `ServerScriptService.Server.Plots.PlotBuilder` | ModuleScript |
+| `src/Server/Plots/CropFactory.luau` | `ServerScriptService.Server.Plots.CropFactory` | ModuleScript |
+| `src/Server/Services/PlotService.luau` | `ServerScriptService.Server.Services.PlotService` | ModuleScript |
+
+Rules of thumb used above:
+
+- **`Shared` (ReplicatedStorage)** — anything the client will also need.
+  `Growth` is there because the client draws countdown timers and must compute
+  stages identically to the server; `Remotes` is there because both sides
+  resolve the same instances.
+- **`Server/Plots`** — world-construction modules. They create instances and
+  know nothing about players, rules or data.
+- **`Server/Services`** — long-lived systems with state and lifecycle, started
+  from `Bootstrap.server.luau`. `PlotService` is the only module here that
+  enforces gardening rules.
+- **Workspace** — nothing by hand. `Workspace.Gardens` and every garden model
+  are created at runtime.
+
+Rojo maps these automatically (`src/Shared` → `ReplicatedStorage.Shared`,
+`src/Server` → `ServerScriptService.Server`). If you are placing them manually
+in Studio instead, create the `Plots` folder under `Server` and match the table
+above exactly — `PlotService` resolves its siblings by path.
+
+### Growth phases
+
+Stages are declared in `GameConfig.Growth.Stages` as fractions of each seed's
+`GrowTime`, so all six seeds share one curve and a seventh needs no new code:
+
+| Stage      | From  | Visual                                              |
+| ---------- | ----- | --------------------------------------------------- |
+| `Seedling` | 0%    | 30% scale, stem tinted strongly green               |
+| `Growing`  | 35%   | 65% scale, partially ripened toward the seed colour |
+| `Mature`   | 100%  | Full scale (× rarity), seed colour, harvestable     |
+
+`GameConfig` asserts at require time that the thresholds ascend, start at 0 and
+end at 1.0, so a bad edit fails loudly on startup instead of mid-session.
+
+Growth is **derived from timestamps, never counted up**:
 
 ```lua
-local seed = GameConfig.GetSeed(requestedSeedId)
-if not seed then return end
-if PlayerDataService:GetLevel(player) < seed.RequiredLevel then return end
+Growth.GetStage(seedId, plantedAt, os.time())
+```
 
-if PlayerDataService:TrySpendCash(player, seed.SeedPrice) then
-    PlayerDataService:AddItem(player, "Seeds", seed.Id, 1)
+That single decision gives three properties for free — crops keep growing while
+the player is offline, a server restart or lag spike cannot lose progress, and
+the stage cannot drift because it is recomputed rather than accumulated.
+
+The server loop (`GameConfig.Growth.TickInterval`, 1s) only writes attributes
+and rebuilds a crop model on a stage *transition*, so a full server of mature
+gardens costs one comparison per plot per tick. Per-second countdowns are the
+client's job, computed from the `ReadyAt` attribute — the server never pushes
+timer text.
+
+### Plots
+
+Each player is assigned a garden slot on `ProfileLoaded` and it is torn down on
+`PlayerRemoving`. A garden holds `GameConfig.Garden.PlotsPerGarden` (6) plots
+which unlock by level via `PlotUnlockLevels` (`{1, 1, 3, 8, 15, 25}`); locked
+plots are tinted and their prompts disabled, and they refresh automatically on
+`LevelChanged`.
+
+Plot state replicates as attributes on each `Plot` model, so clients can render
+crops, timers and lock states with **zero remote traffic**:
+
+| Attribute     | Meaning                                        |
+| ------------- | ---------------------------------------------- |
+| `OwnerUserId` | Owning player, `0` while unassigned            |
+| `PlotIndex`   | 1-based index within the garden                |
+| `SeedId`      | Planted seed, `""` while empty                 |
+| `PlantedAt`   | Unix seconds                                   |
+| `ReadyAt`     | Unix seconds; drive client countdowns from this |
+| `Stage`       | `Empty` / `Seedling` / `Growing` / `Mature`    |
+| `Locked`      | Whether the owner's level gates this plot      |
+| `UnlockLevel` | Level required to use it                       |
+
+Model contract (`PlotBuilder` is the only module that knows this shape):
+
+```
+Workspace/Gardens/Garden_<slot>   (Model, PrimaryPart = Base)
+├── Base   (Part)
+└── Plots  (Folder)
+    ├── Plot_1 (Model, PrimaryPart = Soil, carries the attributes above)
+    │   ├── Soil (Part)
+    │   │   └── Interact (ProximityPrompt)
+    │   └── Crop (Model, created/destroyed by PlotService)
+    └── Plot_2 ...
+```
+
+### Interaction security
+
+`ProximityPrompt.Triggered` is driven by the client, so an exploiter can fire it
+for any prompt at any range. Every interaction is therefore re-validated on the
+server, in this order:
+
+1. **Ownership** — `OwnerUserId` must match the triggering player.
+2. **Distance** — the character's `PrimaryPart` must be within
+   `MaxActivationDistance + DistanceTolerance`. The engine's own check runs on
+   the client, which the exploiter controls.
+3. **Cooldown** — `InteractionCooldown` (0.35s) per player.
+4. **Unlock level**, then **plot occupancy read from the profile**, not from the
+   replicated attribute.
+5. **Atomic item changes** — the seed is consumed via
+   `PlayerDataService:RemoveItem` *before* the crop is planted, so a spammed
+   prompt cannot plant twice from one seed. On harvest the crop is granted
+   before the plot is cleared, so a full stack leaves the crop in the ground
+   instead of destroying it.
+
+Maturity is recomputed from `PlantedAt` at harvest time rather than trusting the
+`Stage` attribute, which is only as fresh as the last tick.
+
+The single remote, `SelectSeed`, carries client *intent* only: the payload is
+validated with `GameConfig.GetSeed` (which rejects non-strings), rate limited on
+the same budget as prompts, and the result is written back as an attribute.
+
+### Server API
+
+```lua
+local PlotService = require(ServerScriptService.Server.Services.PlotService)
+
+PlotService:GetGarden(player)              -- → Model?
+PlotService:GetPlot(player, index)         -- → Model?
+PlotService:GetTimeRemaining(player, index)-- → seconds, or nil if empty
+
+PlotService.Planted      -- (player, plotIndex, seedId)
+PlotService.Harvested    -- (player, plotIndex, seedId)
+PlotService.PlantFailed  -- (player, plotIndex, reason)
+```
+
+Harvesting grants a crop into the `Crops` inventory bucket plus the seed's
+`XPReward`. Converting crops to Cash via `SellPrice` is intentionally left to
+the shop/selling step.
+
+### Client-side read example
+
+```lua
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Growth = require(ReplicatedStorage.Shared.Growth)
+
+local player = Players.LocalPlayer
+
+player:GetAttributeChangedSignal("Cash"):Connect(function()
+    print("Cash:", player:GetAttribute("Cash"))
+end)
+
+-- Countdown for a plot, computed locally with no remote traffic.
+local function describe(plot: Model): string
+    local seedId = plot:GetAttribute("SeedId")
+    if seedId == "" then
+        return "Empty"
+    end
+
+    local remaining = Growth.GetTimeRemaining(seedId, plot:GetAttribute("PlantedAt"))
+    return if remaining > 0 then Growth.FormatTimeRemaining(remaining) else "Ready!"
 end
 ```
 
-### Evolving the schema
+### Swapping in authored art
+
+`PlotBuilder` and `CropFactory` are the only modules that know what the world
+looks like, and each documents its contract at the top of the file. To use
+artist-made models, replace `PlotBuilder.CreateGarden` to clone your template
+(keeping the model contract above) and `CropFactory.Create` to clone a model
+keyed by seed id and stage. `PlotService` needs no changes.
+
+---
+
+## Evolving the schema
 
 - **Adding a field:** add it to `DataSchema.Template`. Existing players receive
-  it on next load via `TableUtil.Reconcile`. No migration needed.
+  it on next load via `TableUtil.Reconcile`. No migration needed — this is how
+  `Plots` was added in Step 2.
 - **Renaming or reshaping:** bump `GameConfig.Data.SchemaVersion` and add a
   function to `DataSchema.Migrations` keyed by the version you migrate *from*.
   Migrations run in sequence, so a player returning several versions behind
   passes through every step.
 
-### Conventions
+`DataSchema.Normalize` runs on every load and is the last line of defence
+against corrupt or tampered saves: values are coerced and clamped, non-finite
+numbers are rejected (`tonumber(1/0)` is `inf`, not `nil`), unknown inventory
+buckets and item ids are dropped, and plot entries are discarded unless they map
+onto a real plot index and name a seed that still exists in `GameConfig`.
+
+### A note on plot keys
+
+`data.Plots` is keyed by **stringified** plot index (`["1"]`, not `[1]`).
+DataStores serialise through JSON, which does not round-trip sparse integer
+keys — a table with holes comes back with string keys regardless. Using strings
+from the start keeps the saved and in-memory shapes identical.
+
+## Conventions
 
 - `task.wait` / `task.spawn` / `task.defer` only; no `wait`, `spawn` or `delay`.
 - No legacy `Instance.new(class, parent)` second argument.
-- Server-authoritative: nothing in Step 1 exposes a writable remote.
+- Server-authoritative: state flows to clients as attributes; remotes carry
+  intent only and are always validated and rate limited.
 - Numeric inputs are floored and range-checked before they touch a profile.
+- Config is asserted at require time so bad edits fail on startup.

@@ -182,6 +182,64 @@ function GameConfig.IsValidCategory(category: unknown): boolean
 end
 
 --------------------------------------------------------------------------------
+-- Growth
+--------------------------------------------------------------------------------
+
+export type GrowthStage = { Id: string, Threshold: number }
+
+--[[
+	Visual growth phases, expressed as a fraction of the seed's GrowTime.
+	Must stay sorted by ascending Threshold (asserted below).
+
+	A crop is harvestable exactly when it reaches the final stage, so the last
+	threshold is 1.0 by definition. Insert extra stages freely; the server and
+	client both derive stages from this table, so they can never disagree.
+]]
+GameConfig.Growth = {
+	EmptyStage = "Empty",
+	MatureStage = "Mature",
+	TickInterval = 1,
+
+	Stages = {
+		{ Id = "Seedling", Threshold = 0.0 },
+		{ Id = "Growing", Threshold = 0.35 },
+		{ Id = "Mature", Threshold = 1.0 },
+	} :: { GrowthStage },
+}
+
+--------------------------------------------------------------------------------
+-- Gardens and plots
+--------------------------------------------------------------------------------
+
+GameConfig.Garden = {
+	-- Where the first garden slot is centred; later slots tile outward.
+	Origin = Vector3.new(0, 0.5, 0),
+	SlotSpacing = Vector3.new(80, 0, 80),
+	SlotsPerRow = 5,
+
+	PlotsPerGarden = 6,
+	PlotsPerRow = 3,
+
+	SoilSize = Vector3.new(8, 1, 8),
+	SoilSpacing = 10,
+	SoilColor = Color3.fromRGB(94, 66, 45),
+	LockedSoilColor = Color3.fromRGB(72, 72, 72),
+	BaseColor = Color3.fromRGB(106, 142, 74),
+	BasePadding = 6,
+
+	-- Plot N unlocks at this level. Length must equal PlotsPerGarden.
+	PlotUnlockLevels = { 1, 1, 3, 8, 15, 25 },
+
+	-- Prompt reach, and the server-side slack added before rejecting an
+	-- interaction as out of range.
+	MaxActivationDistance = 14,
+	DistanceTolerance = 8,
+
+	-- Minimum seconds between accepted interactions from one player.
+	InteractionCooldown = 0.35,
+}
+
+--------------------------------------------------------------------------------
 -- Replicated attribute names
 --------------------------------------------------------------------------------
 
@@ -192,11 +250,60 @@ GameConfig.Attributes = {
 	XP = "XP",
 	XPToNextLevel = "XPToNextLevel",
 	DataLoaded = "DataLoaded",
+	SelectedSeed = "SelectedSeed",
+}
+
+-- Attributes written on each Plot model. Clients read these to render crops,
+-- countdown timers and lock states without any remote traffic.
+GameConfig.PlotAttributes = {
+	OwnerUserId = "OwnerUserId", -- 0 while unassigned
+	PlotIndex = "PlotIndex",
+	SeedId = "SeedId", -- "" while empty
+	PlantedAt = "PlantedAt", -- Unix seconds
+	ReadyAt = "ReadyAt", -- Unix seconds; 0 while empty
+	Stage = "Stage",
+	Locked = "Locked",
+	UnlockLevel = "UnlockLevel",
 }
 
 GameConfig.InventoryFolderName = "Inventory"
+GameConfig.GardensFolderName = "Gardens"
+
+GameConfig.RemoteNames = {
+	SelectSeed = "SelectSeed",
+}
+
+--------------------------------------------------------------------------------
+-- Config self-checks (fail loudly at require time, not mid-session)
+--------------------------------------------------------------------------------
+
+assert(
+	#GameConfig.Garden.PlotUnlockLevels == GameConfig.Garden.PlotsPerGarden,
+	"GameConfig.Garden.PlotUnlockLevels must have one entry per plot"
+)
+
+do
+	local stages = GameConfig.Growth.Stages
+	assert(#stages > 0, "GameConfig.Growth.Stages must not be empty")
+	assert(stages[1].Threshold == 0, "the first growth stage must start at 0")
+	assert(stages[#stages].Threshold == 1, "the final growth stage must start at 1.0")
+	assert(stages[#stages].Id == GameConfig.Growth.MatureStage, "the final growth stage must be MatureStage")
+
+	for index = 2, #stages do
+		assert(stages[index].Threshold > stages[index - 1].Threshold, "growth stage thresholds must ascend")
+	end
+end
+
+for id, seed in GameConfig.Seeds do
+	assert(seed.Id == id, `seed {id} has a mismatched Id field`)
+	assert(seed.GrowTime > 0, `seed {id} must have a positive GrowTime`)
+	-- Seed ids double as attribute names for inventory replication.
+	assert(id:match("^[%a_][%w_]*$") ~= nil, `seed id {id} is not a legal attribute name`)
+end
 
 table.freeze(GameConfig.Attributes)
+table.freeze(GameConfig.PlotAttributes)
+table.freeze(GameConfig.RemoteNames)
 table.freeze(GameConfig.InventoryCategories)
 
 return GameConfig

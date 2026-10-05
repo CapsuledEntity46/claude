@@ -257,6 +257,19 @@ Four things worth knowing if you touch `placeTrees`:
   how many trees had been built before it, and the two chunks either side of a
   trunk would disagree about the tree and tear it along the seam.
 
+- **A clump narrower than one block places nothing at all.** Foliage is centred on
+  the trunk and will not overwrite the wood already there, so a radius under 1
+  covers only that one voxel and writes no leaves. The conifers first tapered to
+  0.9, which meant the top third of every pine drew *nothing* and the tree came out
+  as five blocks of bare pole standing in a skirt — unmistakably upside down. The
+  radius floor is 1.9 now, which is both over 1 and over `sqrt(squash)`: below that
+  second threshold a whorl cannot reach a block up or down, so whorls spaced two
+  apart hang in the air as separate discs with the bole showing between them.
+
+  Neither failure shows up in a voxel count, because the missing leaves were never
+  missing from anything — they simply never existed. `npm run trees` prints each
+  species as an elevation, which is how both were found.
+
 Bigger canopies cost less than they look like they should, because the mesher
 already culls faces between two blocks of the same kind: a canopy is hollow, so its
 triangles go as its surface area and never as its volume. Meshing a chunk went from
@@ -341,6 +354,64 @@ exceeded its own promise. A fixed millisecond ceiling would not do, because one
 geometry upload costs tens of milliseconds on the software rasteriser CI uses and
 a fraction of that on a real GPU — the same correct code would pass on one and
 fail on the other.
+
+### View distance is governed, not configured
+
+Streaming inside the frame fixed the *spikes*. It does nothing about the steady
+cost of what is on screen, and that cost is large. `npm run geom` measures it:
+
+| | Triangles in view |
+| --- | --- |
+| Radius 9 chunks | **1,345,000** |
+| Radius 6 chunks | 679,000 |
+
+Nine chunks is about 1.35 million triangles of real, already-culled surface. At
+60fps that is 81 million triangles a second, which is roughly where a laptop GPU
+runs out — and it is why the frame rate sits at 60 on one machine and in the low
+40s on another running identical code.
+
+Where it goes is the surprising part: **55–66% of those faces are stone**, nearly
+all of it cave wall tens of blocks underground. It is hidden by the terrain in
+front of it, not by the view frustum, so nothing cheap removes it. Full-height
+chunks make that worse than it sounds — a 16×160×16 chunk has a bounding sphere
+of radius 81, so almost every loaded chunk counts as visible however the camera is
+pointed, and splitting chunks vertically would not help either: underground
+geometry directly ahead and below is *inside* the frustum. Removing it needs real
+occlusion culling, which is a much larger piece of work than it looks.
+
+So the dial that actually moves is the view radius, because triangles go as `r²`:
+nine chunks down to seven is a 38% cut, and down to six is a halving. That dial is
+now **automatic**. The governor watches smoothed frame time, gives up one chunk of
+view distance when it stays in distress, and tries to win one back when it has
+slack:
+
+- **Frame time can reveal distress but never comfort.** A machine with enormous
+  headroom still reports 16.7ms, because it spends the surplus blocked on vsync.
+  The only observable difference between "coping" and "coping easily" is that the
+  former drifts *above* the vsync period and the latter sits exactly on it — which
+  is why the slack threshold is 17.4ms rather than something comfortably below 16.
+
+- **Each concession is a one-way ratchet.** Giving up a chunk lowers a ceiling the
+  governor will not try again. Without that it would drop to eight, see frame time
+  return to vsync — because it *has* returned, that is what fixing it looks
+  like — climb back to nine, stutter, and repeat for the whole session. The
+  ratchet means a machine that cannot sustain the full view pays once.
+
+- **Frames spent filling the streaming queue are not sampled.** Chunk work runs on
+  a wider budget while the world fills in, so the frames after a spawn, a teleport
+  or a view-distance change are legitimately slow. Sampling them makes the governor
+  read its own churn as evidence and walk itself to the floor.
+
+Fog tracks the live radius, or chunks would wink out in clear air at the new
+boundary — far more noticeable than the shorter view itself.
+
+The smoke suite runs on a software rasteriser at over 40ms a frame, which makes it
+an ideal place to watch the governor give up: it asserts that the steps go down one
+chunk at a time, that a rejected distance is never retried, and that once at the
+floor the step count **stops changing** — a governor that kept hunting there would
+thrash the chunk streamer. It also checks that writing the view distance
+invalidates the streaming queue, because a widened ring that does not is simply
+never serviced and nothing reports a problem.
 
 ## Enemies
 
@@ -884,11 +955,14 @@ npm run test:smoke  # boots the real build in headless Chromium and plays it
 npm run survey      # terrain statistics over a 6000-block square
 npm run perf        # chunk generation and meshing cost per chunk
 npm run shots:terrain  # photographs each terrain feature
+npm run trees       # elevation of every tree species
+npm run geom        # triangles in view, and which blocks emit them
 npm run tiles       # re-bakes assets/blocks/*.glb into public/textures/
 ```
 
 `npm run tiles` is only needed after changing the source art; its output is
-committed.
+committed. `npm run trees` and `npm run geom` are diagnostics rather than tests:
+they print, and the judgement is yours.
 
 The unit checks assert the *design*, not just the code: that a sword is not built
 out of boxes and converges on a real point, that a tower shield is big enough to be
@@ -995,5 +1069,10 @@ streaming, spawning, or aim.
   pool of point lights rather than a propagating light level, so deep caves stay
   dark no matter how many torches are in them, and only the nearest few planted
   torches actually cast light.
+- **No occlusion culling.** Faces are culled against their immediate neighbours and
+  chunks against the frustum, and nothing removes the surface that is simply behind
+  other surface. Over half the triangles in a surface view are cave wall underground
+  (`npm run geom`). The frame-rate governor works around it by trading view
+  distance; removing it properly is the largest performance item left.
 - Doors are a single block tall; stack two for a full doorway.
 - No audio.

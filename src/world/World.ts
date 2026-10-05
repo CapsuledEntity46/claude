@@ -95,7 +95,27 @@ export class World {
   private opaqueMat: THREE.MeshLambertMaterial;
   private transMat: THREE.MeshLambertMaterial;
 
-  renderDistance: number;
+  private _renderDistance: number;
+
+  /**
+   * View radius in chunks.
+   *
+   * Settable at runtime so the frame-rate governor in `Game` can trade view
+   * distance for headroom. Writing it invalidates the streaming queue: the queue
+   * is a cached list of what still needs generating out to this radius, and it is
+   * only rebuilt when something could have changed it — standing still with a
+   * stale flag unset would leave a shrunken or widened ring unserviced
+   * indefinitely.
+   */
+  get renderDistance(): number {
+    return this._renderDistance;
+  }
+
+  set renderDistance(value: number) {
+    if (value === this._renderDistance) return;
+    this._renderDistance = value;
+    this.queueStale = true;
+  }
 
   /** Chunks awaiting terrain generation, nearest-first. */
 /**
@@ -129,7 +149,7 @@ export class World {
 
   constructor(seed: number, renderDistance = 6) {
     this.gen = new TerrainGen(seed);
-    this.renderDistance = renderDistance;
+    this._renderDistance = renderDistance;
     this.group.name = 'world';
 
     // The atlas multiplies the vertex colours the mesher already writes, so ambient

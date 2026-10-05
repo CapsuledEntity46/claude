@@ -46,7 +46,52 @@ const EMBER_COLORS = [0xfff0c0, 0xffc050, 0xff8a28, 0xd8541a] as const;
  * whole point of the taller world was lost to fog. The mesher's sky-skipping
  * pays for most of the extra chunks.
  */
+/**
+ * View radius in chunks, as an aspiration rather than a promise.
+ *
+ * Nine is what the taller world needs: at six the far plane sat around 75 blocks,
+ * less than the height of one mountain, so ranges were something you stood on
+ * rather than something you saw. But nine chunks is about 1.35 million triangles of
+ * real surface in view, roughly half of it cave wall underground, and that is more
+ * than a modest GPU can push at 60fps. So this is the ceiling the governor below
+ * starts from and climbs back towards, not a fixed setting.
+ */
 const RENDER_DISTANCE = 9;
+
+/**
+ * Floor for the frame-rate governor. The old view distance, and the point below
+ * which the world stops reading as a landscape.
+ */
+const MIN_RENDER_DISTANCE = 6;
+
+/**
+ * Smoothed frame time, in milliseconds, that counts as distress.
+ *
+ * Above a 60Hz frame's 16.7ms with room to spare, so ordinary jitter does not
+ * trigger it. 19ms is about 53fps.
+ */
+const GOVERNOR_DISTRESS_MS = 19;
+
+/**
+ * Smoothed frame time that counts as having slack.
+ *
+ * This has to sit just *above* the vsync period, not below it, and that is the
+ * whole subtlety of the governor: a machine with enormous headroom still reports
+ * 16.7ms, because it spends the surplus blocked on the display. Frame time can
+ * therefore reveal distress but never reveal comfort — the only observable
+ * difference between "coping" and "coping easily" is that the former drifts above
+ * the vsync period and the latter sits exactly on it.
+ */
+const GOVERNOR_SLACK_MS = 17.4;
+
+/** How long distress must persist before giving up a chunk of view distance. */
+const GOVERNOR_DISTRESS_SECONDS = 2.5;
+
+/** How long slack must persist before trying to win one back. */
+const GOVERNOR_SLACK_SECONDS = 10;
+
+/** Quiet period after any change, so the governor cannot react to its own churn. */
+const GOVERNOR_COOLDOWN_SECONDS = 3;
 const MAX_FRAME_DT = 1 / 20;
 
 type Mode = 'menu' | 'playing' | 'sheet' | 'dead';
@@ -113,6 +158,25 @@ export class Game {
   private frameCount = 0;
   private fpsTimer = 0;
   private fps = 0;
+
+  /**
+   * Frame-rate governor state.
+   *
+   * `ceiling` is the highest view distance that has not yet proved too expensive.
+   * It only ever falls, which is what makes the search converge: without it a
+   * machine that cannot sustain nine would drop to eight, see the frame time
+   * return to vsync, climb back to nine, stutter, and repeat for the whole
+   * session. Lowering the ceiling on distress means the cost is paid once.
+   */
+  private governorCeiling = RENDER_DISTANCE;
+  private smoothedFrameMs = 16.7;
+  private governorDistressFor = 0;
+  private governorSlackFor = 0;
+  private governorCooldown = 0;
+  /** Render distances the governor has given up on, for the diagnostics. */
+  private governorSteps: number[] = [];
+  /** Set once a test or diagnostic pins the view distance by hand. */
+  private governorSuspended = false;
 
   /**
    * Render stats for the world pass only.
@@ -256,7 +320,11 @@ export class Game {
     ) === Block.Water;
 
     const fog = this.scene.fog as THREE.Fog;
-    const viewDistance = RENDER_DISTANCE * 16;
+    // The live view distance, not the ceiling. Fog is what hides the streaming
+    // frontier, so when the governor pulls the view in the haze has to come with
+    // it — otherwise chunks wink out in clear air at the new boundary, which is
+    // far more noticeable than the shorter view itself.
+    const viewDistance = this.world.renderDistance * 16;
 
     if (this.underwater) {
       // Murky and close: being submerged should feel like a different place.
@@ -530,6 +598,78 @@ export class Game {
 
   // ---------------------------------------------------------------- frame
 
+  /**
+   * Trades view distance for frame rate, and tries to trade back.
+   *
+   * The dial is the only one that moves the dominant cost: a view of radius `r`
+   * holds triangles in proportion to `r²`, so nine chunks down to seven is a 38%
+   * cut. Nothing else available is close — the terrain is already culled face by
+   * face, canopies are hollow, and the half of the geometry that is cave wall is
+   * hidden by occlusion rather than by the frustum, which a renderer this simple
+   * has no cheap way to exploit.
+   *
+   * Three details carry the whole thing:
+   *
+   * - **Frames spent filling the streaming queue are ignored.** Chunk work is
+   *   budgeted per frame and the budget widens while the world is still filling
+   *   in, so the frames just after a spawn, a teleport or a view-distance change
+   *   are legitimately slow. Sampling them means the governor reads its own churn
+   *   as evidence and walks itself to the floor.
+   *
+   * - **Distress must persist.** A single expensive frame is a grenade, not a
+   *   verdict.
+   *
+   * - **Recovery is attempted at most once per ceiling.** See `governorCeiling`.
+   */
+  private governView(dt: number): void {
+    if (this.governorSuspended) return;
+
+    // Chunk streaming is allowed to be slow while the world fills in, so those
+    // frames say nothing about whether the view distance is affordable.
+    if (this.world.lastFrameWasFilling) {
+      this.governorDistressFor = 0;
+      this.governorSlackFor = 0;
+      return;
+    }
+
+    // Exponential moving average over roughly the last half second.
+    const frameMs = dt * 1000;
+    this.smoothedFrameMs += (frameMs - this.smoothedFrameMs) * Math.min(1, dt / 0.5);
+
+    if (this.governorCooldown > 0) {
+      this.governorCooldown -= dt;
+      return;
+    }
+
+    const current = this.world.renderDistance;
+
+    if (this.smoothedFrameMs > GOVERNOR_DISTRESS_MS) {
+      this.governorSlackFor = 0;
+      this.governorDistressFor += dt;
+      if (this.governorDistressFor >= GOVERNOR_DISTRESS_SECONDS && current > MIN_RENDER_DISTANCE) {
+        this.governorSteps.push(current);
+        this.governorCeiling = current - 1;
+        this.world.renderDistance = current - 1;
+        this.governorDistressFor = 0;
+        this.governorCooldown = GOVERNOR_COOLDOWN_SECONDS;
+      }
+      return;
+    }
+
+    this.governorDistressFor = 0;
+
+    if (this.smoothedFrameMs <= GOVERNOR_SLACK_MS && current < this.governorCeiling) {
+      this.governorSlackFor += dt;
+      if (this.governorSlackFor >= GOVERNOR_SLACK_SECONDS) {
+        this.world.renderDistance = current + 1;
+        this.governorSlackFor = 0;
+        this.governorCooldown = GOVERNOR_COOLDOWN_SECONDS;
+      }
+    } else {
+      this.governorSlackFor = 0;
+    }
+  }
+
   private frame(): void {
     const dt = Math.min(this.clock.getDelta(), MAX_FRAME_DT);
 
@@ -540,6 +680,8 @@ export class Game {
       this.frameCount = 0;
       this.fpsTimer = 0;
     }
+
+    if (this.mode === 'playing') this.governView(dt);
 
     this.handleGlobalKeys();
 
@@ -1061,6 +1203,38 @@ export class Game {
   /** Per-tile contrast of the block atlas, for telling a flat tile from a missing one. */
   debugAtlasStats(): Record<string, unknown> {
     return this.world.debugAtlasStats();
+  }
+
+  /**
+   * Frame-rate governor state.
+   *
+   * `steps` lists the view distances it has given up on, which is the difference
+   * between "this machine never needed to back off" and "it backed off and the
+   * reason is no longer on screen".
+   */
+  debugViewGovernor(): Record<string, unknown> {
+    return {
+      renderDistance: this.world.renderDistance,
+      ceiling: this.governorCeiling,
+      max: RENDER_DISTANCE,
+      min: MIN_RENDER_DISTANCE,
+      smoothedFrameMs: Number(this.smoothedFrameMs.toFixed(2)),
+      steps: [...this.governorSteps],
+    };
+  }
+
+  /**
+   * Forces a view distance and stops the governor touching it again.
+   *
+   * The suspension is the point. On a slow machine the governor has usually
+   * already walked the view down to its floor before a test gets a chance to look,
+   * so a test that merely writes a distance is both fighting the governor and
+   * liable to be asserting against a value it did not set.
+   */
+  debugSetRenderDistance(chunks: number): number {
+    this.governorSuspended = true;
+    this.world.renderDistance = Math.max(MIN_RENDER_DISTANCE, Math.min(RENDER_DISTANCE, Math.round(chunks)));
+    return this.world.renderDistance;
   }
 
   /**

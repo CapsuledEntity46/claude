@@ -654,17 +654,26 @@ export class TerrainGen {
             for (let t = 0; t <= tiers; t++) {
               const y = skirt + t * 2;
               if (y > topY) break;
-              // Quadratic rather than linear, so the tree flares into a skirt near
-              // the ground instead of reading as a straight-sided triangle.
               const f = 1 - t / tiers;
-              // Squash 2.6 and not more: the whorls sit two blocks apart, and at 3.4
-              // each one was a single-voxel disc with clear air between it and the
-              // next — the bole showed through and the tree read as threadbare.
-              // Just over 2.6 is what makes consecutive whorls touch at their inner
-              // radius while still pinching in to a tip.
-              clump(wx, y, wz, 0.9 + f * f * 3.2, 2.6, 0.24);
+              // The 1.5 floor is the important number, not the taper.
+              //
+              // A clump is centred on the trunk, and `leaf` will not overwrite the
+              // wood that is already there — so a radius under 1 places *nothing*
+              // whatsoever. The first version tapered to 0.9, which meant the top
+              // third of every conifer drew no leaves at all and the tree came out
+              // as five blocks of bare pole standing in a skirt: unmistakably
+              // upside down, and invisible in the voxel counts because the missing
+              // leaves were never missing from anything, they simply never existed.
+              // At 1.9 the narrowest tier rings the trunk with eight leaves *and*
+              // reaches one block up and down: with squash 2.6 a clump needs a
+              // radius over sqrt(2.6) to extend vertically at all, so 1.9 is what
+              // makes whorls two blocks apart touch instead of hanging in the air
+              // as separate discs with the bole showing between them.
+              clump(wx, y, wz, 1.9 + f * f * 2.6, 2.6, 0.24);
             }
-            clump(wx, topY + 1, wz, 1.2, 2, 0.2);
+            // The point. Sits above the last whorl, where the trunk has ended, so
+            // there is nothing for it to collide with.
+            clump(wx, topY + 1, wz, 1.3, 2, 0.2);
             break;
           }
 

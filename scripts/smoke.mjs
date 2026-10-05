@@ -1870,6 +1870,75 @@ try {
     `generate ${chunkCost.genCostMs}ms, mesh ${chunkCost.meshCostMs}ms`,
   );
 
+  // The frame-rate governor trades view distance for headroom. Its plumbing is
+  // what needs testing, not its policy: writing the view distance has to
+  // invalidate the streaming queue, or a shrunken ring is never serviced and a
+  // widened one never fills. That failure is invisible from the frame rate — the
+  // world simply stops at a radius nothing is asking about any more.
+  const governor = await page.evaluate(() => window.__voxelquest.debugViewGovernor());
+  check(
+    'the view governor reports its state',
+    typeof governor.renderDistance === 'number' && governor.max >= governor.min,
+    JSON.stringify(governor),
+  );
+  // This suite runs on a software rasteriser at well over 40ms a frame, which makes
+  // it the ideal place to watch the governor give up: it should walk the view down
+  // and *stop*, not hunt. Each step is a one-way ratchet on the ceiling precisely
+  // so that a machine which cannot sustain the full view pays the cost once rather
+  // than stuttering between two distances for the whole session.
+  check(
+    'the view governor steps down one chunk at a time',
+    governor.steps.every((step, i) => i === 0 || step === governor.steps[i - 1] - 1),
+    `gave up on ${governor.steps.length ? governor.steps.join(' -> ') : '(nothing)'}`,
+  );
+  check(
+    'the view governor never drops below its floor',
+    governor.renderDistance >= governor.min,
+    `radius ${governor.renderDistance}, floor ${governor.min}`,
+  );
+  check(
+    'a view the governor has rejected is not retried',
+    governor.renderDistance <= governor.ceiling,
+    `radius ${governor.renderDistance} against a ceiling of ${governor.ceiling}`,
+  );
+  if (governor.renderDistance === governor.min) {
+    // Already at the floor and still slow: the step count must now be stable.
+    // A governor that kept stepping here would be thrashing the chunk streamer.
+    const settled = await page.evaluate(async () => {
+      const g = window.__voxelquest;
+      const before = g.debugViewGovernor().steps.length;
+      await new Promise((r) => setTimeout(r, 9000));
+      return { before, after: g.debugViewGovernor().steps.length };
+    });
+    check(
+      'the view governor settles instead of hunting',
+      settled.after === settled.before,
+      `${settled.before} steps, still ${settled.after} after nine more seconds at the floor`,
+    );
+  }
+
+  // Writing the view distance has to invalidate the streaming queue. The queue is a
+  // cached list of what still needs generating out to the current radius, rebuilt
+  // only when something could have changed it — so a widened ring that does not
+  // invalidate is never serviced, and the world just stops at the old radius with
+  // nothing reporting a problem. Forcing a distance also suspends the governor,
+  // which this needs: it has already reached its floor by now and would otherwise
+  // pull the view straight back in underneath the assertion.
+  const narrow = await page.evaluate(() => {
+    window.__voxelquest.debugSetRenderDistance(6);
+    return window.__voxelquest.debugSnapshot().chunks;
+  });
+  await page.waitForTimeout(4000);
+  const atFloor = await page.evaluate(() => window.__voxelquest.debugSnapshot().chunks);
+  const widened = await page.evaluate(() => window.__voxelquest.debugSetRenderDistance(9));
+  await page.waitForTimeout(9000);
+  const refilled = await page.evaluate(() => window.__voxelquest.debugSnapshot().chunks);
+  check(
+    'widening the view refills the ring rather than leaving a stale queue',
+    refilled > atFloor,
+    `${narrow} -> ${atFloor} chunks at radius 6, then ${refilled} at radius ${widened}`,
+  );
+
   console.log('\n[minimap]');
   const minimapDrawn = await page.evaluate(() => {
     const canvas = document.querySelector('.minimap-canvas');

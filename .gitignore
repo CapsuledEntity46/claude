@@ -11,6 +11,11 @@ build/
 /.lune/
 /sourcemap.json
 
+# Rojo CLI kept alongside the project, so `git status` stays clean and a
+# ~10 MB binary never gets committed by accident.
+rojo.exe
+rojo
+
 # Editor
 .vscode/
 .idea/

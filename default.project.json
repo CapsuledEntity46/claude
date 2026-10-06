@@ -31,6 +31,34 @@
       "$className": "Workspace",
       "$properties": {
         "StreamingEnabled": false
+      },
+
+      "Baseplate": {
+        "$className": "Part",
+        "$properties": {
+          "Size": [512, 20, 512],
+          "Position": [0, -10, 0],
+          "Anchored": true,
+          "Locked": true,
+          "Color": [0.42, 0.56, 0.35],
+          "Material": "Grass",
+          "TopSurface": "Smooth",
+          "BottomSurface": "Smooth"
+        }
+      },
+
+      "SpawnPad": {
+        "$className": "SpawnLocation",
+        "$properties": {
+          "Size": [16, 1, 16],
+          "Position": [0, 0.5, -22],
+          "Anchored": true,
+          "Duration": 0,
+          "Color": [0.75, 0.75, 0.78],
+          "Material": "SmoothPlastic",
+          "TopSurface": "Smooth",
+          "BottomSurface": "Smooth"
+        }
       }
     },
 

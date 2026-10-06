@@ -34,23 +34,49 @@ local Remotes = require(Shared.Remotes)
 local player = Players.LocalPlayer
 local ATTR = GameConfig.Attributes
 
---[[
-	The client depends on Shared being the same revision the server was built
-	against. A stale Shared.Remotes here produced "attempt to call a nil value"
-	on the GetFunction line below, which says nothing useful - so check first.
-]]
-assert(
-	GameConfig.FrameworkVersion == 5,
-	`[ShopClient] Shared.GameConfig is framework v{tostring(GameConfig.FrameworkVersion)}, expected v5. `
-		.. "ReplicatedStorage.Shared is from a different commit than this script - re-sync Rojo."
-)
-assert(
-	type(Remotes.GetFunction) == "function",
-	"[ShopClient] Shared.Remotes has no GetFunction, so it predates the shop remotes. Re-sync Rojo."
-)
+local EXPECTED_FRAMEWORK = 5
 
-local processTransaction = Remotes.GetFunction(GameConfig.RemoteNames.ProcessTransaction)
-local sellAllRemote = Remotes.GetFunction(GameConfig.RemoteNames.SellAll)
+--[[
+	Startup is diagnosed, not asserted.
+
+	The shop is one optional feature; if its dependencies are not there, say so
+	in one actionable line and leave the rest of the client alone. Throwing
+	produces a stack trace pointing at whichever line happened to touch the
+	missing value, which is never the real cause.
+
+	Two things can go wrong:
+	  * Shared is from a different commit than this script (a partial sync).
+	  * The remotes never replicated, which means the SERVER failed to start -
+	    ShopService creates them in Bootstrap. The fix is in the Server output,
+	    not here.
+]]
+if GameConfig.FrameworkVersion ~= EXPECTED_FRAMEWORK then
+	warn(
+		`[ShopClient] ReplicatedStorage.Shared is framework v{tostring(GameConfig.FrameworkVersion)} but this script `
+			.. `expects v{EXPECTED_FRAMEWORK}, so they are from different commits. Re-sync Rojo. Shop UI disabled.`
+	)
+	return
+end
+
+if type(Remotes.GetFunction) ~= "function" then
+	warn("[ShopClient] Shared.Remotes predates the shop remotes. Re-sync Rojo. Shop UI disabled.")
+	return
+end
+
+local function acquireRemotes()
+	return Remotes.GetFunction(GameConfig.RemoteNames.ProcessTransaction),
+		Remotes.GetFunction(GameConfig.RemoteNames.SellAll)
+end
+
+local acquired, processTransaction, sellAllRemote = pcall(acquireRemotes)
+
+if not acquired then
+	warn(
+		"[ShopClient] The shop remotes never replicated, which means the server did not finish starting. "
+			.. "Check the Server output for a Bootstrap error - that is the real failure. Shop UI disabled."
+	)
+	return
+end
 
 -- Amount presets the player can toggle between.
 local AMOUNT_OPTIONS = { 1, 10, 50 }

@@ -697,6 +697,52 @@ DataStores serialise through JSON, which does not round-trip sparse integer
 keys — a table with holes comes back with string keys regardless. Using strings
 from the start keeps the saved and in-memory shapes identical.
 
+## Troubleshooting a partially synced tree
+
+Rojo only overwrites the paths listed in `default.project.json`, and **its file
+watcher can miss files added while a sync session is already running**. The
+result is a place holding modules from two different commits, which surfaces as
+a nil-index or nil-call with a line number that no longer matches the file you
+are reading.
+
+Two guards exist for this:
+
+- **`Bootstrap` resolves every dependency with `FindFirstChild` before requiring
+  anything**, and aborts naming every missing path. It never calls
+  `require(nil)`, which would otherwise report "Attempted to call require with
+  invalid argument(s)" against a Bootstrap line number and tell you nothing.
+- **`Server.FrameworkGuard`** compares `GameConfig.FrameworkVersion` against the
+  `FrameworkVersion` each service declares, and names the stale module. It is
+  loaded *optionally* — a missing guard warns and the server still boots, since
+  a diagnostic must never be the thing that breaks startup.
+
+`ShopClient` applies the same idea: version and remote problems warn and disable
+the shop UI rather than throwing, and it distinguishes "Shared is from another
+commit" from "the remotes never replicated, so the server failed to start".
+
+### Full resync
+
+1. Stop the Rojo server. Confirm `git status` is clean and you are on the
+   intended commit.
+2. In Studio delete `ServerScriptService.Server`, `ReplicatedStorage.Shared` and
+   `StarterPlayer.StarterPlayerScripts.Client`.
+3. Run `rojo serve` **fresh** (restarting is what picks up newly added files)
+   and re-connect — or `rojo build -o game.rbxl` and open the new place.
+
+A healthy startup prints:
+
+```
+[Server] Bootstrap complete (framework v5)
+```
+
+### Bumping the framework version
+
+Bump `GameConfig.FrameworkVersion` **and** every service's `FrameworkVersion`
+whenever a change crosses module boundaries: a renamed config field, a changed
+function signature, a reshaped table. Purely additive changes do not need it.
+
+---
+
 ## Conventions
 
 - `task.wait` / `task.spawn` / `task.defer` only; no `wait`, `spawn` or `delay`.

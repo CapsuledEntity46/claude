@@ -2,15 +2,15 @@
 
 A modular Roblox Luau game built on a strict server-authoritative architecture.
 Built in steps; this repository currently contains **Step 1 (Data & Stats)**,
-**Step 2 (Plots & Growth Loop)**, **Step 3 (Microtransactions)** and
-**Step 4 (Shop & Selling)**.
+**Step 2 (Plots & Growth Loop)**, **Step 3 (Microtransactions)**,
+**Step 4 (Shop & Selling)** and **Step 5 (Master Framework & Hybrid Shop)**.
 
 ## Project layout
 
 ```
 src/
 ├── Shared/                       → ReplicatedStorage.Shared
-│   ├── GameConfig.luau           Tunables: economy, XP curve, seeds, garden, growth stages
+│   ├── GameConfig.luau           Master item directory, plantables, economy, garden, shop
 │   ├── Types.luau                Shared type definitions for persisted data
 │   ├── Growth.luau               Pure stage math, used by both server and client
 │   ├── Remotes.luau              Lazy remote creation (server) / lookup (client)
@@ -25,11 +25,16 @@ src/
     ├── Plots/
     │   ├── PlotBuilder.luau      Procedurally builds gardens, soil and prompts
     │   └── CropFactory.luau      Builds the crop model for a seed at a growth stage
+    ├── World/
+    │   └── ShopBuilder.luau      Builds the Workspace.ShopNPC storefront
     └── Services/
         ├── PlayerDataService.luau   The only module permitted to mutate player data
         ├── PlotService.luau         Garden assignment, plant/harvest, growth loop
-        ├── ShopService.luau         Seed buying and crop selling
+        ├── ShopService.luau         ProcessTransaction: buying and selling any item
         └── MarketplaceService.luau  Developer Product receipt processing
+
+src/Client/                       → StarterPlayer.StarterPlayerScripts.Client
+└── ShopClient.client.luau        Builds ShopGui; opens it from the ShopNPC prompt
 ```
 
 Built with [Rojo](https://rojo.space): `rojo serve` or `rojo build -o game.rbxl`.
@@ -50,7 +55,7 @@ so the game builds and runs from source with no manual Studio setup.
 | `Level`     | int    | Clamped to `[1, GameConfig.Progression.MaxLevel]`   |
 | `XP`        | int    | Resets on level up; carries leftover               |
 | `RevengeTokens`   | int | Premium counter; 2 granted free to new players |
-| `Inventory` | table  | Bucketed: `Seeds`, `Crops`, `Boosts`, each `id -> amount` |
+| `Inventory` | table  | **Flat**: `itemId -> amount`, every category alike |
 | `Plots`     | table  | Planted crops, keyed by stringified plot index     |
 | `PurchaseHistory` | array | Granted `PurchaseId`s; the receipt idempotency ledger |
 | `Stats`     | table  | Harvest/plant counters, play time, Robux spent     |
@@ -96,8 +101,7 @@ replicate server → client only, so this is inherently read-only for clients.
 | `Player`                    | `XPToNextLevel`         | `-1` once max level is reached       |
 | `Player`                    | `DataLoaded`            | Gate gameplay on this being `true`  |
 | `Player`                    | `SelectedSeed`          | Seed the next plant action will use |
-| `Player/Inventory/Seeds`    | `<seedId>`              | Amount held; absent means none      |
-| `Player/Inventory/Crops`    | `<cropId>`              | Amount held; absent means none      |
+| `Player/Inventory`          | `<itemId>`              | Amount held; absent means none      |
 
 A `leaderstats` folder is also maintained for the default player list.
 
@@ -455,138 +459,218 @@ and then granting **exactly once** on retry.
 
 ## Step 4: Shop & Selling
 
-Closes the economy loop: **Cash → seeds → crops → Cash**, using the `SeedPrice`
-and `SellPrice` already in `GameConfig`.
+Superseded by Step 5, which replaced the per-item remotes (`BuySeed`,
+`SellCrop`) with a single `ProcessTransaction` and moved prices into the master
+item directory. The transaction rules introduced here still hold and are
+documented below.
+
+---
+
+## Step 5: Master Framework & Hybrid Shop
 
 ### Where each new file goes
 
 | File | Destination | Class |
 | ---- | ----------- | ----- |
-| `src/Shared/RateLimiter.luau` | `ReplicatedStorage.Shared.RateLimiter` | ModuleScript |
-| `src/Server/Services/ShopService.luau` | `ServerScriptService.Server.Services.ShopService` | ModuleScript |
+| `src/Server/World/ShopBuilder.luau` | `ServerScriptService.Server.World.ShopBuilder` | ModuleScript |
+| `src/Client/ShopClient.client.luau` | `StarterPlayer.StarterPlayerScripts.Client.ShopClient` | **LocalScript** |
 
-No new folders. Edits to existing files: `GameConfig` (`GameConfig.Shop`, three
-remote names, `GetPurchasableSeeds`), `Remotes` (`GetFunction` for
-RemoteFunctions), `DataSchema` (`TotalSeedsBought`, `TotalCropsSold` stats), and
-`Bootstrap` (starts `ShopService` after `PlotService`).
+`World` is a new folder under `Server`; `Client` is a new folder under
+`StarterPlayerScripts` (and a new `StarterPlayer` branch in
+`default.project.json`). Everything else is an edit to existing files.
 
-The three RemoteFunctions are created by the server at startup and appear at
-runtime under `ReplicatedStorage.Remotes`. Nothing to place by hand:
+Created at runtime, nothing to place by hand:
 
 ```
-ReplicatedStorage/
-└── Remotes/                 (created at runtime by Shared.Remotes)
-    ├── SelectSeed           RemoteEvent     (Step 2)
-    ├── SelectPlot           RemoteEvent     (Step 3)
-    ├── UseBoost             RemoteEvent     (Step 3)
-    ├── BuySeed              RemoteFunction  (Step 4)
-    ├── SellCrop             RemoteFunction  (Step 4)
-    └── SellAllCrops         RemoteFunction  (Step 4)
+Workspace/
+└── ShopNPC                  (Model, built by ShopBuilder)
+    └── Body                 (Part)
+        ├── ShopPrompt       (ProximityPrompt)  ← the client listens to this
+        └── Title            (BillboardGui)
+
+ReplicatedStorage/Remotes/
+├── SelectSeed  SelectPlot  UseBoost      RemoteEvents
+├── ProcessTransaction                    RemoteFunction
+└── SellAll                               RemoteFunction
+
+Players/<player>/
+├── Inventory                (Folder — ONE attribute per item id)
+└── leaderstats
 ```
 
-### Why RemoteFunctions here
+The `ShopGui` ScreenGui is created by `ShopClient` into `PlayerGui` at runtime,
+so the whole interface is version-controlled source rather than a hand-assembled
+instance tree. To let an artist lay it out instead, author `StarterGui.ShopGui`
+and replace `buildGui()` with lookups into it — nothing else in the file changes.
 
-Steps 2–3 use RemoteEvents because the client was only expressing intent. A
-transaction is different: the UI needs to distinguish "not enough cash" from
-"stack full" from "level too low" to show the right message, and a
-request/response pair is clearer than two one-way events the caller has to
-correlate.
+### 1. Master item directory
 
-Every handler follows the same rule — validate, act, return promptly, and never
-let an error escape. An erroring `OnServerInvoke` reports that error to the
-caller, which breaks the UI *and* tells an attacker they found an unhandled
-path. Each handler is wrapped in `pcall` and returns `InternalError` instead.
+`GameConfig` is split by **concern**, not by content type:
 
-### Transaction rules
+| Table | Keyed by | Carries |
+| ----- | -------- | ------- |
+| `Items` | item id | `Name`, `Category`, `BuyPrice`, `SellPrice`, `MaxStack`, `Rarity` |
+| `Plantables` | **seed** item id | `Yields`, `YieldAmount`, `GrowTime`, `XPReward`, `RequiredLevel`, `Color` |
 
-1. **The client sends intent only** — a seed id and a quantity. Prices, level
-   gates and stack limits all come from `GameConfig` on the server. A client
-   cannot propose a price.
-2. **Capacity is checked before money moves**, so the happy path never needs a
-   refund. The refund branches that remain are defence in depth, not expected
-   flow — and they `warn` if they ever fire.
-3. **Quantities are sanitised** to a positive integer and clamped to a
-   per-request cap (`MaxBuyQuantity` 100). Rejects NaN, infinity, negatives and
-   non-numbers; floors fractional values. The cap bounds the arithmetic as much
-   as the economy — unbounded quantities push intermediate products past the
-   range where doubles represent integers exactly.
-4. **Selling respects the Cash ceiling precisely** rather than letting `AddCash`
-   clamp. At the cap the sale is refused with `CashCapped` and the crops are
-   kept; just below it, only the affordable portion sells. Clamping instead
-   would consume crops for less than they are worth, which looks exactly like
-   theft to the player.
-5. **Sell-all iterates in sorted id order.** Luau dictionary order is
-   unspecified, so without this a player at the ceiling would have an arbitrary
-   subset of their crops sold, differing between calls.
+A `nil` price means "not tradeable in that direction". Seeds are buyable but not
+sellable (no buy-back arbitrage); crops and animal drops are sellable but not
+buyable; `GrowthBoost` is neither, because it is Robux-only — it lives in the
+directory purely for stacking and UI.
 
-### Rate limiting
+Registered categories: `Seeds`, `Crops`, `AnimalDrops`, `Boosts`.
 
-Transaction remotes are throttled by a token bucket
-(`GameConfig.Shop.RequestsPerSecond` 8, `BurstSize` 12). A bucket rather than a
-fixed cooldown because shop traffic is bursty by nature: clicking "buy" five
-times in a row is normal, five hundred requests a second is not.
+| Category | Items |
+| -------- | ----- |
+| Seeds | `CarrotSeed`, `WheatSeed`, `TomatoSeed`, `PumpkinSeed`, `WatermelonSeed`, `GoldenAppleSeed`, `StarfruitSeed` |
+| Crops | `Carrot`, `Wheat`, `Tomato`, `Pumpkin`, `Watermelon`, `GoldenApple`, `Starfruit` |
+| AnimalDrops | `Egg`, `Milk`, `RawBeef`, `Leather` |
+| Boosts | `GrowthBoost` |
 
-Buckets are keyed by `Player` and dropped on `PlayerRemoving` — otherwise the
-table keeps every player who ever joined alive for the life of the server.
+`AnimalDrops` have no production mechanic yet — husbandry comes later. They are
+registered now so inventory, shop and UI already handle them, which is the point
+of the refactor: the only thing husbandry will need to add is a table saying
+which animal produces which drop.
 
-### Server API
+Future mechanics follow the same shape and touch nothing above:
 
 ```lua
-local ShopService = require(ServerScriptService.Server.Services.ShopService)
-
-ShopService:BuySeed(player, "Carrot", 5)   -- → result table
-ShopService:SellCrop(player, "Carrot", 3)  -- → result table
-ShopService:SellAllCrops(player)           -- → result table
-ShopService:GetCatalog(player)             -- → seeds buyable at their level
-
-ShopService.SeedPurchased  -- (player, seedId, quantity, totalCost)
-ShopService.CropSold       -- (player, cropId, quantity, totalEarned)
+GameConfig.Animals    -- keyed by animal id,    Produces = {"Egg", "Milk"}
+GameConfig.Recipes    -- keyed by output id,    Inputs   = { Wheat = 3 }
+GameConfig.Structures -- keyed by structure id, Cost     = { Leather = 2 }
 ```
 
-These are safe to call directly from server code (NPCs, quest rewards,
-tutorials); the remote handlers are thin validated wrappers around them.
+Config is asserted at require time: every item id must be a legal attribute
+name, every plantable must reference a real `Seeds` item and yield a real
+sellable item, and every `StarterKit` entry must exist. A bad edit fails on
+startup rather than mid-session.
 
-Results are `{ Ok = true, ... }` or `{ Ok = false, Reason = "<code>" }`. Reasons
-are stable codes for the UI to map to copy:
+### 2. Unified inventory API
 
-`NoData`, `InvalidSeed`, `InvalidCrop`, `InvalidQuantity`, `LevelTooLow`,
-`NotEnoughCash`, `NotEnoughCrops`, `StackFull`, `CashCapped`, `NothingToSell`,
-`RateLimited`, `InternalError`
+**The rule that makes this scale: storage is flat, categorisation is metadata.**
 
-### Client usage
+Inventories are keyed by item id alone. `Category` exists for grouping in UI and
+queries — never for addressing storage. So the API has no category parameter:
 
 ```lua
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
+PlayerDataService:GetItemCount(player, "RawBeef")
+PlayerDataService:HasItem(player, "CarrotSeed", 3)
+PlayerDataService:AddItem(player, "Egg", 4)          -- → new amount, or nil
+PlayerDataService:RemoveItem(player, "Egg", 2)       -- → bool; atomic
+PlayerDataService:GetInventory(player)               -- → { [itemId] = amount }
+PlayerDataService:GetInventoryByCategory(player, "AnimalDrops")
+```
+
+It genuinely does not care what an item is. Unknown ids are rejected outright —
+`GameConfig.Items` is the authority on what can exist, so a typo fails loudly
+instead of creating a phantom stack. `MaxStack` comes from the item itself.
+
+Replication is one flat folder, `Player/Inventory`, with one attribute per item
+id. Adding `AnimalDrops` required no change to storage, replication or schema.
+
+### 3. Shop interaction remote
+
+One entry point, exactly as specified:
+
+```lua
+ProcessTransaction(actionType, itemId, amount)   -- "Buy" | "Sell"
+```
+
+```lua
 local Remotes = require(ReplicatedStorage.Shared.Remotes)
-local GameConfig = require(ReplicatedStorage.Shared.GameConfig)
+local transact = Remotes.GetFunction(GameConfig.RemoteNames.ProcessTransaction)
 
-local buySeed = Remotes.GetFunction(GameConfig.RemoteNames.BuySeed)
-
-local result = buySeed:InvokeServer("Carrot", 5)
+local result = transact:InvokeServer("Buy", "WheatSeed", 10)
 
 if result.Ok then
-    print(`Bought {result.Quantity} for {result.Spent}; cash is now {result.Cash}`)
+    print(`Bought {result.Amount} for {result.Spent}; cash now {result.Cash}`)
 else
-    print(`Could not buy: {result.Reason}`)
+    print(`Refused: {result.Reason}`)
 end
 ```
 
-Stock and prices need no round trip — the client reads them straight from the
-shared config:
+`SellAll` stays a separate RemoteFunction because it is an aggregate operation,
+not a single-item transaction.
+
+`ShopService` is completely category-agnostic — it resolves price, stack limit
+and level gate from the directory and never asks what kind of thing it is
+trading. Validation order:
+
+1. Action must be exactly `"Buy"` or `"Sell"` (case-sensitive).
+2. Item id must resolve in the master directory.
+3. The direction must have a price, else `NotPurchasable` / `NotSellable`.
+4. Amount sanitised to a positive integer, clamped per request. Rejects NaN,
+   infinity, negatives and non-numbers; floors fractions.
+5. Level gate from the item's plantable entry.
+6. **Capacity checked before money moves**, so the happy path never needs a
+   refund. Remaining refund branches `warn` if they fire.
+7. **Selling respects the Cash ceiling precisely** instead of letting `AddCash`
+   clamp — at the cap the sale is refused and goods are kept; just below it only
+   the affordable portion sells. Clamping would consume goods for less than they
+   are worth.
+8. Throttled by a token bucket, and handlers never let an error escape.
+
+Stable reason codes for UI copy: `NoData`, `InvalidAction`, `InvalidItem`,
+`InvalidAmount`, `NotPurchasable`, `NotSellable`, `LevelTooLow`,
+`NotEnoughCash`, `NotEnoughItems`, `StackFull`, `CashCapped`, `NothingToSell`,
+`RateLimited`, `InternalError`.
+
+Server-side API (safe for NPCs, quests, tutorials):
 
 ```lua
-for _, seed in GameConfig.GetPurchasableSeeds(player:GetAttribute("Level")) do
-    print(seed.DisplayName, seed.SeedPrice, seed.SellPrice)
-end
+ShopService:ProcessTransaction(player, "Sell", "Milk", 3)
+ShopService:SellAll(player)
+ShopService:GetCatalog(player)
+
+ShopService.ItemBought  -- (player, itemId, amount, totalCost)
+ShopService.ItemSold    -- (player, itemId, amount, totalEarned)
 ```
 
-### Not included
+### 4. Hybrid interaction and 2D UI
 
-There is no world-space shop stall. Buying and selling are UI-driven through the
-remotes above, and the service deliberately does not require proximity. If you
-want a physical stall later, add a `ProximityPrompt` that calls
-`ShopService:SellAllCrops` and apply the same server-side distance check
-`PlotService` uses.
+`ShopBuilder` creates `Workspace.ShopNPC` with a `ShopPrompt`. `ShopClient`
+listens to that prompt **on the client** and opens the panel.
+
+That is deliberate: `ProximityPrompt.Triggered` fires on both sides, and opening
+a menu is purely cosmetic, so handling it locally makes the panel appear with
+zero latency and costs the server nothing. None of it is trusted — every button
+sends a transaction that `ShopService` validates from scratch. The UI never
+computes an outcome; it renders prices for display, sends intent, then re-renders
+from the server's result and the replicated inventory attributes.
+
+The panel is populated entirely from the directory: category tabs come from
+`GameConfig.ItemCategories`, rows from `GetItemsByCategory`, and a Buy or Sell
+button appears only if that price is non-nil. Registering a new item makes it
+appear with no UI change. Walking away (`PromptHidden`) closes the panel, and an
+amount selector (x1/x10/x50) feeds the `amount` argument.
+
+### 5. Migration (breaking change, handled)
+
+Flattening the inventory breaks saved data, so this is a real migration rather
+than a reinterpretation. `SchemaVersion` 2:
+
+- flattens `Inventory.{Seeds,Crops,Boosts}` into one item-id map;
+- renames seeds so they no longer collide with the crop they yield
+  (`Carrot` → `CarrotSeed`), since a flat namespace cannot hold both;
+- re-points planted plots at the new seed ids;
+- folds `TotalSeedsBought`/`TotalCropsSold` into `TotalItemsBought`/`TotalItemsSold`;
+- marks existing players as already having their starter kit, so the first v2
+  load is not a windfall.
+
+Verified by loading a Step-1-era profile and asserting every field lands
+correctly, plus that re-normalising a v2 profile changes nothing.
+
+### 6. Economy exploit fixed
+
+Found while refactoring, and live in Steps 1–4:
+
+`Inventory.Seeds.Carrot = 3` sat in the `DataSchema` template. `Reconcile`
+backfills template keys on every load, and `RemoveItem` **deletes an entry at
+zero** — so planting all three starter seeds and rejoining regranted them.
+Indefinitely.
+
+Starting items now live in `GameConfig.StarterKit` and are granted once behind
+`StarterKitGranted`. The regression test spends the kit, rejoins, and asserts
+nothing is regranted.
 
 ---
 

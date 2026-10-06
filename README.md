@@ -720,6 +720,32 @@ Two guards exist for this:
 the shop UI rather than throwing, and it distinguishes "Shared is from another
 commit" from "the remotes never replicated, so the server failed to start".
 
+### Positioning instances from `default.project.json`
+
+Use **`CFrame`**, never `Position`. `BasePart.Position` is a *derived* property:
+Rojo accepts it and writes a literal `Position` entry into the place file, but
+Studio reads `CFrame` and ignores it, so the part silently lands at the origin.
+
+A 20-stud-thick baseplate written that way centred itself on the origin and
+buried the whole world 10 studs under the surface players stood on. The only
+visible symptoms were a floating shop label and a working plant prompt, because
+`ProximityPrompt`s and `AlwaysOnTop` billboards render through geometry.
+
+Verified-working syntax:
+
+```json
+"CFrame": {
+  "CFrame": {
+    "position": [0, -2, 0],
+    "orientation": [[1, 0, 0], [0, 1, 0], [0, 0, 1]]
+  }
+}
+```
+
+A bare `[x, y, z]` is rejected at build time; a flat 12-number array also works.
+After editing any position, confirm it with
+`rojo build -o check.rbxlx` and grep the XML for `name="CFrame"`.
+
 ### Full resync
 
 1. Stop the Rojo server. Confirm `git status` is clean and you are on the

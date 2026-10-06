@@ -36,8 +36,13 @@
       "Baseplate": {
         "$className": "Part",
         "$properties": {
-          "Size": [512, 20, 512],
-          "Position": [0, -10, 0],
+          "Size": [512, 4, 512],
+          "CFrame": {
+            "CFrame": {
+              "position": [0, -2, 0],
+              "orientation": [[1, 0, 0], [0, 1, 0], [0, 0, 1]]
+            }
+          },
           "Anchored": true,
           "Locked": true,
           "Color": [0.44, 0.45, 0.47],
@@ -51,7 +56,12 @@
         "$className": "SpawnLocation",
         "$properties": {
           "Size": [16, 1, 16],
-          "Position": [0, 0.5, -22],
+          "CFrame": {
+            "CFrame": {
+              "position": [0, 0.5, -22],
+              "orientation": [[1, 0, 0], [0, 1, 0], [0, 0, 1]]
+            }
+          },
           "Anchored": true,
           "Duration": 0,
           "Color": [0.75, 0.75, 0.78],

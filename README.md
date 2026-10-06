@@ -1,8 +1,8 @@
 # RPG Gardening Simulator
 
 A modular Roblox Luau game built on a strict server-authoritative architecture.
-Built in steps; this repository currently contains **Step 1 (Data & Stats)** and
-**Step 2 (Plots & Growth Loop)**.
+Built in steps; this repository currently contains **Step 1 (Data & Stats)**,
+**Step 2 (Plots & Growth Loop)** and **Step 3 (Microtransactions)**.
 
 ## Project layout
 
@@ -24,8 +24,9 @@ src/
     │   ├── PlotBuilder.luau      Procedurally builds gardens, soil and prompts
     │   └── CropFactory.luau      Builds the crop model for a seed at a growth stage
     └── Services/
-        ├── PlayerDataService.luau  The only module permitted to mutate player data
-        └── PlotService.luau        Garden assignment, plant/harvest, growth loop
+        ├── PlayerDataService.luau   The only module permitted to mutate player data
+        ├── PlotService.luau         Garden assignment, plant/harvest, growth loop
+        └── MarketplaceService.luau  Developer Product receipt processing
 ```
 
 Built with [Rojo](https://rojo.space): `rojo serve` or `rojo build -o game.rbxl`.
@@ -45,9 +46,11 @@ so the game builds and runs from source with no manual Studio setup.
 | `Cash`      | int    | Clamped to `[0, GameConfig.Economy.MaxCash]`        |
 | `Level`     | int    | Clamped to `[1, GameConfig.Progression.MaxLevel]`   |
 | `XP`        | int    | Resets on level up; carries leftover               |
-| `Inventory` | table  | Bucketed: `Seeds` and `Crops`, each `id -> amount` |
+| `RevengeTokens`   | int | Premium counter; 2 granted free to new players |
+| `Inventory` | table  | Bucketed: `Seeds`, `Crops`, `Boosts`, each `id -> amount` |
 | `Plots`     | table  | Planted crops, keyed by stringified plot index     |
-| `Stats`     | table  | Harvest/plant counters, play time, join count      |
+| `PurchaseHistory` | array | Granted `PurchaseId`s; the receipt idempotency ledger |
+| `Stats`     | table  | Harvest/plant counters, play time, Robux spent     |
 
 ### Data-loss protection
 
@@ -304,6 +307,146 @@ looks like, and each documents its contract at the top of the file. To use
 artist-made models, replace `PlotBuilder.CreateGarden` to clone your template
 (keeping the model contract above) and `CropFactory.Create` to clone a model
 keyed by seed id and stage. `PlotService` needs no changes.
+
+---
+
+## Step 3: Microtransactions
+
+### Where each new file goes
+
+| File | Destination | Class |
+| ---- | ----------- | ----- |
+| `src/Server/Services/MarketplaceService.luau` | `ServerScriptService.Server.Services.MarketplaceService` | ModuleScript |
+
+No new folders. Everything else is an edit to existing files: `GameConfig`
+(product table, `RevengeTokens` economy values, two remote names), `DataSchema`
+(`RevengeTokens`, `PurchaseHistory`, two new stats), `PlayerDataService` (token
+API, `SaveNow`), `PlotService` (`CompleteGrowth` and the boost remotes), and
+`Bootstrap` (starts `MarketplaceService` last, since its handlers grant through
+the other two services).
+
+> **Naming note.** This module intentionally shares a name with the engine's
+> `MarketplaceService`. Inside the file the engine service is aliased
+> `Marketplace` to keep them apart. Renaming the file to `PurchaseService` is a
+> drop-in change — only `Bootstrap` requires it.
+
+### Setup before it can sell anything
+
+Create both Developer Products in the Creator Dashboard
+(**Monetization → Developer Products**) and paste their ids into
+`GameConfig.Monetization.Products`. Until then the ids are `0`, which never
+resolves, and `MarketplaceService:Start()` warns loudly listing exactly which
+products are unconfigured. It also reports two products sharing an id, which
+would otherwise silently shadow one another.
+
+Open the Robux dialog from the **server**, so the client never needs to be
+trusted with product ids:
+
+```lua
+MarketplaceService:PromptPurchase(player, "RevengeToken")
+```
+
+### Why receipt processing is not like other handlers
+
+Roblox calls `ProcessReceipt` **repeatedly** for the same purchase until the
+server returns `PurchaseGranted`. Once granted it is never called again and the
+Robux are spent. That creates two failure modes ordinary gameplay code never
+faces:
+
+1. **Granting without persisting** — the server dies, the grant is gone, but
+   Roblox considers the receipt settled. The player paid for nothing.
+2. **Granting without deduplicating** — a retry grants the same purchase twice.
+   One payment, many items.
+
+Both are closed:
+
+- Every grant is appended to `data.PurchaseHistory` (the idempotency ledger) and
+  the profile is **force-saved before** returning `PurchaseGranted`. If the save
+  fails we return `NotProcessedYet` so Roblox retries.
+- A retry for an already-recorded `PurchaseId` re-saves and grants **without
+  re-applying the effect**.
+- The ledger is capped at `MaxPurchaseHistory` (100) so saved data cannot grow
+  without bound, trimming oldest first.
+
+Anything unexpected returns `NotProcessedYet` rather than granting: unknown
+product id, missing handler, a thrown error, a player who left mid-flight, or
+data that is not loaded. `NotProcessedYet` is always safe — the worst case is a
+delayed grant, whereas a wrong `PurchaseGranted` is unrecoverable for the player.
+
+`PlayerDataService:SaveNow(player)` exists for exactly this: it queues behind an
+in-flight auto-save rather than reporting a spurious failure, and returns
+whether the write actually reached the DataStore.
+
+### Product A — +1 Revenge Token
+
+A counter increment, so it always succeeds once data is loaded.
+
+```lua
+PlayerDataService:GetRevengeTokens(player)
+PlayerDataService:AddRevengeTokens(player, 1)        -- → new total, or nil if rejected
+PlayerDataService:TrySpendRevengeTokens(player, 1)   -- → bool; atomic
+```
+
+New players receive `GameConfig.Economy.StartingRevengeTokens` (2) for free.
+Because the field arrives via `Reconcile`, anyone who saved before it existed
+also receives the starting amount on their next load — the intended behaviour
+for a newly introduced currency.
+
+`RevengeTokens` replicates as a `Player` attribute like `Cash`.
+
+> There is no mechanic consuming these yet, so for now it is purely a counter.
+> Whatever eventually spends them must call `TrySpendRevengeTokens` **before**
+> applying its effect and validate its own target server-side — a purchasable
+> token that affects other players is the first thing an exploiter will probe.
+
+### Product B — Instant Grow
+
+**This is implemented by backdating `PlantedAt`, not by overriding `ReadyAt`.**
+
+`ReadyAt` and `Stage` are a replicated *projection* of `PlantedAt`, not state.
+Writing to either attribute would:
+
+- be reverted by the next 1s growth tick, which recomputes `Stage` from
+  `PlantedAt`;
+- not persist, since attributes are not saved — the profile is;
+- not make the crop harvestable, because `_tryHarvest` deliberately recomputes
+  maturity from `PlantedAt` and ignores `Stage`.
+
+A paid purchase would visibly undo itself within a second. Setting
+`PlantedAt = os.time() - seed.GrowTime` is the only change that survives the
+tick, survives a rejoin, and is honoured by harvest validation.
+
+The purchase also **grants a consumable before applying it**:
+
+```lua
+PlotService:CompleteGrowth(player, plotIndex)  -- nil index = pick the best target
+```
+
+The receipt handler adds a `GrowthBoost` to the player's `Boosts` inventory
+bucket, then tries to spend it immediately. That ordering matters: a receipt
+handler must never be able to fail because of world state. If the player bought
+this with nothing growing — every crop already mature, or their garden not yet
+built — the boost simply stays in inventory and is spent later through the
+validated `UseBoost` remote. The purchase is never stranded, and the engine
+never gets stuck retrying a receipt the player already paid for.
+
+Supporting behaviour:
+
+- A boost is **refused on an already-mature crop**, so it is never wasted.
+- An un-targeted boost picks the plot with the **most time remaining** (where it
+  is worth most), ties breaking on the lower index for determinism.
+- `ProcessReceipt` cannot carry a plot index, so the client records its intended
+  target beforehand via the `SelectPlot` remote. The index is validated there
+  (integer, in range, rejecting NaN and infinity) and stored as a server-written
+  attribute, so the receipt path never touches client input.
+
+### Verification
+
+The suite covers the ordering guarantees that make this safe: idempotent
+replays, unknown product ids, absent players, a boost surviving the growth tick
+and then actually harvesting, a boost bought with no valid target being kept
+rather than lost, and an injected DataStore failure leaving the receipt pending
+and then granting **exactly once** on retry.
 
 ---
 

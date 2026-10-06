@@ -14,9 +14,13 @@ local Services = script.Parent.Services
 
 local PlayerDataService = require(Services.PlayerDataService)
 local PlotService = require(Services.PlotService)
+local MarketplaceService = require(Services.MarketplaceService)
 
 PlayerDataService:Start()
 PlotService:Start()
+
+-- Started last: its receipt handlers grant through the two services above.
+MarketplaceService:Start()
 
 -- Examples of how downstream systems consume these layers. Safe to delete.
 PlayerDataService.LevelChanged:Connect(function(player: Player, newLevel: number, previousLevel: number)

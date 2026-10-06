@@ -63,6 +63,7 @@ PlayerDataService._store = nil
 PlayerDataService.ProfileLoaded = Signal.new() -- (player, data)
 PlayerDataService.ProfileReleased = Signal.new() -- (player)
 PlayerDataService.CashChanged = Signal.new() -- (player, newCash, delta)
+PlayerDataService.RevengeTokensChanged = Signal.new() -- (player, newTotal, delta)
 PlayerDataService.XPChanged = Signal.new() -- (player, newXP, delta)
 PlayerDataService.LevelChanged = Signal.new() -- (player, newLevel, previousLevel)
 PlayerDataService.InventoryChanged = Signal.new() -- (player, category, itemId, newAmount, delta)
@@ -134,6 +135,7 @@ local function syncStats(player: Player, data: { [string]: any })
 	player:SetAttribute(ATTR.Cash, data.Cash)
 	player:SetAttribute(ATTR.Level, data.Level)
 	player:SetAttribute(ATTR.XP, data.XP)
+	player:SetAttribute(ATTR.RevengeTokens, data.RevengeTokens)
 
 	local required = GameConfig.GetXPForLevel(data.Level)
 	-- Attributes cannot store math.huge; use -1 to mean "max level reached".
@@ -367,6 +369,87 @@ function PlayerDataService:TrySpendCash(player: Player, amount: number): boolean
 	self.CashChanged:Fire(player, data.Cash, -cost)
 
 	return true
+end
+
+--------------------------------------------------------------------------------
+-- Public API: revenge tokens
+--------------------------------------------------------------------------------
+
+function PlayerDataService:GetRevengeTokens(player: Player): number
+	local data = self:GetData(player)
+	return if data then data.RevengeTokens else 0
+end
+
+--- Credits tokens. Returns the new total, or nil when the call was rejected.
+function PlayerDataService:AddRevengeTokens(player: Player, amount: number): number?
+	local data = self:GetData(player)
+	if not data then
+		return nil
+	end
+
+	local credit = toPositiveInteger(amount)
+	if not credit then
+		warn(`[PlayerDataService] AddRevengeTokens rejected invalid amount for {player.Name}: {tostring(amount)}`)
+		return nil
+	end
+
+	data.RevengeTokens = math.min(data.RevengeTokens + credit, GameConfig.Economy.MaxRevengeTokens)
+
+	syncStats(player, data)
+	self.RevengeTokensChanged:Fire(player, data.RevengeTokens, credit)
+
+	return data.RevengeTokens
+end
+
+--[[
+	Atomically debits tokens. Returns true only if the player had enough; on
+	false, nothing changed.
+
+	Whatever mechanic eventually consumes these must call this *before* applying
+	its effect, and must validate its own target server-side. Tokens being
+	purchasable makes this the spend path an exploiter will probe first.
+]]
+function PlayerDataService:TrySpendRevengeTokens(player: Player, amount: number?): boolean
+	local data = self:GetData(player)
+	if not data then
+		return false
+	end
+
+	local cost = toPositiveInteger(amount or 1)
+	if not cost then
+		return false
+	end
+
+	if data.RevengeTokens < cost then
+		return false
+	end
+
+	data.RevengeTokens -= cost
+
+	syncStats(player, data)
+	self.RevengeTokensChanged:Fire(player, data.RevengeTokens, -cost)
+
+	return true
+end
+
+--------------------------------------------------------------------------------
+-- Public API: durable save
+--------------------------------------------------------------------------------
+
+--[[
+	Forces an immediate save and reports whether it reached the DataStore.
+
+	Needed by anything that must not acknowledge an action until it is durable -
+	above all Developer Product receipts, which Roblox stops retrying once the
+	server returns PurchaseGranted.
+]]
+function PlayerDataService:SaveNow(player: Player): boolean
+	local profile = self:GetProfile(player)
+	if not profile then
+		return false
+	end
+
+	return profile:Save(true)
 end
 
 --------------------------------------------------------------------------------

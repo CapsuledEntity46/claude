@@ -53,6 +53,21 @@ DataSchema.Template = {
 	Level = 1,
 	XP = 0,
 
+	-- Granted free to new players. Because this field is added via Reconcile,
+	-- anyone who saved before it existed also receives the starting amount on
+	-- their next load, which is the intended behaviour for a new currency.
+	RevengeTokens = GameConfig.Economy.StartingRevengeTokens,
+
+	--[[
+		PurchaseIds of Developer Product receipts this player has already been
+		granted, oldest first.
+
+		This is the idempotency ledger for MarketplaceService. ProcessReceipt is
+		retried until it returns PurchaseGranted, so without a durable record of
+		what was already honoured, one payment can be granted many times.
+	]]
+	PurchaseHistory = {},
+
 	-- Seed/crop id -> amount. Entries are removed entirely when they hit zero
 	-- so the saved table never accumulates dead keys.
 	Inventory = {
@@ -82,6 +97,8 @@ DataSchema.Template = {
 		JoinCount = 0,
 		PlayTime = 0,
 		LastSeen = 0,
+		RobuxSpent = 0,
+		PurchasesProcessed = 0,
 	},
 }
 
@@ -143,7 +160,37 @@ function DataSchema.Normalize(data: { [string]: any }): { [string]: any }
 	data.Cash = math.clamp(math.floor(toFiniteNumber(data.Cash) or 0), 0, GameConfig.Economy.MaxCash)
 	data.Level = math.clamp(math.floor(toFiniteNumber(data.Level) or 1), 1, GameConfig.Progression.MaxLevel)
 	data.XP = math.max(math.floor(toFiniteNumber(data.XP) or 0), 0)
+	data.RevengeTokens = math.clamp(
+		math.floor(toFiniteNumber(data.RevengeTokens) or GameConfig.Economy.StartingRevengeTokens),
+		0,
+		GameConfig.Economy.MaxRevengeTokens
+	)
 	data.SchemaVersion = DataSchema.Version
+
+	--------------------------------------------------------------------------
+	-- Purchase ledger
+	--------------------------------------------------------------------------
+
+	-- Must stay a dense array of strings: it is both JSON-safe that way and
+	-- searched with table.find during receipt processing.
+	if type(data.PurchaseHistory) ~= "table" then
+		data.PurchaseHistory = {}
+	end
+
+	local history = {}
+
+	for _, purchaseId in data.PurchaseHistory do
+		if type(purchaseId) == "string" and purchaseId ~= "" then
+			table.insert(history, purchaseId)
+		end
+	end
+
+	-- Trim oldest first if the cap shrank between versions.
+	while #history > GameConfig.Monetization.MaxPurchaseHistory do
+		table.remove(history, 1)
+	end
+
+	data.PurchaseHistory = history
 
 	if type(data.Inventory) ~= "table" then
 		data.Inventory = TableUtil.DeepCopy(DataSchema.Template.Inventory)

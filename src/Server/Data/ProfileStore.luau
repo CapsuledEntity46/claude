@@ -229,9 +229,24 @@ function Profile:IsActive(): boolean
 	return self._active
 end
 
---- Writes the current Data to the primary store and refreshes the session lock.
---- Blocking. Returns true on success.
-function Profile:Save(): boolean
+--[[
+	Writes the current Data to the primary store and refreshes the session lock.
+	Blocking. Returns true on success.
+
+	`waitForInFlight` makes the call queue behind a save that is already running
+	instead of returning false immediately. Pass true when the result is a
+	decision rather than a best-effort flush - receipt processing, for example,
+	must not report "save failed" merely because an auto-save was mid-flight.
+]]
+function Profile:Save(waitForInFlight: boolean?): boolean
+	if waitForInFlight then
+		local deadline = os.clock() + 10
+
+		while self._saving and os.clock() < deadline do
+			task.wait(0.1)
+		end
+	end
+
 	return self._store:_commit(self, false)
 end
 

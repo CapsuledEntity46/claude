@@ -59,6 +59,7 @@ PlotService._gardensFolder = nil
 PlotService.Planted = Signal.new() -- (player, plotIndex, seedId)
 PlotService.Harvested = Signal.new() -- (player, plotIndex, seedId)
 PlotService.PlantFailed = Signal.new() -- (player, plotIndex, reason)
+PlotService.GrowthBoosted = Signal.new() -- (player, plotIndex, seedId)
 
 --------------------------------------------------------------------------------
 -- Helpers
@@ -66,6 +67,26 @@ PlotService.PlantFailed = Signal.new() -- (player, plotIndex, reason)
 
 local function plotKey(index: number): string
 	return tostring(index)
+end
+
+--[[
+	Validates an untrusted plot index, returning nil when unusable.
+
+	The integer test also rejects NaN (NaN ~= NaN), and the range test rejects
+	infinity, which survives math.floor.
+]]
+local function validatePlotIndex(value: unknown): number?
+	local index = tonumber(value)
+
+	if index == nil or index ~= math.floor(index) then
+		return nil
+	end
+
+	if index < 1 or index > GameConfig.Garden.PlotsPerGarden then
+		return nil
+	end
+
+	return index
 end
 
 --- Per-player interaction throttle. Prompt triggers originate on the client,
@@ -508,6 +529,116 @@ function PlotService:_tick()
 end
 
 --------------------------------------------------------------------------------
+-- Growth boosts (Instant Grow)
+--------------------------------------------------------------------------------
+
+--[[
+	Chooses which plot an un-targeted boost should apply to: the player's
+	explicitly targeted plot when it is still growing, otherwise the plot with
+	the MOST time remaining, since that is where the boost is worth most.
+
+	Ties break on the lower index so the choice is deterministic - Luau
+	dictionary iteration order is unspecified.
+]]
+function PlotService:_pickBoostTarget(player: Player): number?
+	local data = PlayerDataService:GetData(player)
+	if not data then
+		return nil
+	end
+
+	local now = os.time()
+
+	local targeted = tonumber(player:GetAttribute(GameConfig.Attributes.TargetPlot))
+	if targeted then
+		local entry = data.Plots[plotKey(targeted)]
+
+		if entry and Growth.GetTimeRemaining(entry.SeedId, entry.PlantedAt, now) > 0 then
+			return targeted
+		end
+	end
+
+	local bestIndex, bestRemaining = nil, 0
+
+	for key, entry in data.Plots do
+		local index = tonumber(key)
+		local remaining = Growth.GetTimeRemaining(entry.SeedId, entry.PlantedAt, now)
+
+		if index and remaining > 0 then
+			local isBetter = bestIndex == nil
+				or remaining > bestRemaining
+				or (remaining == bestRemaining and index < bestIndex)
+
+			if isBetter then
+				bestIndex, bestRemaining = index, remaining
+			end
+		end
+	end
+
+	return bestIndex
+end
+
+--[[
+	Completes a crop's growth immediately, consuming one GrowthBoost from the
+	player's Boosts inventory. Returns true only if a boost was actually spent.
+
+	WHY THIS REWRITES PlantedAt RATHER THAN ReadyAt
+	-----------------------------------------------
+	ReadyAt and Stage are a replicated *projection* of PlantedAt, not state.
+	Overriding either attribute would be reverted by the next growth tick, would
+	not persist (attributes are not saved - the profile is), and would not make
+	the crop harvestable, because _tryHarvest recomputes maturity from
+	PlantedAt and deliberately ignores Stage.
+
+	Backdating PlantedAt by the seed's full GrowTime is the only change that
+	survives the tick, survives a rejoin, and is honoured by harvest validation.
+]]
+function PlotService:CompleteGrowth(player: Player, plotIndex: number?): boolean
+	local data = PlayerDataService:GetData(player)
+	if not data then
+		return false
+	end
+
+	local index = plotIndex or self:_pickBoostTarget(player)
+	if not index then
+		return false
+	end
+
+	local entry = data.Plots[plotKey(index)]
+	if not entry then
+		return false
+	end
+
+	local seed = GameConfig.GetSeed(entry.SeedId)
+	if not seed then
+		return false
+	end
+
+	local now = os.time()
+
+	-- Never burn a boost on a crop that is already harvestable.
+	if Growth.IsMature(Growth.GetStage(entry.SeedId, entry.PlantedAt, now)) then
+		return false
+	end
+
+	-- Atomic: the consumable is spent before the effect is applied.
+	if not PlayerDataService:RemoveItem(player, "Boosts", GameConfig.Monetization.GrowthBoostItemId, 1) then
+		return false
+	end
+
+	entry.PlantedAt = now - seed.GrowTime
+
+	local plot = self:GetPlot(player, index)
+	if plot then
+		self:_projectPlanted(plot, entry.SeedId, entry.PlantedAt, now)
+		self:_refreshPrompt(player, plot)
+	end
+
+	self.GrowthBoosted:Fire(player, index, entry.SeedId)
+
+	return true
+end
+
+--------------------------------------------------------------------------------
 -- Public API
 --------------------------------------------------------------------------------
 
@@ -586,6 +717,53 @@ function PlotService:Start()
 
 		player:SetAttribute(GameConfig.Attributes.SelectedSeed, seed.Id)
 		self:_refreshAllPrompts(player)
+	end)
+
+	--[[
+		Target selection for boost purchases.
+
+		ProcessReceipt receives only a player and a product id - it cannot carry
+		a plot index. So the client records its intended target ahead of the
+		purchase, and the receipt handler reads it. The value is validated here
+		and stored as a server-written attribute, so the receipt path never
+		touches client input.
+	]]
+	local selectPlot = Remotes.GetEvent(GameConfig.RemoteNames.SelectPlot)
+
+	selectPlot.OnServerEvent:Connect(function(player: Player, plotIndex: unknown)
+		if not self:_consumeInteraction(player) then
+			return
+		end
+
+		local index = validatePlotIndex(plotIndex)
+		if not index then
+			return
+		end
+
+		player:SetAttribute(GameConfig.Attributes.TargetPlot, index)
+	end)
+
+	-- Spends a GrowthBoost the player already owns (for example one bought
+	-- while they had nothing growing).
+	local useBoost = Remotes.GetEvent(GameConfig.RemoteNames.UseBoost)
+
+	useBoost.OnServerEvent:Connect(function(player: Player, plotIndex: unknown)
+		if not self:_consumeInteraction(player) then
+			return
+		end
+
+		-- nil is allowed and means "pick the best target for me"; anything
+		-- non-nil must be a real plot index.
+		local index = nil
+
+		if plotIndex ~= nil then
+			index = validatePlotIndex(plotIndex)
+			if not index then
+				return
+			end
+		end
+
+		self:CompleteGrowth(player, index)
 	end)
 
 	task.spawn(function()

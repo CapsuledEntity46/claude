@@ -52,6 +52,10 @@ GameConfig.Economy = {
 	-- Hard ceiling keeps a single bad multiplier from pushing a value past the
 	-- range where doubles stop representing integers exactly.
 	MaxCash = 1_000_000_000,
+
+	-- Every new player is granted these for free.
+	StartingRevengeTokens = 2,
+	MaxRevengeTokens = 9_999,
 }
 
 --------------------------------------------------------------------------------
@@ -84,7 +88,7 @@ end
 -- Inventory is bucketed so that seeds, harvested crops and future item classes
 -- never collide on an id. Each bucket replicates to the owning client as its
 -- own attribute container.
-GameConfig.InventoryCategories = { "Seeds", "Crops" }
+GameConfig.InventoryCategories = { "Seeds", "Crops", "Boosts" }
 
 GameConfig.Inventory = {
 	MaxStack = 9_999,
@@ -251,6 +255,8 @@ GameConfig.Attributes = {
 	XPToNextLevel = "XPToNextLevel",
 	DataLoaded = "DataLoaded",
 	SelectedSeed = "SelectedSeed",
+	RevengeTokens = "RevengeTokens",
+	TargetPlot = "TargetPlot", -- Plot a boost purchase will be applied to
 }
 
 -- Attributes written on each Plot model. Clients read these to render crops,
@@ -271,7 +277,108 @@ GameConfig.GardensFolderName = "Gardens"
 
 GameConfig.RemoteNames = {
 	SelectSeed = "SelectSeed",
+	SelectPlot = "SelectPlot",
+	UseBoost = "UseBoost",
 }
+
+--------------------------------------------------------------------------------
+-- Monetization
+--------------------------------------------------------------------------------
+
+export type ProductDefinition = {
+	Kind: string,
+	ProductId: number,
+	DisplayName: string,
+	Amount: number,
+}
+
+--[[
+	Developer Products.
+
+	REPLACE EVERY ProductId with the real id from the Creator Dashboard
+	(Monetization -> Developer Products). An id of 0 is a placeholder: the
+	product is left out of the lookup table and MarketplaceService warns loudly
+	at startup rather than silently failing a real purchase.
+
+	`Kind` is the internal handler key, so renaming a product on the dashboard
+	or swapping its id never requires touching handler code.
+]]
+GameConfig.Monetization = {
+	Products = {
+		RevengeToken = {
+			Kind = "RevengeToken",
+			ProductId = 0,
+			DisplayName = "+1 Revenge Token",
+			Amount = 1,
+		},
+		GrowthBoost = {
+			Kind = "GrowthBoost",
+			ProductId = 0,
+			DisplayName = "Instant Grow",
+			Amount = 1,
+		},
+	} :: { [string]: ProductDefinition },
+
+	-- Item id used for the Instant Grow consumable in the Boosts bucket.
+	GrowthBoostItemId = "GrowthBoost",
+
+	-- How many PurchaseIds to remember per player for idempotency. Must comfortably
+	-- exceed the number of purchases one player can make in a single session.
+	MaxPurchaseHistory = 100,
+}
+
+for name, product in GameConfig.Monetization.Products do
+	assert(product.Kind == name, `product {name} has a mismatched Kind field`)
+	assert(product.Amount > 0, `product {name} must grant a positive amount`)
+end
+
+--[[
+	Resolves an untrusted ProductId from a receipt. Returns nil for unknown or
+	unconfigured (id <= 0) products, which the caller MUST treat as
+	"do not grant".
+
+	This scans rather than using a prebuilt map so ProductIds stay editable at
+	runtime. Receipts are rare and the table has a handful of entries, so the
+	scan is irrelevant next to the DataStore write that follows it.
+]]
+function GameConfig.GetProductById(productId: unknown): ProductDefinition?
+	if type(productId) ~= "number" then
+		return nil
+	end
+
+	for _, product in GameConfig.Monetization.Products do
+		if product.ProductId > 0 and product.ProductId == productId then
+			return product
+		end
+	end
+
+	return nil
+end
+
+--[[
+	Reports configuration problems for startup logging:
+	  unconfigured - products still carrying a placeholder id (cannot be sold)
+	  duplicates   - ids shared by two products (one would shadow the other)
+]]
+function GameConfig.ValidateProducts(): ({ string }, { string })
+	local unconfigured, duplicates = {}, {}
+	local seen: { [number]: string } = {}
+
+	for name, product in GameConfig.Monetization.Products do
+		if product.ProductId <= 0 then
+			table.insert(unconfigured, name)
+		elseif seen[product.ProductId] then
+			table.insert(duplicates, `{name} and {seen[product.ProductId]} both use ProductId {product.ProductId}`)
+		else
+			seen[product.ProductId] = name
+		end
+	end
+
+	table.sort(unconfigured)
+	table.sort(duplicates)
+
+	return unconfigured, duplicates
+end
 
 --------------------------------------------------------------------------------
 -- Config self-checks (fail loudly at require time, not mid-session)

@@ -10,6 +10,9 @@
 	inventory through it.
 ]]
 
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local GameConfig = require(ReplicatedStorage:WaitForChild("Shared").GameConfig)
+
 local Services = script.Parent.Services
 
 local PlayerDataService = require(Services.PlayerDataService)
@@ -17,7 +20,20 @@ local PlotService = require(Services.PlotService)
 local ShopService = require(Services.ShopService)
 local MarketplaceService = require(Services.MarketplaceService)
 
+local FrameworkGuard = require(script.Parent.FrameworkGuard)
 local ShopBuilder = require(script.Parent.World.ShopBuilder)
+
+--[[
+	Fail fast on a half-synced tree. Without this, a stale module shows up much
+	later as a nil-index in unrelated code, with line numbers that no longer
+	match the file on disk.
+]]
+FrameworkGuard.Assert(GameConfig.FrameworkVersion, {
+	PlayerDataService = PlayerDataService,
+	PlotService = PlotService,
+	ShopService = ShopService,
+	MarketplaceService = MarketplaceService,
+})
 
 PlayerDataService:Start()
 PlotService:Start()

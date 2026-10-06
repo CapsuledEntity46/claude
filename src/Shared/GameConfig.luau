@@ -61,6 +61,18 @@ export type PlantableDefinition = {
 
 local GameConfig = {}
 
+--[[
+	Framework revision. Bump this, AND the FrameworkVersion on every service,
+	whenever a change crosses module boundaries: a renamed config field, a
+	changed function signature, a reshaped table. Purely additive changes do
+	not need a bump.
+
+	Server.FrameworkGuard compares the two at startup, so a half-synced Studio
+	tree fails with a message naming the stale module instead of a nil-index
+	deep inside unrelated code.
+]]
+GameConfig.FrameworkVersion = 5
+
 --------------------------------------------------------------------------------
 -- Persistence
 --------------------------------------------------------------------------------

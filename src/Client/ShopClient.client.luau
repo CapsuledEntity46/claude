@@ -34,6 +34,21 @@ local Remotes = require(Shared.Remotes)
 local player = Players.LocalPlayer
 local ATTR = GameConfig.Attributes
 
+--[[
+	The client depends on Shared being the same revision the server was built
+	against. A stale Shared.Remotes here produced "attempt to call a nil value"
+	on the GetFunction line below, which says nothing useful - so check first.
+]]
+assert(
+	GameConfig.FrameworkVersion == 5,
+	`[ShopClient] Shared.GameConfig is framework v{tostring(GameConfig.FrameworkVersion)}, expected v5. `
+		.. "ReplicatedStorage.Shared is from a different commit than this script - re-sync Rojo."
+)
+assert(
+	type(Remotes.GetFunction) == "function",
+	"[ShopClient] Shared.Remotes has no GetFunction, so it predates the shop remotes. Re-sync Rojo."
+)
+
 local processTransaction = Remotes.GetFunction(GameConfig.RemoteNames.ProcessTransaction)
 local sellAllRemote = Remotes.GetFunction(GameConfig.RemoteNames.SellAll)
 

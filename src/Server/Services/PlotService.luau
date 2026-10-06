@@ -46,6 +46,9 @@ local EMPTY_STAGE = GameConfig.Growth.EmptyStage
 
 local PlotService = {}
 
+-- Checked against GameConfig.FrameworkVersion by Server.FrameworkGuard.
+PlotService.FrameworkVersion = 5
+
 PlotService._started = false
 PlotService._gardens = {} :: { [Player]: any }
 PlotService._slots = {} :: { [number]: Player }

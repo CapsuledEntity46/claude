@@ -279,7 +279,53 @@ GameConfig.RemoteNames = {
 	SelectSeed = "SelectSeed",
 	SelectPlot = "SelectPlot",
 	UseBoost = "UseBoost",
+
+	-- RemoteFunctions (shop transactions return a result the UI renders)
+	BuySeed = "BuySeed",
+	SellCrop = "SellCrop",
+	SellAllCrops = "SellAllCrops",
 }
+
+--------------------------------------------------------------------------------
+-- Shop
+--------------------------------------------------------------------------------
+
+GameConfig.Shop = {
+	-- Per-request caps. These bound the arithmetic as much as the economy:
+	-- without them a client could ask for 1e15 seeds and push intermediate
+	-- products past the exact-integer range.
+	MaxBuyQuantity = 100,
+	MaxSellQuantity = 9_999,
+
+	-- Token bucket for the transaction remotes. Burst allows normal rapid
+	-- clicking; the rate caps sustained throughput.
+	RequestsPerSecond = 8,
+	BurstSize = 12,
+}
+
+--[[
+	Seeds a player of `level` may buy, cheapest first (then by id, so the order
+	is stable for UI). Shared so the shop UI and the server agree on stock
+	without a round trip.
+]]
+function GameConfig.GetPurchasableSeeds(level: number): { SeedDefinition }
+	local available = {}
+
+	for _, seed in GameConfig.Seeds do
+		if level >= seed.RequiredLevel then
+			table.insert(available, seed)
+		end
+	end
+
+	table.sort(available, function(a, b)
+		if a.SeedPrice == b.SeedPrice then
+			return a.Id < b.Id
+		end
+		return a.SeedPrice < b.SeedPrice
+	end)
+
+	return available
+end
 
 --------------------------------------------------------------------------------
 -- Monetization

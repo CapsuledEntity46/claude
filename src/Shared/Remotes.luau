@@ -64,4 +64,42 @@ function Remotes.GetEvent(name: string): RemoteEvent
 	return remote
 end
 
+--[[
+	Returns the named RemoteFunction, creating it on the server and waiting for
+	it on the client.
+
+	RemoteFunctions are used for shop transactions because the client genuinely
+	needs a result to render ("not enough cash" vs "stack full"), and a
+	request/response pair is clearer than two one-way events the caller has to
+	correlate.
+
+	Server rule for every OnServerInvoke in this project: validate, act, return
+	promptly, and never let an error escape. An erroring invoke surfaces on the
+	client as a thrown error and tells an attacker they found an unhandled path,
+	so handlers wrap their work and return a failure result instead.
+]]
+function Remotes.GetFunction(name: string): RemoteFunction
+	assert(type(name) == "string" and name ~= "", "remote name must be a non-empty string")
+
+	local folder = getFolder()
+	local existing = folder:FindFirstChild(name)
+
+	if existing then
+		return existing
+	end
+
+	if RunService:IsServer() then
+		local remote = Instance.new("RemoteFunction")
+		remote.Name = name
+		remote.Parent = folder
+
+		return remote
+	end
+
+	local remote = folder:WaitForChild(name, WAIT_TIMEOUT)
+	assert(remote, `RemoteFunction {name} never replicated (waited {WAIT_TIMEOUT}s)`)
+
+	return remote
+end
+
 return Remotes

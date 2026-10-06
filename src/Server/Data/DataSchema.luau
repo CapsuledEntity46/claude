@@ -99,6 +99,8 @@ DataSchema.Template = {
 		LastSeen = 0,
 		RobuxSpent = 0,
 		PurchasesProcessed = 0,
+		TotalSeedsBought = 0,
+		TotalCropsSold = 0,
 	},
 }
 

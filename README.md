@@ -2,7 +2,8 @@
 
 A modular Roblox Luau game built on a strict server-authoritative architecture.
 Built in steps; this repository currently contains **Step 1 (Data & Stats)**,
-**Step 2 (Plots & Growth Loop)** and **Step 3 (Microtransactions)**.
+**Step 2 (Plots & Growth Loop)**, **Step 3 (Microtransactions)** and
+**Step 4 (Shop & Selling)**.
 
 ## Project layout
 
@@ -13,6 +14,7 @@ src/
 │   ├── Types.luau                Shared type definitions for persisted data
 │   ├── Growth.luau               Pure stage math, used by both server and client
 │   ├── Remotes.luau              Lazy remote creation (server) / lookup (client)
+│   ├── RateLimiter.luau          Token-bucket throttle
 │   ├── Signal.luau               Pure-Luau event (no BindableEvent serialisation cost)
 │   └── TableUtil.luau            DeepCopy / Reconcile
 └── Server/                       → ServerScriptService.Server
@@ -26,6 +28,7 @@ src/
     └── Services/
         ├── PlayerDataService.luau   The only module permitted to mutate player data
         ├── PlotService.luau         Garden assignment, plant/harvest, growth loop
+        ├── ShopService.luau         Seed buying and crop selling
         └── MarketplaceService.luau  Developer Product receipt processing
 ```
 
@@ -447,6 +450,143 @@ replays, unknown product ids, absent players, a boost surviving the growth tick
 and then actually harvesting, a boost bought with no valid target being kept
 rather than lost, and an injected DataStore failure leaving the receipt pending
 and then granting **exactly once** on retry.
+
+---
+
+## Step 4: Shop & Selling
+
+Closes the economy loop: **Cash → seeds → crops → Cash**, using the `SeedPrice`
+and `SellPrice` already in `GameConfig`.
+
+### Where each new file goes
+
+| File | Destination | Class |
+| ---- | ----------- | ----- |
+| `src/Shared/RateLimiter.luau` | `ReplicatedStorage.Shared.RateLimiter` | ModuleScript |
+| `src/Server/Services/ShopService.luau` | `ServerScriptService.Server.Services.ShopService` | ModuleScript |
+
+No new folders. Edits to existing files: `GameConfig` (`GameConfig.Shop`, three
+remote names, `GetPurchasableSeeds`), `Remotes` (`GetFunction` for
+RemoteFunctions), `DataSchema` (`TotalSeedsBought`, `TotalCropsSold` stats), and
+`Bootstrap` (starts `ShopService` after `PlotService`).
+
+The three RemoteFunctions are created by the server at startup and appear at
+runtime under `ReplicatedStorage.Remotes`. Nothing to place by hand:
+
+```
+ReplicatedStorage/
+└── Remotes/                 (created at runtime by Shared.Remotes)
+    ├── SelectSeed           RemoteEvent     (Step 2)
+    ├── SelectPlot           RemoteEvent     (Step 3)
+    ├── UseBoost             RemoteEvent     (Step 3)
+    ├── BuySeed              RemoteFunction  (Step 4)
+    ├── SellCrop             RemoteFunction  (Step 4)
+    └── SellAllCrops         RemoteFunction  (Step 4)
+```
+
+### Why RemoteFunctions here
+
+Steps 2–3 use RemoteEvents because the client was only expressing intent. A
+transaction is different: the UI needs to distinguish "not enough cash" from
+"stack full" from "level too low" to show the right message, and a
+request/response pair is clearer than two one-way events the caller has to
+correlate.
+
+Every handler follows the same rule — validate, act, return promptly, and never
+let an error escape. An erroring `OnServerInvoke` reports that error to the
+caller, which breaks the UI *and* tells an attacker they found an unhandled
+path. Each handler is wrapped in `pcall` and returns `InternalError` instead.
+
+### Transaction rules
+
+1. **The client sends intent only** — a seed id and a quantity. Prices, level
+   gates and stack limits all come from `GameConfig` on the server. A client
+   cannot propose a price.
+2. **Capacity is checked before money moves**, so the happy path never needs a
+   refund. The refund branches that remain are defence in depth, not expected
+   flow — and they `warn` if they ever fire.
+3. **Quantities are sanitised** to a positive integer and clamped to a
+   per-request cap (`MaxBuyQuantity` 100). Rejects NaN, infinity, negatives and
+   non-numbers; floors fractional values. The cap bounds the arithmetic as much
+   as the economy — unbounded quantities push intermediate products past the
+   range where doubles represent integers exactly.
+4. **Selling respects the Cash ceiling precisely** rather than letting `AddCash`
+   clamp. At the cap the sale is refused with `CashCapped` and the crops are
+   kept; just below it, only the affordable portion sells. Clamping instead
+   would consume crops for less than they are worth, which looks exactly like
+   theft to the player.
+5. **Sell-all iterates in sorted id order.** Luau dictionary order is
+   unspecified, so without this a player at the ceiling would have an arbitrary
+   subset of their crops sold, differing between calls.
+
+### Rate limiting
+
+Transaction remotes are throttled by a token bucket
+(`GameConfig.Shop.RequestsPerSecond` 8, `BurstSize` 12). A bucket rather than a
+fixed cooldown because shop traffic is bursty by nature: clicking "buy" five
+times in a row is normal, five hundred requests a second is not.
+
+Buckets are keyed by `Player` and dropped on `PlayerRemoving` — otherwise the
+table keeps every player who ever joined alive for the life of the server.
+
+### Server API
+
+```lua
+local ShopService = require(ServerScriptService.Server.Services.ShopService)
+
+ShopService:BuySeed(player, "Carrot", 5)   -- → result table
+ShopService:SellCrop(player, "Carrot", 3)  -- → result table
+ShopService:SellAllCrops(player)           -- → result table
+ShopService:GetCatalog(player)             -- → seeds buyable at their level
+
+ShopService.SeedPurchased  -- (player, seedId, quantity, totalCost)
+ShopService.CropSold       -- (player, cropId, quantity, totalEarned)
+```
+
+These are safe to call directly from server code (NPCs, quest rewards,
+tutorials); the remote handlers are thin validated wrappers around them.
+
+Results are `{ Ok = true, ... }` or `{ Ok = false, Reason = "<code>" }`. Reasons
+are stable codes for the UI to map to copy:
+
+`NoData`, `InvalidSeed`, `InvalidCrop`, `InvalidQuantity`, `LevelTooLow`,
+`NotEnoughCash`, `NotEnoughCrops`, `StackFull`, `CashCapped`, `NothingToSell`,
+`RateLimited`, `InternalError`
+
+### Client usage
+
+```lua
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Remotes = require(ReplicatedStorage.Shared.Remotes)
+local GameConfig = require(ReplicatedStorage.Shared.GameConfig)
+
+local buySeed = Remotes.GetFunction(GameConfig.RemoteNames.BuySeed)
+
+local result = buySeed:InvokeServer("Carrot", 5)
+
+if result.Ok then
+    print(`Bought {result.Quantity} for {result.Spent}; cash is now {result.Cash}`)
+else
+    print(`Could not buy: {result.Reason}`)
+end
+```
+
+Stock and prices need no round trip — the client reads them straight from the
+shared config:
+
+```lua
+for _, seed in GameConfig.GetPurchasableSeeds(player:GetAttribute("Level")) do
+    print(seed.DisplayName, seed.SeedPrice, seed.SellPrice)
+end
+```
+
+### Not included
+
+There is no world-space shop stall. Buying and selling are UI-driven through the
+remotes above, and the service deliberately does not require proximity. If you
+want a physical stall later, add a `ProximityPrompt` that calls
+`ShopService:SellAllCrops` and apply the same server-side distance check
+`PlotService` uses.
 
 ---
 

@@ -34,8 +34,11 @@ src/
         └── MarketplaceService.luau  Developer Product receipt processing
 
 src/Client/                       → StarterPlayer.StarterPlayerScripts.Client
+├── HudClient.client.luau         Cash/Level/XP strip, Inventory panel, Robux store
 └── ShopClient.client.luau        Builds ShopGui; opens it from the ShopNPC prompt
 ```
+
+The long-term design target is recorded in [docs/ROADMAP.md](docs/ROADMAP.md).
 
 Built with [Rojo](https://rojo.space): `rojo serve` or `rojo build -o game.rbxl`.
 
@@ -696,6 +699,73 @@ onto a real plot index and name a seed that still exists in `GameConfig`.
 DataStores serialise through JSON, which does not round-trip sparse integer
 keys — a table with holes comes back with string keys regardless. Using strings
 from the start keeps the saved and in-memory shapes identical.
+
+## Step 6: HUD and the Robux store
+
+### Where each new file goes
+
+| File | Destination | Class |
+| ---- | ----------- | ----- |
+| `src/Client/HudClient.client.luau` | `StarterPlayer.StarterPlayerScripts.Client.HudClient` | **LocalScript** |
+| `docs/ROADMAP.md` | — (documentation) | — |
+
+### HUD
+
+An always-on strip showing Cash, Level, an XP bar and Revenge Tokens, plus
+**Inventory** and **Store** panels. Everything is read from replicated state, so
+there is nothing to poll and nothing to keep in sync:
+
+| Shown | Source |
+| ----- | ------ |
+| Cash, Level, XP, XPToNextLevel, RevengeTokens | `Player` attributes |
+| Inventory contents | `Player.Inventory` attributes |
+| Item names, sell values, categories | `Shared.GameConfig` |
+| Store products and descriptions | `Shared.GameConfig` |
+
+The XP bar reads `-1` from `XPToNextLevel` as "max level", because an attribute
+cannot hold `math.huge`. The inventory groups by the directory's category order
+rather than attribute order, so the panel reads identically every time.
+
+### Store products
+
+Six Developer Products, Clash-of-Clans shaped. **Several share a handler
+`Kind`** and differ only in `Amount`, so adding a bigger pack is a config edit
+with no new code:
+
+| Product | Kind | Grants |
+| ------- | ---- | ------ |
+| Pouch of Coins | `Cash` | 2,500 Cash |
+| Chest of Coins | `Cash` | 15,000 Cash |
+| Instant Grow | `GrowthBoost` | 1 boost |
+| Instant Grow x10 | `GrowthBoost` | 10 boosts |
+| Extra Garden Plot | `PlotUnlock` | +1 permanent plot |
+| +1 Revenge Token | `RevengeToken` | 1 token |
+
+Two handlers **refuse rather than absorb** a grant that would do nothing — a
+cash pack when already at `MaxCash`, and a plot unlock at `MaxBonusPlotSlots`.
+Both return `NotProcessedYet`, so the receipt stays pending and the player is
+never charged for nothing.
+
+### Purchased plot slots
+
+`data.BonusPlotSlots` unlocks plots **past their level requirement**. It is a
+purely additive schema field, so `Reconcile` backfills it and **no migration was
+needed** — in contrast to the v2 inventory flattening.
+
+Slots apply to the **lowest-indexed still-locked plots**, which makes the result
+deterministic and stops a player influencing which plot a purchase opens. A plot
+is usable if `level >= requirement` **or** a purchased slot covers it, and
+`PlotService:RefreshPlots` re-evaluates after a level up or a grant.
+
+### Purchase flow
+
+The client never sees a Developer Product id. It sends the product's **config
+name** over the `PromptPurchase` remote; the server validates it against
+`GameConfig` and opens the Robux dialog. Robux prices are fetched per product
+with `GetProductInfo` and cached; unconfigured products (`ProductId` `0`) render
+as *unavailable* rather than failing.
+
+---
 
 ## Troubleshooting a partially synced tree
 

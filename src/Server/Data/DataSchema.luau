@@ -76,6 +76,13 @@ DataSchema.Template = {
 	StarterKitGranted = false,
 
 	--[[
+		Garden plots bought with Robux, on top of those earned by levelling.
+		Purely additive, so Reconcile backfills it for existing players and no
+		schema migration is required - unlike the inventory flattening in v2.
+	]]
+	BonusPlotSlots = 0,
+
+	--[[
 		Planted crops, keyed by STRINGIFIED plot index:
 			Plots = { ["1"] = { SeedId = "CarrotSeed", PlantedAt = 1700000000 } }
 
@@ -236,6 +243,11 @@ function DataSchema.Normalize(data: { [string]: any }): { [string]: any }
 		GameConfig.Economy.MaxRevengeTokens
 	)
 	data.StarterKitGranted = data.StarterKitGranted == true
+	data.BonusPlotSlots = math.clamp(
+		math.floor(toFiniteNumber(data.BonusPlotSlots) or 0),
+		0,
+		GameConfig.Economy.MaxBonusPlotSlots
+	)
 	data.SchemaVersion = DataSchema.Version
 
 	--------------------------------------------------------------------------

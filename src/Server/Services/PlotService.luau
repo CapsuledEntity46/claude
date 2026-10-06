@@ -47,7 +47,7 @@ local EMPTY_STAGE = GameConfig.Growth.EmptyStage
 local PlotService = {}
 
 -- Checked against GameConfig.FrameworkVersion by Server.FrameworkGuard.
-PlotService.FrameworkVersion = 5
+PlotService.FrameworkVersion = 6
 
 PlotService._started = false
 PlotService._gardens = {} :: { [Player]: any }
@@ -167,6 +167,50 @@ function PlotService:_projectEmpty(plot: Model)
 	self:_renderCrop(plot, "", EMPTY_STAGE)
 end
 
+--[[
+	Whether `index` is usable by this player.
+
+	A plot opens either by reaching its level requirement OR by spending a
+	purchased slot. Purchased slots apply to the LOWEST-INDEXED still-locked
+	plots, so the result is deterministic and a player cannot influence which
+	plot a purchase opens.
+]]
+function PlotService:_isPlotUnlocked(player: Player, index: number): boolean
+	local unlockLevels = GameConfig.Garden.PlotUnlockLevels
+	local level = PlayerDataService:GetLevel(player)
+
+	if level >= (unlockLevels[index] or 1) then
+		return true
+	end
+
+	local data = PlayerDataService:GetData(player)
+	local purchased = if data then data.BonusPlotSlots or 0 else 0
+
+	if purchased < 1 then
+		return false
+	end
+
+	local lockedSoFar = 0
+
+	for candidate = 1, GameConfig.Garden.PlotsPerGarden do
+		if level < (unlockLevels[candidate] or 1) then
+			lockedSoFar += 1
+
+			if candidate == index then
+				return lockedSoFar <= purchased
+			end
+		end
+	end
+
+	return false
+end
+
+--- Re-evaluates every plot for a player. Called after a level up or after a
+--- purchased slot is granted.
+function PlotService:RefreshPlots(player: Player)
+	self:_refreshAllPrompts(player)
+end
+
 --- Updates lock state, soil tint and the prompt's enabled state / labels to
 --- match the plot's current contents and the player's level.
 function PlotService:_refreshPrompt(player: Player, plot: Model)
@@ -177,7 +221,8 @@ function PlotService:_refreshPrompt(player: Player, plot: Model)
 
 	local soil = plot.PrimaryPart
 	local unlockLevel = plot:GetAttribute(PLOT_ATTR.UnlockLevel) or 1
-	local locked = PlayerDataService:GetLevel(player) < unlockLevel
+	local index = plot:GetAttribute(PLOT_ATTR.PlotIndex)
+	local locked = not self:_isPlotUnlocked(player, index)
 
 	plot:SetAttribute(PLOT_ATTR.Locked, locked)
 
@@ -287,9 +332,8 @@ function PlotService:_tryPlant(player: Player, plot: Model): boolean
 	end
 
 	local index = plot:GetAttribute(PLOT_ATTR.PlotIndex)
-	local unlockLevel = plot:GetAttribute(PLOT_ATTR.UnlockLevel) or 1
 
-	if PlayerDataService:GetLevel(player) < unlockLevel then
+	if not self:_isPlotUnlocked(player, index) then
 		self.PlantFailed:Fire(player, index, "PlotLocked")
 		return false
 	end

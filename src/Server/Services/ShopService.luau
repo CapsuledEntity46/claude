@@ -56,7 +56,7 @@ local ACTIONS = GameConfig.TransactionActions
 local ShopService = {}
 
 -- Checked against GameConfig.FrameworkVersion by Server.FrameworkGuard.
-ShopService.FrameworkVersion = 5
+ShopService.FrameworkVersion = 6
 
 ShopService._started = false
 ShopService._limiter = nil

@@ -34,7 +34,7 @@ local Remotes = require(Shared.Remotes)
 local player = Players.LocalPlayer
 local ATTR = GameConfig.Attributes
 
-local EXPECTED_FRAMEWORK = 5
+local EXPECTED_FRAMEWORK = 6
 
 --[[
 	Startup is diagnosed, not asserted.

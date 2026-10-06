@@ -71,7 +71,7 @@ local GameConfig = {}
 	tree fails with a message naming the stale module instead of a nil-index
 	deep inside unrelated code.
 ]]
-GameConfig.FrameworkVersion = 5
+GameConfig.FrameworkVersion = 6
 
 --------------------------------------------------------------------------------
 -- Persistence
@@ -103,6 +103,9 @@ GameConfig.Economy = {
 
 	StartingRevengeTokens = 2,
 	MaxRevengeTokens = 9_999,
+
+	-- Plots bought with Robux, on top of those earned by levelling.
+	MaxBonusPlotSlots = 4,
 }
 
 --[[
@@ -604,6 +607,10 @@ GameConfig.RemoteNames = {
 	-- RemoteFunctions
 	ProcessTransaction = "ProcessTransaction",
 	SellAll = "SellAll",
+
+	-- Client asks the server to open a Robux dialog BY PRODUCT NAME, so
+	-- Developer Product ids never leave the server.
+	PromptPurchase = "PromptPurchase",
 }
 
 --------------------------------------------------------------------------------
@@ -611,25 +618,76 @@ GameConfig.RemoteNames = {
 --------------------------------------------------------------------------------
 
 export type ProductDefinition = {
-	Kind: string,
-	ProductId: number,
+	Kind: string, -- handler key; several products may share one Kind
+	ProductId: number, -- 0 = unconfigured, never resolves
 	DisplayName: string,
+	Description: string, -- shown in the store panel
 	Amount: number,
+	SortOrder: number, -- store display order
+	Name: string?, -- table key, filled in by GetStoreProducts
 }
 
 GameConfig.Monetization = {
+	--[[
+		Developer Products, Clash-of-Clans shaped: resource packs, instant
+		finishes, permanent unlocks, and the revenge continue.
+
+		REPLACE EVERY ProductId with the real id from the Creator Dashboard
+		(Monetization -> Developer Products). An id of 0 never resolves, and
+		MarketplaceService warns at startup listing which are unconfigured.
+
+		Several products may share a Kind - CashPackSmall and CashPackLarge both
+		use the "Cash" handler and differ only in Amount. Adding a bigger pack
+		is a config edit with no new code.
+	]]
 	Products = {
-		RevengeToken = {
-			Kind = "RevengeToken",
+		CashPackSmall = {
+			Kind = "Cash",
 			ProductId = 0,
-			DisplayName = "+1 Revenge Token",
-			Amount = 1,
+			DisplayName = "Pouch of Coins",
+			Description = "2,500 Cash to spend in the shop.",
+			Amount = 2_500,
+			SortOrder = 10,
+		},
+		CashPackLarge = {
+			Kind = "Cash",
+			ProductId = 0,
+			DisplayName = "Chest of Coins",
+			Description = "15,000 Cash to spend in the shop.",
+			Amount = 15_000,
+			SortOrder = 20,
 		},
 		GrowthBoost = {
 			Kind = "GrowthBoost",
 			ProductId = 0,
 			DisplayName = "Instant Grow",
+			Description = "Finishes one growing crop immediately.",
 			Amount = 1,
+			SortOrder = 30,
+		},
+		GrowthBoostBundle = {
+			Kind = "GrowthBoost",
+			ProductId = 0,
+			DisplayName = "Instant Grow x10",
+			Description = "Ten instant finishes, kept until you need them.",
+			Amount = 10,
+			SortOrder = 40,
+		},
+		PlotUnlock = {
+			Kind = "PlotUnlock",
+			ProductId = 0,
+			DisplayName = "Extra Garden Plot",
+			Description = "Permanently unlocks one more plot, ignoring its level requirement.",
+			Amount = 1,
+			SortOrder = 50,
+		},
+		RevengeToken = {
+			Kind = "RevengeToken",
+			ProductId = 0,
+			DisplayName = "+1 Revenge Token",
+			Description = "One more chance to retake your ground after a defeat.",
+			Amount = 1,
+			SortOrder = 60,
 		},
 	} :: { [string]: ProductDefinition },
 
@@ -637,9 +695,41 @@ GameConfig.Monetization = {
 	MaxPurchaseHistory = 100,
 }
 
+-- Kind is a handler key, not a unique name: several products deliberately
+-- share one, differing only in Amount.
 for name, product in GameConfig.Monetization.Products do
-	assert(product.Kind == name, `product {name} has a mismatched Kind field`)
 	assert(product.Amount > 0, `product {name} must grant a positive amount`)
+	assert(product.Description ~= nil and product.Description ~= "", `product {name} needs a Description`)
+end
+
+--- Products for the store panel, in display order. Stamps each with its table
+--- key as `Name`, which is what the client sends back to request a purchase.
+function GameConfig.GetStoreProducts(): { ProductDefinition }
+	local products = {}
+
+	for name, product in GameConfig.Monetization.Products do
+		product.Name = name
+		table.insert(products, product)
+	end
+
+	table.sort(products, function(a, b)
+		if a.SortOrder == b.SortOrder then
+			return a.DisplayName < b.DisplayName
+		end
+		return a.SortOrder < b.SortOrder
+	end)
+
+	return products
+end
+
+--- Resolves a product by its table key (not its id), for when the client asks
+--- for a purchase dialog by name.
+function GameConfig.GetProductByName(name: unknown): ProductDefinition?
+	if type(name) ~= "string" then
+		return nil
+	end
+
+	return GameConfig.Monetization.Products[name]
 end
 
 --- Resolves an untrusted ProductId from a receipt. Returns nil for unknown or

@@ -49,6 +49,7 @@ local Marketplace = game:GetService("MarketplaceService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Shared = ReplicatedStorage:WaitForChild("Shared")
 local GameConfig = require(Shared.GameConfig)
+local Remotes = require(Shared.Remotes)
 local Signal = require(Shared.Signal)
 
 local PlayerDataService = require(script.Parent.PlayerDataService)
@@ -60,7 +61,7 @@ local NOT_PROCESSED = Enum.ProductPurchaseDecision.NotProcessedYet
 local MarketplaceService = {}
 
 -- Checked against GameConfig.FrameworkVersion by Server.FrameworkGuard.
-MarketplaceService.FrameworkVersion = 5
+MarketplaceService.FrameworkVersion = 6
 
 MarketplaceService._started = false
 MarketplaceService._handlers = {}
@@ -109,6 +110,50 @@ function MarketplaceService._grantGrowthBoost(player: Player, product): boolean
 			break
 		end
 	end
+
+	return true
+end
+
+--[[
+	Resource pack: credits Cash directly.
+
+	AddCash clamps at MaxCash, so a player already at the ceiling would pay and
+	receive nothing. Refuse instead and leave the receipt pending - they keep
+	the Robux and can buy it once they have spent some.
+]]
+function MarketplaceService._grantCash(player: Player, product): boolean
+	if PlayerDataService:GetCash(player) >= GameConfig.Economy.MaxCash then
+		warn(`[MarketplaceService] {player.Name} is at the Cash ceiling; refusing {product.DisplayName}`)
+		return false
+	end
+
+	return PlayerDataService:AddCash(player, product.Amount) ~= nil
+end
+
+--[[
+	Permanent progression: one more usable garden plot, ignoring its level gate.
+
+	Capped at MaxBonusPlotSlots. At the cap the grant is refused rather than
+	silently absorbed, so a player is never charged for nothing.
+]]
+function MarketplaceService._grantPlotUnlock(player: Player, product): boolean
+	local data = PlayerDataService:GetData(player)
+	if not data then
+		return false
+	end
+
+	local maximum = GameConfig.Economy.MaxBonusPlotSlots
+	local current = data.BonusPlotSlots or 0
+
+	if current >= maximum then
+		warn(`[MarketplaceService] {player.Name} already owns every bonus plot slot; refusing grant`)
+		return false
+	end
+
+	data.BonusPlotSlots = math.min(current + product.Amount, maximum)
+
+	-- Re-evaluate the garden so the new plot becomes usable immediately.
+	PlotService:RefreshPlots(player)
 
 	return true
 end
@@ -248,6 +293,26 @@ function MarketplaceService:Start()
 
 	self:RegisterHandler("RevengeToken", MarketplaceService._grantRevengeToken)
 	self:RegisterHandler("GrowthBoost", MarketplaceService._grantGrowthBoost)
+	self:RegisterHandler("Cash", MarketplaceService._grantCash)
+	self:RegisterHandler("PlotUnlock", MarketplaceService._grantPlotUnlock)
+
+	--[[
+		The client requests a purchase dialog BY PRODUCT NAME, never by id, so
+		Developer Product ids stay server-side and a client cannot prompt for an
+		arbitrary product. The name is validated against the config.
+	]]
+	local promptPurchase = Remotes.GetEvent(GameConfig.RemoteNames.PromptPurchase)
+
+	promptPurchase.OnServerEvent:Connect(function(player: Player, productName: unknown)
+		local product = GameConfig.GetProductByName(productName)
+
+		if not product then
+			warn(`[MarketplaceService] {player.Name} asked for unknown product {tostring(productName)}`)
+			return
+		end
+
+		self:PromptPurchase(player, productName)
+	end)
 
 	local unconfigured, duplicates = GameConfig.ValidateProducts()
 

@@ -57,7 +57,7 @@ local KICK_LOCK_LOST = "Your data is active on another server. Please rejoin."
 local PlayerDataService = {}
 
 -- Checked against GameConfig.FrameworkVersion by Server.FrameworkGuard.
-PlayerDataService.FrameworkVersion = 5
+PlayerDataService.FrameworkVersion = 6
 
 PlayerDataService._started = false
 PlayerDataService._profiles = {} :: { [Player]: any }

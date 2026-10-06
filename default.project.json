@@ -17,6 +17,16 @@
       }
     },
 
+    "StarterPlayer": {
+      "$className": "StarterPlayer",
+      "StarterPlayerScripts": {
+        "$className": "StarterPlayerScripts",
+        "Client": {
+          "$path": "src/Client"
+        }
+      }
+    },
+
     "Workspace": {
       "$className": "Workspace",
       "$properties": {

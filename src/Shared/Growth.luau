@@ -49,22 +49,22 @@ end
 
 --- Stage id for a planted seed, or the empty stage if the seed id is unknown.
 function Growth.GetStage(seedId: string, plantedAt: number, now: number?): string
-	local seed = GameConfig.GetSeed(seedId)
-	if not seed then
+	local plantable = GameConfig.GetPlantable(seedId)
+	if not plantable then
 		return GameConfig.Growth.EmptyStage
 	end
 
-	return Growth.GetStageFromProgress(Growth.GetProgress(plantedAt, seed.GrowTime, now))
+	return Growth.GetStageFromProgress(Growth.GetProgress(plantedAt, plantable.GrowTime, now))
 end
 
 --- Unix timestamp at which a crop planted at `plantedAt` becomes harvestable.
 function Growth.GetReadyAt(seedId: string, plantedAt: number): number
-	local seed = GameConfig.GetSeed(seedId)
-	if not seed then
+	local plantable = GameConfig.GetPlantable(seedId)
+	if not plantable then
 		return 0
 	end
 
-	return plantedAt + seed.GrowTime
+	return plantedAt + plantable.GrowTime
 end
 
 --- Seconds until harvest; 0 once ready.

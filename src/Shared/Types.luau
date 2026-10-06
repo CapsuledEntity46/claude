@@ -7,11 +7,12 @@
 	around.
 ]]
 
-export type ItemMap = { [string]: number }
+--- Flat inventory: item id -> amount, for every category.
+export type Inventory = { [string]: number }
 
-export type Inventory = {
-	Seeds: ItemMap,
-	Crops: ItemMap,
+export type PlotEntry = {
+	SeedId: string,
+	PlantedAt: number,
 }
 
 export type PlayerStats = {
@@ -21,6 +22,10 @@ export type PlayerStats = {
 	JoinCount: number,
 	PlayTime: number,
 	LastSeen: number,
+	RobuxSpent: number,
+	PurchasesProcessed: number,
+	TotalItemsBought: number,
+	TotalItemsSold: number,
 }
 
 export type PlayerData = {
@@ -28,7 +33,11 @@ export type PlayerData = {
 	Cash: number,
 	Level: number,
 	XP: number,
+	RevengeTokens: number,
 	Inventory: Inventory,
+	StarterKitGranted: boolean,
+	Plots: { [string]: PlotEntry },
+	PurchaseHistory: { string },
 	Stats: PlayerStats,
 }
 
@@ -38,6 +47,17 @@ export type ProfileMetaData = {
 	SaveCount: number,
 	SessionLock: { JobId: string, PlaceId: number, Timestamp: number }?,
 	RecoveredFromBackup: boolean?,
+}
+
+export type TransactionResult = {
+	Ok: boolean,
+	Reason: string?,
+	ItemId: string?,
+	Amount: number?,
+	Spent: number?,
+	Earned: number?,
+	Held: number?,
+	Cash: number?,
 }
 
 return {}

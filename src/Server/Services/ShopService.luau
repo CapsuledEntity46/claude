@@ -2,34 +2,41 @@
 --[[
 	ShopService
 	-----------
-	Closes the economy loop: Cash -> seeds -> crops -> Cash.
+	Closes the economy loop: Cash -> items -> Cash.
 
-	Buying uses GameConfig SeedPrice, selling uses SellPrice. Both go through
-	PlayerDataService's atomic mutators, so money and items can never diverge.
+	Every transaction goes through ONE entry point:
+
+		ProcessTransaction(actionType, itemId, amount)   -- "Buy" | "Sell"
+
+	The service is completely category-agnostic. It never asks whether an id is
+	a seed, a crop or a side of beef - it looks the id up in the master
+	directory (GameConfig.Items) and reads BuyPrice / SellPrice / MaxStack from
+	there. Registering a new item in the directory makes it tradeable with no
+	change to this file, and an item with a nil price is simply not tradeable in
+	that direction.
 
 	TRANSACTION RULES
 	-----------------
-	1. The client sends intent only - a seed id and a quantity. Prices, level
-	   gates and stack limits all come from GameConfig on the server. A client
-	   cannot propose a price.
+	1. The client sends intent only - an action, an item id and an amount.
+	   Prices, level gates and stack limits all resolve server-side from the
+	   directory. A client cannot propose a price.
 	2. Capacity is checked BEFORE money moves, so the happy path never needs a
-	   refund. The refund branches that remain are defence in depth, not the
-	   expected flow.
-	3. Every quantity is sanitised to a positive integer and clamped to a
-	   per-request cap. That bounds the arithmetic as much as the economy:
-	   unbounded quantities push intermediate products past the range where
-	   doubles represent integers exactly.
+	   refund. The refund branches that remain are defence in depth.
+	3. Amounts are sanitised to a positive integer and clamped to a per-request
+	   cap. That bounds the arithmetic as much as the economy: unbounded amounts
+	   push intermediate products past the range where doubles represent
+	   integers exactly.
 	4. Selling respects the Cash ceiling precisely rather than letting AddCash
-	   clamp. Clamping would consume crops for less than they are worth, which
+	   clamp. Clamping would consume goods for less than they are worth, which
 	   looks exactly like theft to the player.
 	5. Handlers return a result table, never an error. An erroring
 	   OnServerInvoke surfaces on the client as a thrown error and advertises an
 	   unhandled path.
 
 	Failure reasons are stable codes for the UI to map to copy:
-	  NoData, InvalidSeed, InvalidCrop, InvalidQuantity, LevelTooLow,
-	  NotEnoughCash, NotEnoughCrops, StackFull, CashCapped, NothingToSell,
-	  RateLimited, InternalError
+	  NoData, InvalidAction, InvalidItem, InvalidAmount, NotPurchasable,
+	  NotSellable, LevelTooLow, NotEnoughCash, NotEnoughItems, StackFull,
+	  CashCapped, NothingToSell, RateLimited, InternalError
 ]]
 
 local Players = game:GetService("Players")
@@ -44,18 +51,20 @@ local Signal = require(Shared.Signal)
 
 local PlayerDataService = require(script.Parent.PlayerDataService)
 
+local ACTIONS = GameConfig.TransactionActions
+
 local ShopService = {}
 
 ShopService._started = false
 ShopService._limiter = nil
 
---- (player, seedId, quantity, totalCost)
-ShopService.SeedPurchased = Signal.new()
---- (player, cropId, quantity, totalEarned)
-ShopService.CropSold = Signal.new()
+--- (player, itemId, amount, totalCost)
+ShopService.ItemBought = Signal.new()
+--- (player, itemId, amount, totalEarned)
+ShopService.ItemSold = Signal.new()
 
 --------------------------------------------------------------------------------
--- Result helpers
+-- Helpers
 --------------------------------------------------------------------------------
 
 local function failure(reason: string)
@@ -68,13 +77,13 @@ local function success(fields: { [string]: any })
 end
 
 --[[
-	Coerces an untrusted quantity into a positive integer, clamped to `maximum`.
-	Returns nil when the input could not be a quantity at all.
+	Coerces an untrusted amount into a positive integer, clamped to `maximum`.
+	Returns nil when the input could not be an amount at all.
 
-	Rejects NaN (it fails the self-comparison inside the finite check) and
-	infinity (which survives math.floor and would poison every later product).
+	Rejects NaN (it fails the self-comparison) and infinity (which survives
+	math.floor and would poison every later product).
 ]]
-local function sanitizeQuantity(value: unknown, maximum: number): number?
+local function sanitizeAmount(value: unknown, maximum: number): number?
 	local number = tonumber(value)
 
 	if number == nil or number ~= number or number == math.huge or number == -math.huge then
@@ -91,49 +100,39 @@ local function sanitizeQuantity(value: unknown, maximum: number): number?
 end
 
 --------------------------------------------------------------------------------
--- Buying
+-- Buy
 --------------------------------------------------------------------------------
 
---[[
-	Buys `quantity` of `seedId`, charging SeedPrice each.
-
-	Safe to call directly from server code (NPCs, quest rewards, tutorials);
-	the remote handler is only a thin validated wrapper around it.
-]]
-function ShopService:BuySeed(player: Player, seedId: unknown, quantity: unknown)
-	local data = PlayerDataService:GetData(player)
-	if not data then
-		return failure("NoData")
+function ShopService:_buy(player: Player, item, amount: unknown)
+	if not GameConfig.IsBuyable(item) then
+		return failure("NotPurchasable")
 	end
 
-	local seed = GameConfig.GetSeed(seedId)
-	if not seed then
-		return failure("InvalidSeed")
+	local quantity = sanitizeAmount(amount, GameConfig.Shop.MaxBuyAmount)
+	if not quantity then
+		return failure("InvalidAmount")
 	end
 
-	local amount = sanitizeQuantity(quantity, GameConfig.Shop.MaxBuyQuantity)
-	if not amount then
-		return failure("InvalidQuantity")
-	end
-
-	if PlayerDataService:GetLevel(player) < seed.RequiredLevel then
+	-- Level gating is a property of the item (via its plantable entry), not of
+	-- the shop, so future gated items need no change here.
+	if PlayerDataService:GetLevel(player) < GameConfig.GetRequiredLevel(item.Id) then
 		return failure("LevelTooLow")
 	end
 
-	-- Capacity first: taking money for seeds that cannot fit would require a
+	-- Capacity first: taking money for goods that cannot fit would require a
 	-- refund, and a refund is a second chance to get the accounting wrong.
-	local held = PlayerDataService:GetItemCount(player, "Seeds", seed.Id)
-	if held + amount > GameConfig.Inventory.MaxStack then
+	local held = PlayerDataService:GetItemCount(player, item.Id)
+	if held + quantity > item.MaxStack then
 		return failure("StackFull")
 	end
 
-	local totalCost = seed.SeedPrice * amount
+	local totalCost = item.BuyPrice * quantity
 
 	if not PlayerDataService:TrySpendCash(player, totalCost) then
 		return failure("NotEnoughCash")
 	end
 
-	local newHeld = PlayerDataService:AddItem(player, "Seeds", seed.Id, amount)
+	local newHeld = PlayerDataService:AddItem(player, item.Id, quantity)
 
 	if not newHeld then
 		-- Unreachable given the capacity check above. If it ever fires, give
@@ -143,12 +142,13 @@ function ShopService:BuySeed(player: Player, seedId: unknown, quantity: unknown)
 		return failure("StackFull")
 	end
 
-	PlayerDataService:IncrementStat(player, "TotalSeedsBought", amount)
-	self.SeedPurchased:Fire(player, seed.Id, amount, totalCost)
+	PlayerDataService:IncrementStat(player, "TotalItemsBought", quantity)
+	self.ItemBought:Fire(player, item.Id, quantity, totalCost)
 
 	return success({
-		SeedId = seed.Id,
-		Quantity = amount,
+		Action = ACTIONS.Buy,
+		ItemId = item.Id,
+		Amount = quantity,
 		Spent = totalCost,
 		Held = newHeld,
 		Cash = PlayerDataService:GetCash(player),
@@ -156,103 +156,129 @@ function ShopService:BuySeed(player: Player, seedId: unknown, quantity: unknown)
 end
 
 --------------------------------------------------------------------------------
--- Selling
+-- Sell
 --------------------------------------------------------------------------------
 
---[[
-	Sells `quantity` harvested crops of `cropId` at SellPrice each.
-
-	Crops are keyed by the same ids as seeds, so GameConfig.GetSeed is the
-	validator for both.
-]]
-function ShopService:SellCrop(player: Player, cropId: unknown, quantity: unknown)
-	local data = PlayerDataService:GetData(player)
-	if not data then
-		return failure("NoData")
+function ShopService:_sell(player: Player, item, amount: unknown)
+	if not GameConfig.IsSellable(item) then
+		return failure("NotSellable")
 	end
 
-	local seed = GameConfig.GetSeed(cropId)
-	if not seed then
-		return failure("InvalidCrop")
+	local quantity = sanitizeAmount(amount, GameConfig.Shop.MaxSellAmount)
+	if not quantity then
+		return failure("InvalidAmount")
 	end
 
-	local amount = sanitizeQuantity(quantity, GameConfig.Shop.MaxSellQuantity)
-	if not amount then
-		return failure("InvalidQuantity")
-	end
-
-	local held = PlayerDataService:GetItemCount(player, "Crops", seed.Id)
-	if held < amount then
-		return failure("NotEnoughCrops")
+	local held = PlayerDataService:GetItemCount(player, item.Id)
+	if held < quantity then
+		return failure("NotEnoughItems")
 	end
 
 	-- Sell only as much as the Cash ceiling can actually pay for. Letting
-	-- AddCash clamp instead would take the crops and silently underpay.
+	-- AddCash clamp instead would take the goods and silently underpay.
 	local headroom = GameConfig.Economy.MaxCash - PlayerDataService:GetCash(player)
-	local affordable = math.floor(headroom / seed.SellPrice)
+	local affordable = math.floor(headroom / item.SellPrice)
 
 	if affordable < 1 then
 		return failure("CashCapped")
 	end
 
-	amount = math.min(amount, affordable)
-	local totalEarned = seed.SellPrice * amount
+	quantity = math.min(quantity, affordable)
+	local totalEarned = item.SellPrice * quantity
 
-	if not PlayerDataService:RemoveItem(player, "Crops", seed.Id, amount) then
-		return failure("NotEnoughCrops")
+	if not PlayerDataService:RemoveItem(player, item.Id, quantity) then
+		return failure("NotEnoughItems")
 	end
 
 	if not PlayerDataService:AddCash(player, totalEarned) then
-		-- Put the crops back; never destroy goods we failed to pay for.
-		PlayerDataService:AddItem(player, "Crops", seed.Id, amount)
-		warn(`[ShopService] Returned {amount}x {seed.Id} to {player.Name}: payout failed`)
+		-- Put the goods back; never destroy something we failed to pay for.
+		PlayerDataService:AddItem(player, item.Id, quantity)
+		warn(`[ShopService] Returned {quantity}x {item.Id} to {player.Name}: payout failed`)
 		return failure("InternalError")
 	end
 
-	PlayerDataService:IncrementStat(player, "TotalCropsSold", amount)
-	self.CropSold:Fire(player, seed.Id, amount, totalEarned)
+	PlayerDataService:IncrementStat(player, "TotalItemsSold", quantity)
+	self.ItemSold:Fire(player, item.Id, quantity, totalEarned)
 
 	return success({
-		CropId = seed.Id,
-		Quantity = amount,
+		Action = ACTIONS.Sell,
+		ItemId = item.Id,
+		Amount = quantity,
 		Earned = totalEarned,
-		Held = PlayerDataService:GetItemCount(player, "Crops", seed.Id),
+		Held = PlayerDataService:GetItemCount(player, item.Id),
 		Cash = PlayerDataService:GetCash(player),
 	})
 end
 
---[[
-	Sells every harvested crop the player holds.
+--------------------------------------------------------------------------------
+-- Public API
+--------------------------------------------------------------------------------
 
-	Iteration is sorted by crop id because Luau dictionary order is unspecified
-	- without it, a player at the Cash ceiling would have an arbitrary subset of
-	their crops sold, differing between calls.
+--[[
+	The single transaction entry point.
+
+	Safe to call directly from server code (NPCs, quest rewards, tutorials); the
+	remote handler is only a thin throttled wrapper around it.
 ]]
-function ShopService:SellAllCrops(player: Player)
+function ShopService:ProcessTransaction(player: Player, actionType: unknown, itemId: unknown, amount: unknown)
 	local data = PlayerDataService:GetData(player)
 	if not data then
 		return failure("NoData")
 	end
 
-	local inventory = PlayerDataService:GetInventory(player, "Crops")
-
-	local cropIds = {}
-	for cropId in inventory do
-		table.insert(cropIds, cropId)
+	if actionType ~= ACTIONS.Buy and actionType ~= ACTIONS.Sell then
+		return failure("InvalidAction")
 	end
-	table.sort(cropIds)
+
+	local item = GameConfig.GetItem(itemId)
+	if not item then
+		return failure("InvalidItem")
+	end
+
+	if actionType == ACTIONS.Buy then
+		return self:_buy(player, item, amount)
+	end
+
+	return self:_sell(player, item, amount)
+end
+
+--[[
+	Sells every sellable item the player holds.
+
+	Kept separate from ProcessTransaction because it is an aggregate operation,
+	not a single-item transaction. Iteration is sorted by item id because Luau
+	dictionary order is unspecified - without it, a player at the Cash ceiling
+	would have an arbitrary subset of their goods sold, differing between calls.
+]]
+function ShopService:SellAll(player: Player)
+	local data = PlayerDataService:GetData(player)
+	if not data then
+		return failure("NoData")
+	end
+
+	local inventory = PlayerDataService:GetInventory(player)
+
+	local itemIds = {}
+	for itemId in inventory do
+		local item = GameConfig.GetItem(itemId)
+
+		if item and GameConfig.IsSellable(item) then
+			table.insert(itemIds, itemId)
+		end
+	end
+	table.sort(itemIds)
 
 	local totalEarned, totalSold = 0, 0
 	local breakdown = {}
 	local lastReason = nil
 
-	for _, cropId in cropIds do
-		local result = self:SellCrop(player, cropId, inventory[cropId])
+	for _, itemId in itemIds do
+		local result = self:ProcessTransaction(player, ACTIONS.Sell, itemId, inventory[itemId])
 
 		if result.Ok then
 			totalEarned += result.Earned
-			totalSold += result.Quantity
-			breakdown[cropId] = result.Quantity
+			totalSold += result.Amount
+			breakdown[itemId] = result.Amount
 		else
 			lastReason = result.Reason
 		end
@@ -265,21 +291,28 @@ function ShopService:SellAllCrops(player: Player)
 	end
 
 	return success({
-		Quantity = totalSold,
+		Amount = totalSold,
 		Earned = totalEarned,
 		Sold = breakdown,
 		Cash = PlayerDataService:GetCash(player),
 	})
 end
 
---------------------------------------------------------------------------------
--- Catalog
---------------------------------------------------------------------------------
-
---- Seeds this player can currently buy, cheapest first. The client can derive
---- the same list from GameConfig; this exists for server-side callers.
+--- Items this player may currently buy, for server-side callers. The client
+--- derives the same list from GameConfig without a round trip.
 function ShopService:GetCatalog(player: Player)
-	return GameConfig.GetPurchasableSeeds(PlayerDataService:GetLevel(player))
+	local level = PlayerDataService:GetLevel(player)
+	local catalog = {}
+
+	for _, category in GameConfig.ItemCategories do
+		for _, item in GameConfig.GetItemsByCategory(category) do
+			if GameConfig.IsBuyable(item) and level >= GameConfig.GetRequiredLevel(item.Id) then
+				table.insert(catalog, item)
+			end
+		end
+	end
+
+	return catalog
 end
 
 --------------------------------------------------------------------------------
@@ -322,25 +355,23 @@ function ShopService:Start()
 
 	self._limiter = RateLimiter.new(GameConfig.Shop.RequestsPerSecond, GameConfig.Shop.BurstSize)
 
-	local buySeed = Remotes.GetFunction(GameConfig.RemoteNames.BuySeed)
-	local sellCrop = Remotes.GetFunction(GameConfig.RemoteNames.SellCrop)
-	local sellAllCrops = Remotes.GetFunction(GameConfig.RemoteNames.SellAllCrops)
+	local processTransaction = Remotes.GetFunction(GameConfig.RemoteNames.ProcessTransaction)
+	local sellAll = Remotes.GetFunction(GameConfig.RemoteNames.SellAll)
 
-	buySeed.OnServerInvoke = function(player: Player, seedId: unknown, quantity: unknown)
+	processTransaction.OnServerInvoke = function(
+		player: Player,
+		actionType: unknown,
+		itemId: unknown,
+		amount: unknown
+	)
 		return self:_handle(player, function()
-			return self:BuySeed(player, seedId, quantity)
+			return self:ProcessTransaction(player, actionType, itemId, amount)
 		end)
 	end
 
-	sellCrop.OnServerInvoke = function(player: Player, cropId: unknown, quantity: unknown)
+	sellAll.OnServerInvoke = function(player: Player)
 		return self:_handle(player, function()
-			return self:SellCrop(player, cropId, quantity)
-		end)
-	end
-
-	sellAllCrops.OnServerInvoke = function(player: Player)
-		return self:_handle(player, function()
-			return self:SellAllCrops(player)
+			return self:SellAll(player)
 		end)
 	end
 

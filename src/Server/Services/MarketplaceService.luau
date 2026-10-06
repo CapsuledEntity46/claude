@@ -95,7 +95,7 @@ end
 function MarketplaceService._grantGrowthBoost(player: Player, product): boolean
 	local itemId = GameConfig.Monetization.GrowthBoostItemId
 
-	if not PlayerDataService:AddItem(player, "Boosts", itemId, product.Amount) then
+	if not PlayerDataService:AddItem(player, itemId, product.Amount) then
 		return false
 	end
 

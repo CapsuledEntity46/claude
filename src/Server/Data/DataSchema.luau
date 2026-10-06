@@ -13,6 +13,12 @@
 	   add a migration function keyed by the version you are migrating *from*.
 	3. REMOVING a field -> delete it from Template and strip it in a migration,
 	   otherwise stale keys linger in saved data forever.
+
+	NEVER put a consumable starting item in Template. Reconcile backfills
+	template keys on every load, and inventory entries are deleted at zero, so a
+	starter item in Template is re-granted every time a player logs in having
+	spent it. Starting items belong in GameConfig.StarterKit, which is granted
+	once behind the StarterKitGranted flag.
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -52,43 +58,35 @@ DataSchema.Template = {
 	Cash = GameConfig.Economy.StartingCash,
 	Level = 1,
 	XP = 0,
-
-	-- Granted free to new players. Because this field is added via Reconcile,
-	-- anyone who saved before it existed also receives the starting amount on
-	-- their next load, which is the intended behaviour for a new currency.
 	RevengeTokens = GameConfig.Economy.StartingRevengeTokens,
 
 	--[[
-		PurchaseIds of Developer Product receipts this player has already been
-		granted, oldest first.
+		Flat inventory: item id -> amount, for EVERY category.
 
-		This is the idempotency ledger for MarketplaceService. ProcessReceipt is
-		retried until it returns PurchaseGranted, so without a durable record of
-		what was already honoured, one payment can be granted many times.
+		Nothing here knows whether an id is a seed, a crop or a side of beef;
+		that lives on the item definition in GameConfig.Items. Adding a new
+		category needs no change to storage, replication or this schema.
+
+		Entries are deleted when they reach zero so saved data stays compact -
+		which is exactly why starting items must not live in this template.
 	]]
-	PurchaseHistory = {},
+	Inventory = {},
 
-	-- Seed/crop id -> amount. Entries are removed entirely when they hit zero
-	-- so the saved table never accumulates dead keys.
-	Inventory = {
-		Seeds = {
-			Carrot = 3,
-		},
-		Crops = {},
-	},
+	-- Set the first time a profile loads, so the starter kit is granted once.
+	StarterKitGranted = false,
 
 	--[[
 		Planted crops, keyed by STRINGIFIED plot index:
-			Plots = { ["1"] = { SeedId = "Carrot", PlantedAt = 1700000000 } }
+			Plots = { ["1"] = { SeedId = "CarrotSeed", PlantedAt = 1700000000 } }
 
 		String keys are deliberate. DataStores serialise through JSON, which
-		does not round-trip sparse integer keys - a table with holes comes back
-		with string keys anyway. Using strings from the start keeps the saved
-		and in-memory shapes identical.
-
-		Growth is derived from PlantedAt, so crops keep growing while offline.
+		does not round-trip sparse integer keys. Growth is derived from
+		PlantedAt, so crops keep growing while offline.
 	]]
 	Plots = {},
+
+	-- PurchaseIds already granted, oldest first: the receipt idempotency ledger.
+	PurchaseHistory = {},
 
 	Stats = {
 		TotalHarvested = 0,
@@ -99,8 +97,8 @@ DataSchema.Template = {
 		LastSeen = 0,
 		RobuxSpent = 0,
 		PurchasesProcessed = 0,
-		TotalSeedsBought = 0,
-		TotalCropsSold = 0,
+		TotalItemsBought = 0,
+		TotalItemsSold = 0,
 	},
 }
 
@@ -109,19 +107,89 @@ DataSchema.Template = {
 --------------------------------------------------------------------------------
 
 --[[
-	Each entry transforms data saved at version N into version N + 1, in place.
-	Migrations run in sequence, so a player returning from version 1 to version
-	4 passes through every intermediate step.
-
-	Example of what a real migration looks like:
-
-	[1] = function(data)
-		-- v1 stored a flat inventory; v2 buckets it by category.
-		local flat = data.Inventory
-		data.Inventory = { Seeds = flat, Crops = {} }
-	end,
+	v1 stored seeds and crops under the same id, separated by inventory bucket
+	(Inventory.Seeds.Carrot vs Inventory.Crops.Carrot). A flat namespace cannot
+	represent that, so seeds gained an explicit "...Seed" id.
 ]]
-DataSchema.Migrations = {}
+local V1_SEED_RENAMES = {
+	Carrot = "CarrotSeed",
+	Tomato = "TomatoSeed",
+	Pumpkin = "PumpkinSeed",
+	Watermelon = "WatermelonSeed",
+	GoldenApple = "GoldenAppleSeed",
+	Starfruit = "StarfruitSeed",
+}
+
+DataSchema.Migrations = {
+	--[[
+		v1 -> v2: flatten the bucketed inventory into a single item-id map.
+
+		  Inventory = { Seeds = {Carrot=3}, Crops = {Carrot=1}, Boosts = {...} }
+		    becomes
+		  Inventory = { CarrotSeed = 3, Carrot = 1, GrowthBoost = ... }
+
+		Seed ids are renamed so they no longer collide with the crop they yield,
+		and planted plots are re-pointed at the new seed ids. Crop and boost ids
+		are unchanged.
+	]]
+	[1] = function(data)
+		local old = data.Inventory
+
+		if type(old) == "table" then
+			local flat = {}
+
+			local function absorb(bucketName: string, rename: boolean)
+				local bucket = old[bucketName]
+				if type(bucket) ~= "table" then
+					return
+				end
+
+				for itemId, amount in bucket do
+					if type(itemId) ~= "string" then
+						continue
+					end
+
+					local count = tonumber(amount)
+					if count == nil then
+						continue
+					end
+
+					local newId = if rename then V1_SEED_RENAMES[itemId] or itemId else itemId
+					flat[newId] = (flat[newId] or 0) + count
+				end
+			end
+
+			absorb("Seeds", true)
+			absorb("Crops", false)
+			absorb("Boosts", false)
+
+			data.Inventory = flat
+		else
+			data.Inventory = {}
+		end
+
+		-- Planted plots referenced seeds by the old id.
+		if type(data.Plots) == "table" then
+			for _, entry in data.Plots do
+				if type(entry) == "table" and type(entry.SeedId) == "string" then
+					entry.SeedId = V1_SEED_RENAMES[entry.SeedId] or entry.SeedId
+				end
+			end
+		end
+
+		-- v1 players already own their starter seeds; granting again would be a
+		-- windfall on the first v2 load.
+		data.StarterKitGranted = true
+
+		-- Shop counters became category-agnostic.
+		if type(data.Stats) == "table" then
+			data.Stats.TotalItemsBought = tonumber(data.Stats.TotalSeedsBought) or 0
+			data.Stats.TotalItemsSold = tonumber(data.Stats.TotalCropsSold) or 0
+			data.Stats.TotalSeedsBought = nil
+			data.Stats.TotalCropsSold = nil
+		end
+	end,
+}
 
 --- Brings `data` up to the current schema version, running each migration in
 --- order. Returns true when the data was modified.
@@ -167,14 +235,36 @@ function DataSchema.Normalize(data: { [string]: any }): { [string]: any }
 		0,
 		GameConfig.Economy.MaxRevengeTokens
 	)
+	data.StarterKitGranted = data.StarterKitGranted == true
 	data.SchemaVersion = DataSchema.Version
+
+	--------------------------------------------------------------------------
+	-- Inventory
+	--------------------------------------------------------------------------
+
+	if type(data.Inventory) ~= "table" then
+		data.Inventory = {}
+	end
+
+	for itemId, amount in data.Inventory do
+		local item = GameConfig.GetItem(itemId)
+		local count = toFiniteNumber(amount)
+
+		-- Unknown ids are dropped: the master directory is the authority on
+		-- what can exist, so removed or renamed content cannot linger.
+		if item == nil or count == nil or math.floor(count) <= 0 then
+			data.Inventory[itemId] = nil
+		else
+			data.Inventory[itemId] = math.min(math.floor(count), item.MaxStack)
+		end
+	end
 
 	--------------------------------------------------------------------------
 	-- Purchase ledger
 	--------------------------------------------------------------------------
 
-	-- Must stay a dense array of strings: it is both JSON-safe that way and
-	-- searched with table.find during receipt processing.
+	-- Must stay a dense array of strings: JSON-safe that way, and searched with
+	-- table.find during receipt processing.
 	if type(data.PurchaseHistory) ~= "table" then
 		data.PurchaseHistory = {}
 	end
@@ -187,42 +277,11 @@ function DataSchema.Normalize(data: { [string]: any }): { [string]: any }
 		end
 	end
 
-	-- Trim oldest first if the cap shrank between versions.
 	while #history > GameConfig.Monetization.MaxPurchaseHistory do
 		table.remove(history, 1)
 	end
 
 	data.PurchaseHistory = history
-
-	if type(data.Inventory) ~= "table" then
-		data.Inventory = TableUtil.DeepCopy(DataSchema.Template.Inventory)
-	end
-
-	for _, category in GameConfig.InventoryCategories do
-		local bucket = data.Inventory[category]
-
-		if type(bucket) ~= "table" then
-			data.Inventory[category] = {}
-			continue
-		end
-
-		for itemId, amount in bucket do
-			local count = toFiniteNumber(amount)
-
-			if type(itemId) ~= "string" or count == nil or math.floor(count) <= 0 then
-				bucket[itemId] = nil
-			else
-				bucket[itemId] = math.min(math.floor(count), GameConfig.Inventory.MaxStack)
-			end
-		end
-	end
-
-	-- Drop buckets that are no longer part of the schema.
-	for category in data.Inventory do
-		if not GameConfig.IsValidCategory(category) then
-			data.Inventory[category] = nil
-		end
-	end
 
 	--------------------------------------------------------------------------
 	-- Plots
@@ -240,14 +299,14 @@ function DataSchema.Normalize(data: { [string]: any }): { [string]: any }
 		local plantedAt = if type(entry) == "table" then toFiniteNumber(entry.PlantedAt) else nil
 
 		-- Drop anything that would not map onto a real plot, or that names a
-		-- seed which no longer exists in GameConfig (removed/renamed content).
+		-- seed which no longer exists in GameConfig.
 		local isUsable = type(key) == "string"
 			and index ~= nil
 			and index == math.floor(index)
 			and index >= 1
 			and index <= plotCount
 			and plantedAt ~= nil
-			and GameConfig.GetSeed(entry.SeedId) ~= nil
+			and GameConfig.GetPlantable(entry.SeedId) ~= nil
 
 		if not isUsable then
 			data.Plots[key] = nil
@@ -257,10 +316,40 @@ function DataSchema.Normalize(data: { [string]: any }): { [string]: any }
 		-- A PlantedAt in the future would stall growth forever, which is both a
 		-- clock-skew symptom and an obvious tamper target.
 		entry.PlantedAt = math.min(math.floor(plantedAt), now)
-		entry.SeedId = GameConfig.GetSeed(entry.SeedId).Id
 	end
 
 	return data
+end
+
+--------------------------------------------------------------------------------
+-- Starter kit
+--------------------------------------------------------------------------------
+
+--[[
+	Grants GameConfig.StarterKit exactly once per profile and marks it granted.
+	Returns true if anything was granted.
+
+	Writes straight into the data table rather than going through
+	PlayerDataService's mutators, because it runs before the profile is
+	published and before any replication or signals exist for it.
+]]
+function DataSchema.GrantStarterKit(data: { [string]: any }): boolean
+	if data.StarterKitGranted then
+		return false
+	end
+
+	data.StarterKitGranted = true
+
+	for itemId, amount in GameConfig.StarterKit do
+		local item = GameConfig.GetItem(itemId)
+
+		if item then
+			local current = data.Inventory[itemId] or 0
+			data.Inventory[itemId] = math.min(current + amount, item.MaxStack)
+		end
+	end
+
+	return true
 end
 
 return DataSchema

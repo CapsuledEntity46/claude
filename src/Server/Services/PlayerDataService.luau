@@ -14,10 +14,14 @@
 	Scalars replicate as attributes on the Player instance:
 		Cash, Level, XP, XPToNextLevel, DataLoaded
 
-	Inventory replicates as attributes on folders, because attributes cannot
-	hold tables:
-		Player/Inventory/Seeds   -> attribute per seed id, value = amount
-		Player/Inventory/Crops   -> attribute per crop id, value = amount
+	Inventory replicates as attributes on one flat folder, because attributes
+	cannot hold tables:
+		Player/Inventory  -> one attribute per ITEM ID, value = amount
+
+	The inventory is deliberately category-agnostic: it stores `Egg = 4` the
+	same way it stores `CarrotSeed = 3`. Whether an id is a seed, a crop or a
+	side of beef is a property of GameConfig.Items, not of storage. A new
+	category therefore needs no change here at all.
 
 	Clients therefore need zero remotes to read state; they listen to
 	GetAttributeChangedSignal and AttributeChanged. Attributes replicate
@@ -66,7 +70,7 @@ PlayerDataService.CashChanged = Signal.new() -- (player, newCash, delta)
 PlayerDataService.RevengeTokensChanged = Signal.new() -- (player, newTotal, delta)
 PlayerDataService.XPChanged = Signal.new() -- (player, newXP, delta)
 PlayerDataService.LevelChanged = Signal.new() -- (player, newLevel, previousLevel)
-PlayerDataService.InventoryChanged = Signal.new() -- (player, category, itemId, newAmount, delta)
+PlayerDataService.InventoryChanged = Signal.new() -- (player, itemId, newAmount, delta)
 
 --------------------------------------------------------------------------------
 -- Validation helpers
@@ -94,13 +98,8 @@ end
 -- Replication
 --------------------------------------------------------------------------------
 
-local function getInventoryFolder(player: Player, category: string): Folder?
-	local root = player:FindFirstChild(GameConfig.InventoryFolderName)
-	if not root then
-		return nil
-	end
-
-	return root:FindFirstChild(category) :: Folder?
+local function getInventoryFolder(player: Player): Folder?
+	return player:FindFirstChild(GameConfig.InventoryFolderName) :: Folder?
 end
 
 local function buildReplicationContainers(player: Player)
@@ -118,15 +117,9 @@ local function buildReplicationContainers(player: Player)
 
 	leaderstats.Parent = player
 
+	-- One flat folder for every item id, regardless of category.
 	local inventory = Instance.new("Folder")
 	inventory.Name = GameConfig.InventoryFolderName
-
-	for _, category in GameConfig.InventoryCategories do
-		local bucket = Instance.new("Folder")
-		bucket.Name = category
-		bucket.Parent = inventory
-	end
-
 	inventory.Parent = player
 end
 
@@ -155,8 +148,8 @@ local function syncStats(player: Player, data: { [string]: any })
 	end
 end
 
-local function syncInventoryItem(player: Player, category: string, itemId: string, amount: number)
-	local folder = getInventoryFolder(player, category)
+local function syncInventoryItem(player: Player, itemId: string, amount: number)
+	local folder = getInventoryFolder(player)
 	if not folder then
 		return
 	end
@@ -167,19 +160,17 @@ local function syncInventoryItem(player: Player, category: string, itemId: strin
 end
 
 local function syncInventory(player: Player, data: { [string]: any })
-	for _, category in GameConfig.InventoryCategories do
-		local folder = getInventoryFolder(player, category)
-		if not folder then
-			continue
-		end
+	local folder = getInventoryFolder(player)
+	if not folder then
+		return
+	end
 
-		for itemId in folder:GetAttributes() do
-			folder:SetAttribute(itemId, nil)
-		end
+	for itemId in folder:GetAttributes() do
+		folder:SetAttribute(itemId, nil)
+	end
 
-		for itemId, amount in data.Inventory[category] or {} do
-			folder:SetAttribute(itemId, amount)
-		end
+	for itemId, amount in data.Inventory do
+		folder:SetAttribute(itemId, amount)
 	end
 end
 
@@ -228,6 +219,11 @@ function PlayerDataService:_onPlayerAdded(player: Player)
 	-- Monotonic clock, so play time cannot be skewed by wall-clock changes.
 	profile._sessionStart = os.clock()
 	self._profiles[player] = profile
+
+	-- Granted once per profile, before the first replication pass.
+	if DataSchema.GrantStarterKit(data) then
+		print(`[PlayerDataService] Granted starter kit to {player.Name}`)
+	end
 
 	syncStats(player, data)
 	syncInventory(player, data)
@@ -518,29 +514,40 @@ end
 -- Public API: inventory
 --------------------------------------------------------------------------------
 
-function PlayerDataService:GetItemCount(player: Player, category: string, itemId: string): number
+--[[
+	Every function below takes an ITEM ID and nothing else. There is no category
+	parameter by design: callers should not have to know, and must not be able to
+	disagree about, which bucket an item belongs to.
+
+	Unknown ids are rejected outright - GameConfig.Items is the authority on what
+	can exist, so a typo or a removed item fails loudly instead of creating a
+	phantom stack.
+]]
+function PlayerDataService:GetItemCount(player: Player, itemId: unknown): number
 	local data = self:GetData(player)
 
-	if not data or not GameConfig.IsValidCategory(category) or type(itemId) ~= "string" then
+	if not data or type(itemId) ~= "string" then
 		return 0
 	end
 
-	return data.Inventory[category][itemId] or 0
+	return data.Inventory[itemId] or 0
 end
 
-function PlayerDataService:HasItem(player: Player, category: string, itemId: string, amount: number?): boolean
-	return self:GetItemCount(player, category, itemId) >= (amount or 1)
+function PlayerDataService:HasItem(player: Player, itemId: unknown, amount: number?): boolean
+	return self:GetItemCount(player, itemId) >= (amount or 1)
 end
 
---- Adds items to a bucket. Returns the new amount, or nil when rejected.
-function PlayerDataService:AddItem(player: Player, category: string, itemId: string, amount: number?): number?
+--- Adds items, clamped to the item's own MaxStack. Returns the new amount, or
+--- nil when rejected.
+function PlayerDataService:AddItem(player: Player, itemId: unknown, amount: number?): number?
 	local data = self:GetData(player)
 	if not data then
 		return nil
 	end
 
-	if not GameConfig.IsValidCategory(category) or type(itemId) ~= "string" or itemId == "" then
-		warn(`[PlayerDataService] AddItem rejected invalid item {tostring(category)}/{tostring(itemId)}`)
+	local item = GameConfig.GetItem(itemId)
+	if not item then
+		warn(`[PlayerDataService] AddItem rejected unknown item id: {tostring(itemId)}`)
 		return nil
 	end
 
@@ -549,31 +556,30 @@ function PlayerDataService:AddItem(player: Player, category: string, itemId: str
 		return nil
 	end
 
-	local bucket = data.Inventory[category]
-	local previous = bucket[itemId] or 0
-	local updated = math.min(previous + quantity, GameConfig.Inventory.MaxStack)
+	local previous = data.Inventory[item.Id] or 0
+	local updated = math.min(previous + quantity, item.MaxStack)
 
 	if updated == previous then
 		return previous -- Stack is already full.
 	end
 
-	bucket[itemId] = updated
+	data.Inventory[item.Id] = updated
 
-	syncInventoryItem(player, category, itemId, updated)
-	self.InventoryChanged:Fire(player, category, itemId, updated, updated - previous)
+	syncInventoryItem(player, item.Id, updated)
+	self.InventoryChanged:Fire(player, item.Id, updated, updated - previous)
 
 	return updated
 end
 
 --- Atomically removes items. Returns true only when the player had enough;
 --- on false, nothing changed.
-function PlayerDataService:RemoveItem(player: Player, category: string, itemId: string, amount: number?): boolean
+function PlayerDataService:RemoveItem(player: Player, itemId: unknown, amount: number?): boolean
 	local data = self:GetData(player)
 	if not data then
 		return false
 	end
 
-	if not GameConfig.IsValidCategory(category) or type(itemId) ~= "string" then
+	if type(itemId) ~= "string" then
 		return false
 	end
 
@@ -582,32 +588,53 @@ function PlayerDataService:RemoveItem(player: Player, category: string, itemId: 
 		return false
 	end
 
-	local bucket = data.Inventory[category]
-	local previous = bucket[itemId] or 0
+	local previous = data.Inventory[itemId] or 0
 
 	if previous < quantity then
 		return false
 	end
 
 	local updated = previous - quantity
-	-- Drop the key entirely at zero so saved data stays compact.
-	bucket[itemId] = if updated > 0 then updated else nil
+	-- Drop the key entirely at zero so saved data stays compact. This is why
+	-- starting items must never live in the DataSchema template.
+	data.Inventory[itemId] = if updated > 0 then updated else nil
 
-	syncInventoryItem(player, category, itemId, updated)
-	self.InventoryChanged:Fire(player, category, itemId, updated, -quantity)
+	syncInventoryItem(player, itemId, updated)
+	self.InventoryChanged:Fire(player, itemId, updated, -quantity)
 
 	return true
 end
 
---- Snapshot of one inventory bucket.
-function PlayerDataService:GetInventory(player: Player, category: string): { [string]: number }
+--- Snapshot of the whole inventory: item id -> amount.
+function PlayerDataService:GetInventory(player: Player): { [string]: number }
+	local data = self:GetData(player)
+
+	if not data then
+		return {}
+	end
+
+	return TableUtil.DeepCopy(data.Inventory)
+end
+
+--- Snapshot filtered to one category, for UI and category-specific systems.
+function PlayerDataService:GetInventoryByCategory(player: Player, category: string): { [string]: number }
 	local data = self:GetData(player)
 
 	if not data or not GameConfig.IsValidCategory(category) then
 		return {}
 	end
 
-	return TableUtil.DeepCopy(data.Inventory[category])
+	local filtered = {}
+
+	for itemId, amount in data.Inventory do
+		local item = GameConfig.GetItem(itemId)
+
+		if item and item.Category == category then
+			filtered[itemId] = amount
+		end
+	end
+
+	return filtered
 end
 
 --------------------------------------------------------------------------------

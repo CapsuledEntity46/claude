@@ -194,16 +194,16 @@ function PlotService:_refreshPrompt(player: Player, plot: Model)
 
 	if seedId == "" or stage == EMPTY_STAGE then
 		local selected = self:_resolveSeedId(player)
-		local seed = GameConfig.GetSeed(selected)
+		local selectedItem = GameConfig.GetItem(selected)
 
 		prompt.Enabled = true
 		prompt.ActionText = "Plant"
-		prompt.ObjectText = if seed then seed.DisplayName else "No seeds"
+		prompt.ObjectText = if selectedItem then selectedItem.Name else "No seeds"
 		return
 	end
 
-	local seed = GameConfig.GetSeed(seedId)
-	local displayName = if seed then seed.DisplayName else seedId
+	local seedItem = GameConfig.GetItem(seedId)
+	local displayName = if seedItem then seedItem.Name else seedId
 
 	if Growth.IsMature(stage) then
 		prompt.Enabled = true
@@ -245,28 +245,27 @@ end
 function PlotService:_resolveSeedId(player: Player): string?
 	local level = PlayerDataService:GetLevel(player)
 	local selected = player:GetAttribute(GameConfig.Attributes.SelectedSeed)
-	local selectedSeed = GameConfig.GetSeed(selected)
+	local selectedPlantable = GameConfig.GetPlantable(selected)
 
 	if
-		selectedSeed
-		and level >= selectedSeed.RequiredLevel
-		and PlayerDataService:HasItem(player, "Seeds", selectedSeed.Id, 1)
+		selectedPlantable
+		and level >= selectedPlantable.RequiredLevel
+		and PlayerDataService:HasItem(player, selectedPlantable.SeedId, 1)
 	then
-		return selectedSeed.Id
+		return selectedPlantable.SeedId
 	end
 
 	local bestId, bestPrice = nil, nil
 
-	for seedId, amount in PlayerDataService:GetInventory(player, "Seeds") do
-		local seed = GameConfig.GetSeed(seedId)
-
-		if seed and amount > 0 and level >= seed.RequiredLevel then
-			local isBetter = bestPrice == nil
-				or seed.SeedPrice < bestPrice
-				or (seed.SeedPrice == bestPrice and seedId < bestId)
+	-- Iterate the plantable directory rather than the inventory, so the result
+	-- does not depend on inventory key order at all.
+	for _, plantable in GameConfig.GetAvailablePlantables(level) do
+		if PlayerDataService:HasItem(player, plantable.SeedId, 1) then
+			local price = GameConfig.Items[plantable.SeedId].BuyPrice or 0
+			local isBetter = bestPrice == nil or price < bestPrice or (price == bestPrice and plantable.SeedId < bestId)
 
 			if isBetter then
-				bestId, bestPrice = seedId, seed.SeedPrice
+				bestId, bestPrice = plantable.SeedId, price
 			end
 		end
 	end
@@ -307,15 +306,15 @@ function PlotService:_tryPlant(player: Player, plot: Model): boolean
 
 	-- _resolveSeedId already gates on level; re-checked here so this function is
 	-- safe to call directly from future systems (quests, tutorials, admin tools).
-	local seed = GameConfig.GetSeed(seedId)
-	if not seed or PlayerDataService:GetLevel(player) < seed.RequiredLevel then
+	local plantable = GameConfig.GetPlantable(seedId)
+	if not plantable or PlayerDataService:GetLevel(player) < plantable.RequiredLevel then
 		self.PlantFailed:Fire(player, index, "LevelTooLow")
 		return false
 	end
 
 	-- Atomic: consume the seed first, so a spammed prompt cannot plant twice
 	-- from one seed.
-	if not PlayerDataService:RemoveItem(player, "Seeds", seedId, 1) then
+	if not PlayerDataService:RemoveItem(player, seedId, 1) then
 		self.PlantFailed:Fire(player, index, "NoSeeds")
 		return false
 	end
@@ -345,8 +344,8 @@ function PlotService:_tryHarvest(player: Player, plot: Model): boolean
 		return false
 	end
 
-	local seed = GameConfig.GetSeed(entry.SeedId)
-	if not seed then
+	local plantable = GameConfig.GetPlantable(entry.SeedId)
+	if not plantable then
 		-- Seed was removed from the config; free the plot rather than trapping it.
 		data.Plots[plotKey(index)] = nil
 		self:_projectEmpty(plot)
@@ -363,18 +362,20 @@ function PlotService:_tryHarvest(player: Player, plot: Model): boolean
 
 	-- Grant the crop before clearing the plot: if the stack is full the player
 	-- keeps the crop in the ground rather than losing it.
-	if not PlayerDataService:AddItem(player, "Crops", entry.SeedId, 1) then
+	-- The seed decides what it yields and how much; harvest does not assume the
+	-- crop shares the seed's id.
+	if not PlayerDataService:AddItem(player, plantable.Yields, plantable.YieldAmount) then
 		return false
 	end
 
-	PlayerDataService:AddXP(player, seed.XPReward)
+	PlayerDataService:AddXP(player, plantable.XPReward)
 	PlayerDataService:IncrementStat(player, "TotalHarvested", 1)
 
 	data.Plots[plotKey(index)] = nil
 
 	self:_projectEmpty(plot)
 	self:_refreshPrompt(player, plot)
-	self.Harvested:Fire(player, index, entry.SeedId)
+	self.Harvested:Fire(player, index, plantable.Yields)
 
 	return true
 end
@@ -466,7 +467,7 @@ function PlotService:_assignGarden(player: Player, data: { [string]: any })
 		-- Restore whatever was growing when the player last logged out.
 		local entry = data.Plots[plotKey(index)]
 
-		if entry and GameConfig.GetSeed(entry.SeedId) then
+		if entry and GameConfig.GetPlantable(entry.SeedId) then
 			self:_projectPlanted(plot, entry.SeedId, entry.PlantedAt, now)
 		else
 			data.Plots[plotKey(index)] = nil
@@ -608,8 +609,8 @@ function PlotService:CompleteGrowth(player: Player, plotIndex: number?): boolean
 		return false
 	end
 
-	local seed = GameConfig.GetSeed(entry.SeedId)
-	if not seed then
+	local plantable = GameConfig.GetPlantable(entry.SeedId)
+	if not plantable then
 		return false
 	end
 
@@ -621,11 +622,11 @@ function PlotService:CompleteGrowth(player: Player, plotIndex: number?): boolean
 	end
 
 	-- Atomic: the consumable is spent before the effect is applied.
-	if not PlayerDataService:RemoveItem(player, "Boosts", GameConfig.Monetization.GrowthBoostItemId, 1) then
+	if not PlayerDataService:RemoveItem(player, GameConfig.Monetization.GrowthBoostItemId, 1) then
 		return false
 	end
 
-	entry.PlantedAt = now - seed.GrowTime
+	entry.PlantedAt = now - plantable.GrowTime
 
 	local plot = self:GetPlot(player, index)
 	if plot then
@@ -710,12 +711,12 @@ function PlotService:Start()
 			return
 		end
 
-		local seed = GameConfig.GetSeed(seedId)
-		if not seed then
+		local plantable = GameConfig.GetPlantable(seedId)
+		if not plantable then
 			return
 		end
 
-		player:SetAttribute(GameConfig.Attributes.SelectedSeed, seed.Id)
+		player:SetAttribute(GameConfig.Attributes.SelectedSeed, plantable.SeedId)
 		self:_refreshAllPrompts(player)
 	end)
 

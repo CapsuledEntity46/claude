@@ -4,23 +4,59 @@
 	----------
 	Single source of truth for tunable game values, shared by server and client.
 
-	Nothing in here is authoritative on its own: the server always validates
+	Nothing here is authoritative on its own: the server always validates
 	against these tables before mutating a profile. The client may read them
-	freely for UI purposes (prices, icons, XP bars) without a round trip.
+	freely for UI purposes (prices, stock, XP bars) without a round trip.
+
+	FRAMEWORK SHAPE
+	---------------
+	The directory is split by *concern*, not by content type, so new mechanics
+	bolt on without reshaping what exists:
+
+	  Items      - the MASTER DIRECTORY. Every tradeable/storable thing in the
+	               game, keyed by a globally unique item id. Carries only what
+	               is true of any item: display name, category, prices, stack
+	               size.
+	  Plantables - gardening behaviour, keyed by SEED item id. Carries GrowTime,
+	               XP, level gate, and what crop item it yields.
+
+	Future mechanics follow the same pattern and touch nothing above:
+
+	  Animals    - husbandry, keyed by animal id, `Produces = {"Egg", "Milk"}`
+	  Recipes    - crafting, keyed by output item id, `Inputs = {...}`
+	  Structures - RTS/survival building, keyed by structure id, `Cost = {...}`
+
+	The rule that keeps this scalable: **storage is flat, categorisation is
+	metadata**. Inventories are keyed by item id alone, and `Category` exists
+	for grouping in UI and queries - never for addressing storage. Adding
+	"AnimalDrops" therefore required no inventory change at all.
 ]]
 
 export type Rarity = "Common" | "Uncommon" | "Rare" | "Epic" | "Legendary"
 
-export type SeedDefinition = {
+export type ItemCategory = "Seeds" | "Crops" | "AnimalDrops" | "Boosts"
+
+export type ItemDefinition = {
 	Id: string,
-	DisplayName: string,
+	Name: string,
+	Category: ItemCategory,
+	-- nil means the shop will not buy/sell it. Both may be nil (for example a
+	-- Robux-only consumable, which lives in the directory for stacking and UI
+	-- purposes but is not tradeable for Cash).
+	BuyPrice: number?,
+	SellPrice: number?,
+	MaxStack: number,
 	Rarity: Rarity,
-	SeedPrice: number, -- Cash cost to buy one seed
-	SellPrice: number, -- Cash earned per harvested crop
-	GrowTime: number, -- Seconds from planting to fully grown
-	XPReward: number, -- XP granted on harvest
-	RequiredLevel: number, -- Level gate for purchasing/planting
-	Color: Color3, -- Used by crop models and UI chips
+}
+
+export type PlantableDefinition = {
+	SeedId: string, -- item id of the seed consumed when planting
+	Yields: string, -- item id of the crop produced on harvest
+	YieldAmount: number,
+	GrowTime: number, -- seconds from planting to fully grown
+	XPReward: number,
+	RequiredLevel: number, -- gates both buying and planting
+	Color: Color3, -- growing plant tint, also used by shop UI swatches
 }
 
 local GameConfig = {}
@@ -30,9 +66,9 @@ local GameConfig = {}
 --------------------------------------------------------------------------------
 
 GameConfig.Data = {
-	-- Bump this whenever the saved layout changes in a way that needs a
-	-- migration step in DataSchema.Migrations.
-	SchemaVersion = 1,
+	-- Bumped to 2 when the inventory was flattened from category buckets to a
+	-- single item-id map. See DataSchema.Migrations.
+	SchemaVersion = 2,
 
 	-- Changing the store name starts every player from scratch. Treat it as a
 	-- deliberate wipe, not a routine edit.
@@ -53,9 +89,21 @@ GameConfig.Economy = {
 	-- range where doubles stop representing integers exactly.
 	MaxCash = 1_000_000_000,
 
-	-- Every new player is granted these for free.
 	StartingRevengeTokens = 2,
 	MaxRevengeTokens = 9_999,
+}
+
+--[[
+	Items granted once, on a profile's first ever load.
+
+	This is deliberately NOT part of the DataSchema template. Template fields
+	are backfilled by Reconcile on every load, and because an inventory entry is
+	deleted when it reaches zero, a starter item in the template is re-granted
+	every time the player logs in having spent it - an infinite item exploit.
+	Granting from here behind the StarterKitGranted flag happens exactly once.
+]]
+GameConfig.StarterKit = {
+	CarrotSeed = 3,
 }
 
 --------------------------------------------------------------------------------
@@ -75,106 +123,214 @@ function GameConfig.GetXPForLevel(level: number): number
 		return math.huge
 	end
 
-	local base = GameConfig.Progression.BaseXP
-	local exponent = GameConfig.Progression.Exponent
-
-	return math.floor(base * (level ^ exponent))
+	return math.floor(GameConfig.Progression.BaseXP * (level ^ GameConfig.Progression.Exponent))
 end
 
 --------------------------------------------------------------------------------
--- Inventory
+-- Master item directory
 --------------------------------------------------------------------------------
 
--- Inventory is bucketed so that seeds, harvested crops and future item classes
--- never collide on an id. Each bucket replicates to the owning client as its
--- own attribute container.
-GameConfig.InventoryCategories = { "Seeds", "Crops", "Boosts" }
+-- Display order for category tabs in the shop UI.
+GameConfig.ItemCategories = { "Seeds", "Crops", "AnimalDrops", "Boosts" }
 
-GameConfig.Inventory = {
-	MaxStack = 9_999,
-}
+GameConfig.Items = {
+	--------------------------------------------------------------------------
+	-- Seeds: purchasable, not sellable (no buy-back arbitrage)
+	--------------------------------------------------------------------------
+	CarrotSeed = {
+		Id = "CarrotSeed",
+		Name = "Carrot Seed",
+		Category = "Seeds",
+		BuyPrice = 10,
+		SellPrice = nil,
+		MaxStack = 999,
+		Rarity = "Common",
+	},
+	TomatoSeed = {
+		Id = "TomatoSeed",
+		Name = "Tomato Seed",
+		Category = "Seeds",
+		BuyPrice = 25,
+		SellPrice = nil,
+		MaxStack = 999,
+		Rarity = "Common",
+	},
+	WheatSeed = {
+		Id = "WheatSeed",
+		Name = "Wheat Seed",
+		Category = "Seeds",
+		BuyPrice = 15,
+		SellPrice = nil,
+		MaxStack = 999,
+		Rarity = "Common",
+	},
+	PumpkinSeed = {
+		Id = "PumpkinSeed",
+		Name = "Pumpkin Seed",
+		Category = "Seeds",
+		BuyPrice = 80,
+		SellPrice = nil,
+		MaxStack = 999,
+		Rarity = "Uncommon",
+	},
+	WatermelonSeed = {
+		Id = "WatermelonSeed",
+		Name = "Watermelon Seed",
+		Category = "Seeds",
+		BuyPrice = 240,
+		SellPrice = nil,
+		MaxStack = 999,
+		Rarity = "Rare",
+	},
+	GoldenAppleSeed = {
+		Id = "GoldenAppleSeed",
+		Name = "Golden Apple Seed",
+		Category = "Seeds",
+		BuyPrice = 900,
+		SellPrice = nil,
+		MaxStack = 999,
+		Rarity = "Epic",
+	},
+	StarfruitSeed = {
+		Id = "StarfruitSeed",
+		Name = "Starfruit Seed",
+		Category = "Seeds",
+		BuyPrice = 3_500,
+		SellPrice = nil,
+		MaxStack = 999,
+		Rarity = "Legendary",
+	},
 
---------------------------------------------------------------------------------
--- Seeds
---------------------------------------------------------------------------------
-
-GameConfig.Seeds = {
+	--------------------------------------------------------------------------
+	-- Crops: harvested, sellable, never purchasable
+	--------------------------------------------------------------------------
 	Carrot = {
 		Id = "Carrot",
-		DisplayName = "Carrot",
-		Rarity = "Common",
-		SeedPrice = 10,
+		Name = "Carrot",
+		Category = "Crops",
+		BuyPrice = nil,
 		SellPrice = 25,
-		GrowTime = 30,
-		XPReward = 10,
-		RequiredLevel = 1,
-		Color = Color3.fromRGB(237, 139, 48),
+		MaxStack = 999,
+		Rarity = "Common",
 	},
 	Tomato = {
 		Id = "Tomato",
-		DisplayName = "Tomato",
-		Rarity = "Common",
-		SeedPrice = 25,
+		Name = "Tomato",
+		Category = "Crops",
+		BuyPrice = nil,
 		SellPrice = 60,
-		GrowTime = 60,
-		XPReward = 22,
-		RequiredLevel = 3,
-		Color = Color3.fromRGB(214, 61, 56),
+		MaxStack = 999,
+		Rarity = "Common",
+	},
+	Wheat = {
+		Id = "Wheat",
+		Name = "Wheat",
+		Category = "Crops",
+		BuyPrice = nil,
+		SellPrice = 40,
+		MaxStack = 999,
+		Rarity = "Common",
 	},
 	Pumpkin = {
 		Id = "Pumpkin",
-		DisplayName = "Pumpkin",
-		Rarity = "Uncommon",
-		SeedPrice = 80,
+		Name = "Pumpkin",
+		Category = "Crops",
+		BuyPrice = nil,
 		SellPrice = 210,
-		GrowTime = 150,
-		XPReward = 55,
-		RequiredLevel = 8,
-		Color = Color3.fromRGB(226, 132, 38),
+		MaxStack = 999,
+		Rarity = "Uncommon",
 	},
 	Watermelon = {
 		Id = "Watermelon",
-		DisplayName = "Watermelon",
-		Rarity = "Rare",
-		SeedPrice = 240,
+		Name = "Watermelon",
+		Category = "Crops",
+		BuyPrice = nil,
 		SellPrice = 660,
-		GrowTime = 320,
-		XPReward = 140,
-		RequiredLevel = 15,
-		Color = Color3.fromRGB(72, 160, 84),
+		MaxStack = 999,
+		Rarity = "Rare",
 	},
 	GoldenApple = {
 		Id = "GoldenApple",
-		DisplayName = "Golden Apple",
-		Rarity = "Epic",
-		SeedPrice = 900,
+		Name = "Golden Apple",
+		Category = "Crops",
+		BuyPrice = nil,
 		SellPrice = 2_600,
-		GrowTime = 600,
-		XPReward = 420,
-		RequiredLevel = 25,
-		Color = Color3.fromRGB(240, 199, 62),
+		MaxStack = 999,
+		Rarity = "Epic",
 	},
 	Starfruit = {
 		Id = "Starfruit",
-		DisplayName = "Starfruit",
-		Rarity = "Legendary",
-		SeedPrice = 3_500,
+		Name = "Starfruit",
+		Category = "Crops",
+		BuyPrice = nil,
 		SellPrice = 11_000,
-		GrowTime = 1_200,
-		XPReward = 1_250,
-		RequiredLevel = 40,
-		Color = Color3.fromRGB(126, 118, 224),
+		MaxStack = 999,
+		Rarity = "Legendary",
 	},
-} :: { [string]: SeedDefinition }
 
---- Returns the seed definition for `seedId`, or nil when the id is unknown.
---- Always use this instead of indexing GameConfig.Seeds with client input.
-function GameConfig.GetSeed(seedId: unknown): SeedDefinition?
-	if type(seedId) ~= "string" then
+	--------------------------------------------------------------------------
+	-- Animal drops: produced by husbandry (mechanic not built yet), sellable.
+	-- Present now so the shop, inventory and UI already handle them.
+	--------------------------------------------------------------------------
+	Egg = {
+		Id = "Egg",
+		Name = "Egg",
+		Category = "AnimalDrops",
+		BuyPrice = nil,
+		SellPrice = 30,
+		MaxStack = 999,
+		Rarity = "Common",
+	},
+	Milk = {
+		Id = "Milk",
+		Name = "Milk",
+		Category = "AnimalDrops",
+		BuyPrice = nil,
+		SellPrice = 45,
+		MaxStack = 999,
+		Rarity = "Common",
+	},
+	RawBeef = {
+		Id = "RawBeef",
+		Name = "Raw Beef",
+		Category = "AnimalDrops",
+		BuyPrice = nil,
+		SellPrice = 120,
+		MaxStack = 999,
+		Rarity = "Uncommon",
+	},
+	Leather = {
+		Id = "Leather",
+		Name = "Leather",
+		Category = "AnimalDrops",
+		BuyPrice = nil,
+		SellPrice = 90,
+		MaxStack = 999,
+		Rarity = "Uncommon",
+	},
+
+	--------------------------------------------------------------------------
+	-- Boosts: Robux-only, so neither buyable nor sellable for Cash
+	--------------------------------------------------------------------------
+	GrowthBoost = {
+		Id = "GrowthBoost",
+		Name = "Instant Grow",
+		Category = "Boosts",
+		BuyPrice = nil,
+		SellPrice = nil,
+		MaxStack = 99,
+		Rarity = "Epic",
+	},
+} :: { [string]: ItemDefinition }
+
+--- Resolves an untrusted item id. Returns nil for anything not in the
+--- directory, which every caller must treat as "reject".
+function GameConfig.GetItem(itemId: unknown): ItemDefinition?
+	if type(itemId) ~= "string" then
 		return nil
 	end
 
-	return GameConfig.Seeds[seedId]
+	return GameConfig.Items[itemId]
 end
 
 function GameConfig.IsValidCategory(category: unknown): boolean
@@ -182,7 +338,146 @@ function GameConfig.IsValidCategory(category: unknown): boolean
 		return false
 	end
 
-	return table.find(GameConfig.InventoryCategories, category) ~= nil
+	return table.find(GameConfig.ItemCategories, category) ~= nil
+end
+
+--- Items in a category, ordered by price then id so UI layout is stable.
+function GameConfig.GetItemsByCategory(category: string): { ItemDefinition }
+	local items = {}
+
+	for _, item in GameConfig.Items do
+		if item.Category == category then
+			table.insert(items, item)
+		end
+	end
+
+	table.sort(items, function(a, b)
+		local priceA = a.BuyPrice or a.SellPrice or 0
+		local priceB = b.BuyPrice or b.SellPrice or 0
+
+		if priceA == priceB then
+			return a.Id < b.Id
+		end
+		return priceA < priceB
+	end)
+
+	return items
+end
+
+function GameConfig.IsBuyable(item: ItemDefinition): boolean
+	return item.BuyPrice ~= nil
+end
+
+function GameConfig.IsSellable(item: ItemDefinition): boolean
+	return item.SellPrice ~= nil
+end
+
+--------------------------------------------------------------------------------
+-- Plantables (gardening behaviour, keyed by seed item id)
+--------------------------------------------------------------------------------
+
+GameConfig.Plantables = {
+	CarrotSeed = {
+		SeedId = "CarrotSeed",
+		Yields = "Carrot",
+		YieldAmount = 1,
+		GrowTime = 30,
+		XPReward = 10,
+		RequiredLevel = 1,
+		Color = Color3.fromRGB(237, 139, 48),
+	},
+	WheatSeed = {
+		SeedId = "WheatSeed",
+		Yields = "Wheat",
+		YieldAmount = 2,
+		GrowTime = 45,
+		XPReward = 16,
+		RequiredLevel = 2,
+		Color = Color3.fromRGB(214, 183, 90),
+	},
+	TomatoSeed = {
+		SeedId = "TomatoSeed",
+		Yields = "Tomato",
+		YieldAmount = 1,
+		GrowTime = 60,
+		XPReward = 22,
+		RequiredLevel = 3,
+		Color = Color3.fromRGB(214, 61, 56),
+	},
+	PumpkinSeed = {
+		SeedId = "PumpkinSeed",
+		Yields = "Pumpkin",
+		YieldAmount = 1,
+		GrowTime = 150,
+		XPReward = 55,
+		RequiredLevel = 8,
+		Color = Color3.fromRGB(226, 132, 38),
+	},
+	WatermelonSeed = {
+		SeedId = "WatermelonSeed",
+		Yields = "Watermelon",
+		YieldAmount = 1,
+		GrowTime = 320,
+		XPReward = 140,
+		RequiredLevel = 15,
+		Color = Color3.fromRGB(72, 160, 84),
+	},
+	GoldenAppleSeed = {
+		SeedId = "GoldenAppleSeed",
+		Yields = "GoldenApple",
+		YieldAmount = 1,
+		GrowTime = 600,
+		XPReward = 420,
+		RequiredLevel = 25,
+		Color = Color3.fromRGB(240, 199, 62),
+	},
+	StarfruitSeed = {
+		SeedId = "StarfruitSeed",
+		Yields = "Starfruit",
+		YieldAmount = 1,
+		GrowTime = 1_200,
+		XPReward = 1_250,
+		RequiredLevel = 40,
+		Color = Color3.fromRGB(126, 118, 224),
+	},
+} :: { [string]: PlantableDefinition }
+
+--- Resolves an untrusted seed item id to its planting behaviour.
+function GameConfig.GetPlantable(seedId: unknown): PlantableDefinition?
+	if type(seedId) ~= "string" then
+		return nil
+	end
+
+	return GameConfig.Plantables[seedId]
+end
+
+--- Level required to buy or plant an item. Non-plantable items are ungated.
+function GameConfig.GetRequiredLevel(itemId: string): number
+	local plantable = GameConfig.Plantables[itemId]
+	return if plantable then plantable.RequiredLevel else 0
+end
+
+--- Seeds a player of `level` may buy or plant, cheapest first (then by id).
+function GameConfig.GetAvailablePlantables(level: number): { PlantableDefinition }
+	local available = {}
+
+	for _, plantable in GameConfig.Plantables do
+		if level >= plantable.RequiredLevel then
+			table.insert(available, plantable)
+		end
+	end
+
+	table.sort(available, function(a, b)
+		local priceA = GameConfig.Items[a.SeedId].BuyPrice or 0
+		local priceB = GameConfig.Items[b.SeedId].BuyPrice or 0
+
+		if priceA == priceB then
+			return a.SeedId < b.SeedId
+		end
+		return priceA < priceB
+	end)
+
+	return available
 end
 
 --------------------------------------------------------------------------------
@@ -191,14 +486,6 @@ end
 
 export type GrowthStage = { Id: string, Threshold: number }
 
---[[
-	Visual growth phases, expressed as a fraction of the seed's GrowTime.
-	Must stay sorted by ascending Threshold (asserted below).
-
-	A crop is harvestable exactly when it reaches the final stage, so the last
-	threshold is 1.0 by definition. Insert extra stages freely; the server and
-	client both derive stages from this table, so they can never disagree.
-]]
 GameConfig.Growth = {
 	EmptyStage = "Empty",
 	MatureStage = "Mature",
@@ -216,7 +503,6 @@ GameConfig.Growth = {
 --------------------------------------------------------------------------------
 
 GameConfig.Garden = {
-	-- Where the first garden slot is centred; later slots tile outward.
 	Origin = Vector3.new(0, 0.5, 0),
 	SlotSpacing = Vector3.new(80, 0, 80),
 	SlotsPerRow = 5,
@@ -231,17 +517,41 @@ GameConfig.Garden = {
 	BaseColor = Color3.fromRGB(106, 142, 74),
 	BasePadding = 6,
 
-	-- Plot N unlocks at this level. Length must equal PlotsPerGarden.
 	PlotUnlockLevels = { 1, 1, 3, 8, 15, 25 },
 
-	-- Prompt reach, and the server-side slack added before rejecting an
-	-- interaction as out of range.
 	MaxActivationDistance = 14,
 	DistanceTolerance = 8,
-
-	-- Minimum seconds between accepted interactions from one player.
 	InteractionCooldown = 0.35,
 }
+
+--------------------------------------------------------------------------------
+-- Shop
+--------------------------------------------------------------------------------
+
+GameConfig.Shop = {
+	-- Per-request caps. These bound the arithmetic as much as the economy:
+	-- without them a client could ask for 1e15 items and push intermediate
+	-- products past the exact-integer range.
+	MaxBuyAmount = 100,
+	MaxSellAmount = 9_999,
+
+	-- Token bucket for the transaction remote. Burst allows normal rapid
+	-- clicking; the rate caps sustained throughput.
+	RequestsPerSecond = 8,
+	BurstSize = 12,
+
+	-- Physical storefront
+	NpcName = "ShopNPC",
+	NpcTitle = "General Store",
+	NpcPosition = Vector3.new(0, 3, -34),
+	NpcSize = Vector3.new(4, 6, 4),
+	NpcColor = Color3.fromRGB(196, 164, 112),
+	PromptActionText = "Browse",
+	PromptMaxDistance = 12,
+}
+
+--- Valid ProcessTransaction action types.
+GameConfig.TransactionActions = { Buy = "Buy", Sell = "Sell" }
 
 --------------------------------------------------------------------------------
 -- Replicated attribute names
@@ -256,22 +566,21 @@ GameConfig.Attributes = {
 	DataLoaded = "DataLoaded",
 	SelectedSeed = "SelectedSeed",
 	RevengeTokens = "RevengeTokens",
-	TargetPlot = "TargetPlot", -- Plot a boost purchase will be applied to
+	TargetPlot = "TargetPlot",
 }
 
--- Attributes written on each Plot model. Clients read these to render crops,
--- countdown timers and lock states without any remote traffic.
 GameConfig.PlotAttributes = {
-	OwnerUserId = "OwnerUserId", -- 0 while unassigned
+	OwnerUserId = "OwnerUserId",
 	PlotIndex = "PlotIndex",
-	SeedId = "SeedId", -- "" while empty
-	PlantedAt = "PlantedAt", -- Unix seconds
-	ReadyAt = "ReadyAt", -- Unix seconds; 0 while empty
+	SeedId = "SeedId",
+	PlantedAt = "PlantedAt",
+	ReadyAt = "ReadyAt",
 	Stage = "Stage",
 	Locked = "Locked",
 	UnlockLevel = "UnlockLevel",
 }
 
+-- A single flat folder now: one attribute per item id, no category subfolders.
 GameConfig.InventoryFolderName = "Inventory"
 GameConfig.GardensFolderName = "Gardens"
 
@@ -280,52 +589,10 @@ GameConfig.RemoteNames = {
 	SelectPlot = "SelectPlot",
 	UseBoost = "UseBoost",
 
-	-- RemoteFunctions (shop transactions return a result the UI renders)
-	BuySeed = "BuySeed",
-	SellCrop = "SellCrop",
-	SellAllCrops = "SellAllCrops",
+	-- RemoteFunctions
+	ProcessTransaction = "ProcessTransaction",
+	SellAll = "SellAll",
 }
-
---------------------------------------------------------------------------------
--- Shop
---------------------------------------------------------------------------------
-
-GameConfig.Shop = {
-	-- Per-request caps. These bound the arithmetic as much as the economy:
-	-- without them a client could ask for 1e15 seeds and push intermediate
-	-- products past the exact-integer range.
-	MaxBuyQuantity = 100,
-	MaxSellQuantity = 9_999,
-
-	-- Token bucket for the transaction remotes. Burst allows normal rapid
-	-- clicking; the rate caps sustained throughput.
-	RequestsPerSecond = 8,
-	BurstSize = 12,
-}
-
---[[
-	Seeds a player of `level` may buy, cheapest first (then by id, so the order
-	is stable for UI). Shared so the shop UI and the server agree on stock
-	without a round trip.
-]]
-function GameConfig.GetPurchasableSeeds(level: number): { SeedDefinition }
-	local available = {}
-
-	for _, seed in GameConfig.Seeds do
-		if level >= seed.RequiredLevel then
-			table.insert(available, seed)
-		end
-	end
-
-	table.sort(available, function(a, b)
-		if a.SeedPrice == b.SeedPrice then
-			return a.Id < b.Id
-		end
-		return a.SeedPrice < b.SeedPrice
-	end)
-
-	return available
-end
 
 --------------------------------------------------------------------------------
 -- Monetization
@@ -338,17 +605,6 @@ export type ProductDefinition = {
 	Amount: number,
 }
 
---[[
-	Developer Products.
-
-	REPLACE EVERY ProductId with the real id from the Creator Dashboard
-	(Monetization -> Developer Products). An id of 0 is a placeholder: the
-	product is left out of the lookup table and MarketplaceService warns loudly
-	at startup rather than silently failing a real purchase.
-
-	`Kind` is the internal handler key, so renaming a product on the dashboard
-	or swapping its id never requires touching handler code.
-]]
 GameConfig.Monetization = {
 	Products = {
 		RevengeToken = {
@@ -365,11 +621,7 @@ GameConfig.Monetization = {
 		},
 	} :: { [string]: ProductDefinition },
 
-	-- Item id used for the Instant Grow consumable in the Boosts bucket.
 	GrowthBoostItemId = "GrowthBoost",
-
-	-- How many PurchaseIds to remember per player for idempotency. Must comfortably
-	-- exceed the number of purchases one player can make in a single session.
 	MaxPurchaseHistory = 100,
 }
 
@@ -378,15 +630,8 @@ for name, product in GameConfig.Monetization.Products do
 	assert(product.Amount > 0, `product {name} must grant a positive amount`)
 end
 
---[[
-	Resolves an untrusted ProductId from a receipt. Returns nil for unknown or
-	unconfigured (id <= 0) products, which the caller MUST treat as
-	"do not grant".
-
-	This scans rather than using a prebuilt map so ProductIds stay editable at
-	runtime. Receipts are rare and the table has a handful of entries, so the
-	scan is irrelevant next to the DataStore write that follows it.
-]]
+--- Resolves an untrusted ProductId from a receipt. Returns nil for unknown or
+--- unconfigured (id <= 0) products, which the caller MUST treat as "do not grant".
 function GameConfig.GetProductById(productId: unknown): ProductDefinition?
 	if type(productId) ~= "number" then
 		return nil
@@ -401,11 +646,7 @@ function GameConfig.GetProductById(productId: unknown): ProductDefinition?
 	return nil
 end
 
---[[
-	Reports configuration problems for startup logging:
-	  unconfigured - products still carrying a placeholder id (cannot be sold)
-	  duplicates   - ids shared by two products (one would shadow the other)
-]]
+--- Reports configuration problems for startup logging.
 function GameConfig.ValidateProducts(): ({ string }, { string })
 	local unconfigured, duplicates = {}, {}
 	local seen: { [number]: string } = {}
@@ -447,16 +688,42 @@ do
 	end
 end
 
-for id, seed in GameConfig.Seeds do
-	assert(seed.Id == id, `seed {id} has a mismatched Id field`)
-	assert(seed.GrowTime > 0, `seed {id} must have a positive GrowTime`)
-	-- Seed ids double as attribute names for inventory replication.
-	assert(id:match("^[%a_][%w_]*$") ~= nil, `seed id {id} is not a legal attribute name`)
+for id, item in GameConfig.Items do
+	assert(item.Id == id, `item {id} has a mismatched Id field`)
+	-- Item ids double as attribute names for inventory replication.
+	assert(id:match("^[%a_][%w_]*$") ~= nil, `item id {id} is not a legal attribute name`)
+	assert(GameConfig.IsValidCategory(item.Category), `item {id} has an unknown category {item.Category}`)
+	assert(item.MaxStack > 0, `item {id} must have a positive MaxStack`)
+	assert(item.BuyPrice == nil or item.BuyPrice > 0, `item {id} has a non-positive BuyPrice`)
+	assert(item.SellPrice == nil or item.SellPrice > 0, `item {id} has a non-positive SellPrice`)
+end
+
+for seedId, plantable in GameConfig.Plantables do
+	assert(plantable.SeedId == seedId, `plantable {seedId} has a mismatched SeedId field`)
+	assert(plantable.GrowTime > 0, `plantable {seedId} must have a positive GrowTime`)
+	assert(plantable.YieldAmount > 0, `plantable {seedId} must yield a positive amount`)
+
+	local seedItem = GameConfig.Items[seedId]
+	assert(seedItem ~= nil, `plantable {seedId} has no matching item in the directory`)
+	assert(seedItem.Category == "Seeds", `plantable {seedId} must reference an item in the Seeds category`)
+
+	local yieldItem = GameConfig.Items[plantable.Yields]
+	assert(yieldItem ~= nil, `plantable {seedId} yields unknown item {plantable.Yields}`)
+	assert(
+		GameConfig.IsSellable(yieldItem),
+		`plantable {seedId} yields {plantable.Yields}, which has no SellPrice - the crop would be worthless`
+	)
+end
+
+for itemId, amount in GameConfig.StarterKit do
+	assert(GameConfig.Items[itemId] ~= nil, `StarterKit references unknown item {itemId}`)
+	assert(amount > 0, `StarterKit entry {itemId} must be positive`)
 end
 
 table.freeze(GameConfig.Attributes)
 table.freeze(GameConfig.PlotAttributes)
 table.freeze(GameConfig.RemoteNames)
-table.freeze(GameConfig.InventoryCategories)
+table.freeze(GameConfig.ItemCategories)
+table.freeze(GameConfig.TransactionActions)
 
 return GameConfig

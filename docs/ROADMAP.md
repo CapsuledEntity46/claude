@@ -2,40 +2,139 @@
 
 The long-term design target, recorded so incremental work can be judged against
 it. **Nothing here is a commitment to build in this order** — it exists so that
-decisions made now do not block the systems described later.
+decisions made now do not block the systems described later, and so that
+anything already built which *conflicts* with the target is marked as
+provisional rather than quietly treated as settled.
 
-Status legend: ✅ built · 🟡 partially built · ⬜ not started
+Status legend: ✅ built · 🟡 partially built · ⬜ not started · ⚠️ built but
+provisional (conflicts with the target)
 
 ---
 
 ## The game
 
-A first/third-person RTS-survival hybrid in the spirit of StarCraft and Age of
-Empires, with an MMORPG control scheme. The player levels up, builds an economy,
-gathers resources, raises animals, fishes, fortifies a base, and commands armies
-against rival civilisations and enemy hordes.
+A real-time strategy game in the lineage of Age of Empires and StarCraft,
+played from a first/third-person perspective with an MMORPG control scheme. The
+player guides a civilisation from a handful of gatherers into an empire:
+exploring, expanding, exploiting resources, and exterminating rivals.
+
+Everything is simultaneous and real time. The player balances macro-managing an
+economy against micro-managing battles, while personally fighting, building and
+riding as an embodied character rather than a disembodied cursor.
+
+---
+
+## RTS core
+
+### Resources
+
+Four gathered resources, in the Age of Empires model:
+
+| Resource | Gathered from | Spent on |
+| -------- | ------------- | -------- |
+| **Food** | Hunting, foraging, herding, **farms** | Villagers, basic infantry, aging up |
+| **Wood** | Forests | Buildings, archers, ships, siege |
+| **Gold** | Veins, trade, selling goods | Advanced tech, elite units, aging up |
+| **Stone** | Quarries | Walls, towers, castles |
+
+> ⚠️ **This revises an earlier note in this document.** It previously said
+> resources should be inventory *items*, with `Cash` as the only currency.
+> That is wrong for an RTS: these four are spent continuously on construction
+> and training, which is currency behaviour, not inventory behaviour. They want
+> their own balances with their own HUD readouts, like `Cash` has now.
+>
+> Open decision: is the existing `Cash` renamed to **Gold**, or does Cash remain
+> a separate "merchant" currency earned by selling produce? Selling crops for
+> Cash already works, and AoE earns Gold through trade, so folding Cash into
+> Gold is the simpler model.
+
+### Ages
+
+Progression through historical epochs, researched at the Town Center
+(Dark → Feudal → Castle → Imperial). Each age costs a large resource sum and
+unlocks stronger units, better buildings and technology upgrades.
+
+> **Open decision: Age vs player Level.** The project currently has an MMO-style
+> player `Level` and `XP`, and uses Level to gate content. Age of Empires has no
+> player level — progression *is* the Age, gated by resources rather than
+> experience. This game has both, so their roles must be separated:
+>
+> - **Age** should gate civilisation capability (what you can build and train).
+> - **Level** should gate personal capability (your character's gear, spells,
+>   stats) — the MMORPG half.
+>
+> Anything currently gated by Level that is really a *civilisation* capability
+> needs to move to Age. The garden plots are exactly that case (below).
+
+### Tech tree and build dependencies
+
+Buildings and units unlock in a dependency order — a **build tree**. Each node
+has **prerequisites**:
+
+```
+Town Center ──▶ Mill ──▶ Wheat Farm
+            └─▶ Barracks ──▶ Blacksmith upgrades
+            └─▶ Lumber Camp
+            └─▶ Mining Camp
+```
+
+Two distinct requirement types, and the game needs both:
+
+1. **Prerequisite dependency** — the parent building must *exist* somewhere
+   before the child can be placed. A dependency check before placement.
+2. **Proximity dependency** (also *aura requirement* or radius-locked
+   placement) — the child must be placed physically **within the parent's
+   influence radius**. Standard in city-builders (Anno, The Settlers) and how
+   AoE drop-off points work: Mills, Lumber Camps and Mining Camps near
+   resources cut villager walking time.
+
+> **Architectural note.** Proximity requires a spatial query — "is this point
+> within radius R of any building of type T owned by this player". That wants a
+> single shared placement/validation service, not per-building logic. It is also
+> the natural home for grid snapping, collision and territory rules.
+
+### Victory conditions
+
+| Condition | Requirement |
+| --------- | ----------- |
+| **Conquest** | Destroy all enemy production buildings |
+| **Wonder** | Build an expensive Wonder and hold it for a countdown |
+| **Relics** | Capture relics, hold them in Monasteries for a duration |
+
+> These coexist with the Checkpoint defeat loop below, which governs the
+> *player's* survival rather than the match outcome.
 
 ---
 
 ## Systems
 
-### 1. Economy and progression ✅
+### 1. Economy and progression ✅ / ⚠️
 
-Cash, Level, XP, a flat item inventory, a master item directory, buy/sell
-through a physical shop. See the main README.
+- ✅ Cash, Level, XP, flat item inventory, master item directory, buy/sell
+- ⚠️ `Cash` as sole currency — see Resources above
+- ⚠️ `Level` used to gate civilisation content — see Ages above
 
-### 2. Farming 🟡
+### 2. Farming ⚠️
 
-- ✅ Six plots per garden, unlock by level, timestamp-driven growth, harvest
-- ⬜ Watering, fertiliser and compost to accelerate growth
-- ⬜ Crop health bar; crops regenerate slowly, faster when tended
-- ⬜ Companions (animals, creatures, flying robots) that water and fertilise
-  automatically
+Currently six fixed plots per garden, unlocked by player Level, with
+timestamp-driven growth and harvest.
+
+> ⚠️ **Provisional.** The RTS model is different in kind: farms are *built* by
+> the player or villagers, require a **Mill** as prerequisite, and are placed
+> within the Mill's radius. They are not fixed slots handed out by player level.
+>
+> What survives the rewrite: the growth model (timestamps, three visual stages,
+> offline growth), `CropFactory`, the item directory and the harvest→sell loop.
+> What does not: the fixed six-slot `data.Plots` map, level-gated unlocking, and
+> `PlotBuilder`'s pre-built garden.
+
+Still to add: watering, fertiliser and compost to accelerate growth; crop health
+that regenerates slowly and faster when tended; companion creatures and flying
+robots that tend crops automatically.
 
 ### 3. Animal husbandry 🟡
 
-Drop items already exist in the directory and are sellable; nothing produces
-them yet.
+Drop items exist and are sellable; nothing produces them.
 
 | Animal | Produces |
 | ------ | -------- |
@@ -43,96 +142,103 @@ them yet.
 | Pig | RawPork, Fat |
 | Cow | Milk, Leather, RawBeef, Fat |
 
-- ✅ `Egg`, `Milk`, `RawBeef`, `Leather` registered and sellable
-- ⬜ Animal entities, pens, feeding, growth-to-maturity, collection cadence
+⬜ Animal entities, pens, feeding, growth to maturity, collection cadence.
+In the RTS frame these are herdable units near a Mill, not free-standing props.
 
 ### 4. Fishing ⬜
 
 Rivers and lakes with varied catches — fish species, lobster, squid, octopus.
-Caught by hand, by placed fish traps, or by villagers assigned to traps
-(Age of Empires style). All catches are sellable items.
+Caught by hand, by placed fish traps, or by villagers assigned to traps. All
+catches sellable.
 
 ### 5. Base building ⬜
 
 Free-placement construction in the spirit of Rust/DayZ: walls, floors, ramps,
-foundations, snapping and stability rules.
+foundations, snapping and stability.
 
-> **Architectural note.** `data.Plots` is a fixed six-slot map keyed by plot
-> index. That deliberately does not generalise to free placement. Arbitrary
-> structures will need a separate `data.Structures` collection holding an id,
-> structure type, position/rotation and health. That is an additive schema
-> change for a new field, but the placement system itself is a large piece of
-> work and should be its own step.
+> **Architectural note.** `data.Plots` is a fixed six-slot map keyed by index
+> and deliberately does not generalise. Arbitrary structures need a
+> `data.Structures` collection holding id, type, position/rotation and health.
+> Since farms become structures too, this system subsumes the plot system — so
+> building and farming should be reworked together rather than separately.
 
-### 6. Defences and sieges ⬜
+### 6. Defences, sieges and combat counters ⬜
 
-- Watch towers and automatic turrets, freely placeable around the base and crops
+- Watch towers and automatic turrets, freely placeable
 - Enemy hordes that path to the base and attack buildings, crops and the player
-- Building health bars; buildings do **not** self-repair — the player or
-  assigned villagers spend resources to repair, with a **Repair All** button
-- Enemies drop XP orbs and gold coins scaled to their level
+- Building health; buildings do **not** self-repair — the player or assigned
+  villagers spend resources, with a **Repair All** button
+- Enemies drop XP orbs and gold scaled to their level
+- Rock-paper-scissors unit counters:
+
+| Unit | Beats | Loses to |
+| ---- | ----- | -------- |
+| Spearmen / Pikemen | Cavalry | Archers |
+| Cavalry | Archers | Spearmen |
+| Archers | Spearmen | Cavalry |
+| Siege | Buildings, walls | All regular units |
 
 > **Architectural note.** Crops, buildings, turrets, animals, units and the
 > player all need health, damage and death. That belongs in **one shared
-> "damageable" system** from the start, not bolted onto `PlotService`. Doing it
-> per-system is the single most likely source of rework.
+> damageable system** from the start. Doing it per-system is the single most
+> likely source of rework in this plan, and it blocks sieges, building repair
+> and combat simultaneously.
 
 ### 7. Checkpoint and the defeat loop ⬜
 
-This is the match structure:
+The player's survival structure, distinct from match victory:
 
-1. The player starts with **nothing but a `Checkpoint` structure** in inventory.
+1. The player starts with **nothing but a `Checkpoint`** in inventory.
 2. Placing it establishes the respawn point.
-3. While the Checkpoint stands, death simply respawns the player.
-4. If the Checkpoint is destroyed while the player lives, it enters a
-   **shattered** state — not a loss. The player keeps fighting.
+3. While it stands, death simply respawns the player.
+4. Destroyed while the player lives → **shattered** state, not a loss. The
+   player keeps fighting.
 5. Survive and secure the area → a **Rebuild** prompt appears near the wreck.
-6. Fall with the Checkpoint shattered → **defeat**, offering:
-   - **Revenge** — re-enter the fight against the player or horde that won
-   - **Surrender**
-7. Revenge uses a **Revenge Token**. Two are granted free; more are purchasable.
+6. Fall while shattered → **defeat**, offering **Revenge** or **Surrender**.
+7. Revenge spends a **Revenge Token**: two free, more purchasable. Revenge may
+   target a player or a horde.
 
 > ✅ `RevengeTokens` already exists as a tracked, purchasable, atomically
-> spendable counter — this design is what it is for. Whatever consumes it must
-> call `TrySpendRevengeTokens` **before** granting the revenge, and validate the
+> spendable counter — this is what it is for. Whatever consumes it must call
+> `TrySpendRevengeTokens` **before** granting the revenge, and validate the
 > target server-side.
 
 ### 8. RTS unit command ⬜
 
-Box-select multiple units with a free-moving cursor, issue move/attack/gather
-orders, assign villagers to tasks.
+Box-select multiple units with a free-moving cursor; issue move, attack, gather
+and build orders; assign villagers to tasks and to drop-off buildings.
 
-> **Architectural note.** This needs a custom camera and
-> `UserInputService.MouseBehavior`, because Roblox locks the cursor to the camera
-> in first person. Camera work was deliberately deferred; this is the system
-> that will require revisiting it. Orders must be validated server-side — unit
+> **Architectural note.** Needs a custom camera and
+> `UserInputService.MouseBehavior`, because Roblox locks the cursor to the
+> camera in first person. Camera work was deliberately deferred; this is the
+> system that requires revisiting it. Orders must be validated server-side —
 > selection is a client convenience, never an authority.
 
 ### 9. Player combat and traversal ⬜
 
-MMORPG-style HUD with selectable spells and an action bar. Swords, spears,
-maces, bows, crossbows, shields, grenades, flintlocks, spells. Horses, hang
-gliders, climbing.
+MMORPG HUD with selectable spells and an action bar. Swords, spears, maces,
+bows, crossbows, shields, grenades, flintlocks, spells. Horses, hang gliders,
+climbing.
 
 ### 10. Trade and logistics ⬜
 
-Markets; pack donkeys and carts carrying goods to other players or to an NPC
-city. Player-to-player trade.
-
-> **Architectural note.** Resource types (wood, stone, food, ore) should be
-> **items in the existing flat inventory**, not new currencies. The directory
-> and inventory already handle any item id; adding a currency per resource would
-> duplicate the economy layer. Keep `Cash` as the only true currency.
+Markets; pack donkeys and carts carrying goods to other players or an NPC city.
+Player-to-player trade. In AoE terms this is also how Gold is earned without a
+vein.
 
 ### 11. Monetisation 🟡
 
-Clash-of-Clans style: resource packs, instant-finish boosts, permanent
-unlocks, revenge tokens.
+Clash-of-Clans style: resource packs, instant finishes, permanent unlocks,
+revenge continues.
 
 - ✅ Receipt processing with a durable idempotency ledger and save-before-grant
-- ✅ Revenge Tokens, Instant Grow, Cash packs, Plot unlocks
-- ⬜ Real Developer Product IDs (placeholders are `0`)
-- ⬜ Cosmetics, battle pass, builder slots
+- ✅ Cash packs, Instant Grow (×1 and ×10), Revenge Tokens
+- ⚠️ **Extra Garden Plot** unlocks a plot past its *level* requirement. If plots
+  become Mill-radius structures, a "plot slot" stops being a meaningful unit.
+  The likely replacement is a population/building-cap increase, or resource
+  packs for Wood/Stone. Worth deciding before setting its real ProductId.
+- ⬜ Real Developer Product IDs (all placeholders are `0`)
+- ⬜ Cosmetics, battle pass
 
 ---
 
@@ -143,14 +249,21 @@ Each step should be shippable and testable on its own.
 | Step | Why here |
 | ---- | -------- |
 | **Verify persistence against a real DataStore** | Highest risk in the project; cheapest to check |
-| **Animal husbandry** | The directory already supports it; proves the framework scales |
-| **Shared damageable system** | Blocks sieges, buildings and combat; cheap now, expensive later |
-| **Checkpoint and defeat loop** | Defines the match; gives Revenge Tokens meaning |
-| **Base building** | Large; needs `data.Structures` |
-| **Defences and hordes** | Depends on damageable + building |
+| **Four-resource economy + Ages** | Everything below prices in resources and gates on Age; doing it late means repricing everything |
+| **Shared damageable system** | Blocks buildings, sieges, repair and combat at once |
+| **Placement service** (prerequisites + proximity radius) | The foundation for farms, drop-off points, defences and base building |
+| **Rework farming onto placement** | Farms become Mill-dependent structures; retires the fixed plot map |
+| **Animal husbandry** | Herds near a Mill; directory already supports the drops |
+| **Checkpoint and defeat loop** | Defines player survival; gives Revenge Tokens meaning |
+| **Defences and hordes** | Depends on damageable + placement |
 | **RTS unit command** | Needs the custom camera |
 | **Player combat and traversal** | Largest surface area; benefits from everything above |
-| **Fishing, trade, companions** | Content layers over established systems |
+| **Fishing, trade, companions, victory conditions** | Content layers over established systems |
+
+> The order changed from the previous revision: the four-resource economy and
+> the placement service moved up, because farming, husbandry, defences and
+> building all depend on them. Building farming first and reworking it later
+> costs more than doing resources first.
 
 ## Principles that should not bend
 
@@ -162,3 +275,5 @@ Each step should be shippable and testable on its own.
    lag and logouts.
 4. **Grants are durable before they are acknowledged.** Especially receipts.
 5. **Config is asserted at require time**, so bad edits fail on startup.
+6. **Dependencies are data, not code.** Build-tree prerequisites and proximity
+   radii belong in `GameConfig`, so adding a building is a config edit.

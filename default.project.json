@@ -40,8 +40,8 @@
           "Position": [0, -10, 0],
           "Anchored": true,
           "Locked": true,
-          "Color": [0.42, 0.56, 0.35],
-          "Material": "Grass",
+          "Color": [0.44, 0.45, 0.47],
+          "Material": "Slate",
           "TopSurface": "Smooth",
           "BottomSurface": "Smooth"
         }

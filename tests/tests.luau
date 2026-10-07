@@ -1034,6 +1034,58 @@ local function runTests()
 	checkEqual(GameConfig.FrameworkVersion, 15, "GameConfig declares a framework revision")
 
 	--[[
+		EVERY config field named in EVERY source file must actually exist.
+
+		This is a STATIC check over source text, and it exists because client
+		scripts cannot be executed here - they build GUIs and bind to
+		UserInputService - so nothing else can catch one referencing a renamed
+		config field.
+
+		That is not hypothetical. DefeatClient was left reading
+		GameConfig.Defeat.SurrenderLoss after it became SurrenderPurseLoss.
+		The result was `nil * 100` thrown while building a label, which
+		unwound out of the refresh before the line that shows the panel - so
+		a defeated player saw nothing at all and could never answer. The
+		server was raising the defeat correctly the whole time, and 1195
+		passing assertions had no opinion.
+
+		Comments are stripped before this runs: a stale name in prose is a
+		documentation problem, not a crash.
+	]]
+	do
+		local audited = 0
+		local references = 0
+
+		for path, source in SOURCES do
+			audited += 1
+
+			-- Two-level references only. `GameConfig.GetStructure(...)` is a
+			-- function and resolves by being called; `GameConfig.Resources[id]`
+			-- is dynamic and cannot be checked statically.
+			for tableName, fieldName in string.gmatch(source, "GameConfig%.([%a_][%w_]*)%.([%a_][%w_]*)") do
+				references += 1
+
+				local container = GameConfig[tableName]
+
+				check(
+					container ~= nil,
+					`{path} reads GameConfig.{tableName}, which exists`
+				)
+
+				if type(container) == "table" then
+					check(
+						container[fieldName] ~= nil,
+						`{path} reads GameConfig.{tableName}.{fieldName}, which exists`
+					)
+				end
+			end
+		end
+
+		check(audited >= 20, `every source file was audited ({audited} files)`)
+		check(references >= 100, `and a meaningful number of references checked ({references})`)
+	end
+
+	--[[
 		EVERY module in the tree must agree with it.
 
 		This is the assertion that was missing, and its absence shipped a

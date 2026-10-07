@@ -185,9 +185,11 @@ local function refresh()
 
 	-- The percentage comes from config, so this cannot drift from what the
 	-- server actually takes.
-	local percent = math.floor(GameConfig.Defeat.SurrenderLoss * 100 + 0.5)
-	surrenderNote.Text =
-		`The raiders carry off {percent}% of your Food, Wood, Gold and Stone. Your purse is safe.`
+	local percent = math.floor(GameConfig.Defeat.SurrenderPurseLoss * 100 + 0.5)
+	local purse = player:GetAttribute(ATTR.InventoryGold) or 0
+	local taken = math.floor(purse * GameConfig.Defeat.SurrenderPurseLoss)
+
+	surrenderNote.Text = `The raiders carry off {percent}% of your purse — {taken} gold. Your stores are safe.`
 end
 
 local function send(choice: string)
@@ -236,8 +238,24 @@ end)
 local function syncVisibility()
 	local defeated = player:GetAttribute(ATTR.Defeated) == true
 
+	--[[
+		The panel is shown even if building its labels fails.
+
+		It failed exactly once, and that once was enough: a renamed config
+		field left this script computing `nil * 100`, the error unwound out of
+		refresh() before the line below ever ran, and the defeat panel never
+		appeared at all. The server was raising the defeat correctly the whole
+		time.
+
+		A panel with a wrong caption is recoverable. A player stuck dead with
+		no way to answer is not.
+	]]
 	if defeated then
-		refresh()
+		local ok, err = pcall(refresh)
+
+		if not ok then
+			warn(`[DefeatClient] Could not build the defeat labels: {err}`)
+		end
 	end
 
 	screen.Enabled = defeated

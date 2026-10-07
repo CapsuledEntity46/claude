@@ -8,6 +8,7 @@ them up in the MODULES global.
 
 import os
 import pathlib
+import re
 import shutil
 import subprocess
 import sys
@@ -59,12 +60,50 @@ MODULE_PATHS = [
     "src/Server/Services/MarketplaceService.luau",
 ]
 
+
+def generate_long_string(body: str) -> str:
+    """Wraps `body` in a Luau long string, choosing a safe bracket level."""
+    level = 0
+    while f"]{'=' * level}]" in body:
+        level += 1
+    equals = "=" * level
+    # A leading newline is swallowed by Luau, so one is added to preserve the text.
+    return f"[{equals}[\n{body}]{equals}]"
+
+
 parts = [(TESTS / "prelude.luau").read_text()]
 
 parts.append("\nMODULES = {}\n")
 for rel in MODULE_PATHS:
     source = (REPO / rel).read_text()
     parts.append(f'\nMODULES["{rel}"] = function(script)\n{source}\nend\n')
+
+#: Every Luau source in the project, as TEXT, with comments stripped.
+#:
+#: Client scripts cannot be executed here - they build GUIs and bind to
+#: UserInputService - so nothing catches a client referencing a config field
+#: that has been renamed. That happened: DefeatClient was left reading
+#: GameConfig.Defeat.SurrenderLoss after it became SurrenderPurseLoss, which
+#: threw while building a label and stopped the defeat panel appearing at all.
+#:
+#: So the suite audits the source text instead. Comments are stripped first,
+#: because a stale name in prose is a documentation problem, not a crash.
+
+
+def strip_comments(source: str) -> str:
+    source = re.sub(r"--\[\[.*?\]\]", "", source, flags=re.DOTALL)
+    return re.sub(r"--[^\n]*", "", source)
+
+
+audited = sorted(
+    str(path.relative_to(REPO)).replace("\\", "/")
+    for path in (REPO / "src").rglob("*.luau")
+)
+
+parts.append("\nSOURCES = {}\n")
+for rel in audited:
+    cleaned = strip_comments((REPO / rel).read_text())
+    parts.append(f'\nSOURCES["{rel}"] = {generate_long_string(cleaned)}\n')
 
 parts.append("\n" + (TESTS / "tests.luau").read_text())
 

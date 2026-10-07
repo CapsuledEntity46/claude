@@ -308,6 +308,18 @@ local InstanceMT = {
 			end
 		elseif key == "Value" then
 			rawset(self, "_value", value)
+		elseif key == "CFrame" then
+			--[[
+				The engine derives one from the other. Game code moves parts
+				with whichever is natural, and a stub that kept them separate
+				would silently report a part still sitting where it started -
+				which is the bug this models away.
+			]]
+			rawset(self, "CFrame", value)
+			rawset(self, "Position", Vector3.new(value.X, value.Y, value.Z))
+		elseif key == "Position" then
+			rawset(self, "Position", value)
+			rawset(self, "CFrame", CFrame.new(value.X, value.Y, value.Z))
 		else
 			rawset(self, key, value)
 		end
@@ -361,7 +373,12 @@ function Instance.new(className)
 	}, InstanceMT)
 
 	-- Class-specific members the game code relies on.
-	if className == "ProximityPrompt" then
+	if className == "Player" then
+		-- Respawning is the engine's, so the defeat loop listens for it here.
+		rawset(self, "CharacterAdded", makeRbxSignal())
+		rawset(self, "CharacterRemoving", makeRbxSignal())
+		rawset(self, "AncestryChanged", makeRbxSignal())
+	elseif className == "ProximityPrompt" then
 		rawset(self, "Triggered", makeRbxSignal())
 		rawset(self, "Enabled", true)
 		rawset(self, "ActionText", "")
@@ -733,10 +750,33 @@ end
 
 CFrame = {}
 
-local CFrameMT = { __mul = function(a, _b) return a end }
+local CFrameMT = {}
+
+--- Rotation is not modelled: nothing in this project reads it back, and the
+--- parts it rotates are decorative.
+CFrameMT.__mul = function(a, _b)
+	return a
+end
+
+CFrameMT.__index = function(self, key)
+	if key == "Position" then
+		return Vector3.new(rawget(self, "X"), rawget(self, "Y"), rawget(self, "Z"))
+	end
+
+	return nil
+end
 
 function CFrame.new(x, y, z)
+	--- Accepts a Vector3, as the engine does.
+	if type(x) == "table" and rawget(x, "X") then
+		return setmetatable({ X = x.X, Y = x.Y, Z = x.Z, _cf = true }, CFrameMT)
+	end
+
 	return setmetatable({ X = x or 0, Y = y or 0, Z = z or 0, _cf = true }, CFrameMT)
+end
+
+function CFrame.lookAt(at, _target)
+	return CFrame.new(at)
 end
 
 function CFrame.Angles()

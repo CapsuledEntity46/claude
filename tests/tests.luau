@@ -4458,6 +4458,330 @@ local function runTests()
 		end
 
 		------------------------------------------------------------------------
+		section("Defeat: the anchor shatters rather than vanishing")
+		------------------------------------------------------------------------
+
+		--[[
+			The whole design. An anchor that can be destroyed outright makes a
+			bad raid unrecoverable; one that cannot be destroyed makes a raid
+			toothless. Shattering is the third option - the anchor is gone but
+			the SITE remains.
+		]]
+		local DefeatService = require(DefeatServiceModule)
+		DefeatService:Start()
+
+		do
+			local holdout = newPlayer(7171, "Holdout")
+			giveCharacter(holdout, Vector3.new(120, 3, -200))
+			PlayersService.PlayerAdded:Fire(holdout)
+			PlayerDataService:AddResource(holdout, "Wood", 50000)
+			PlayerDataService:AddResource(holdout, "Stone", 50000)
+
+			-- An anchor, placed the ordinary way.
+			local placement = PlacementService:Place(holdout, "Checkpoint", 120, -200)
+			checkEqual(placement.Ok, true, `a Checkpoint is built`)
+
+			local anchorId, placed, entity = DefeatService:GetAnchor(holdout)
+			checkEqual(anchorId, placement.InstanceId, "and is found as the player's anchor")
+			check(entity ~= nil, "with a damageable entity behind it")
+			checkEqual(DefeatService:HasStandingAnchor(holdout), true, "standing")
+			checkEqual(DefeatService:IsAnchorShattered(holdout), false, "and not in ruins")
+
+			--[[
+				Dying with it standing is an inconvenience, not a defeat: the
+				respawn handler puts the player back on it.
+			]]
+			local humanoid = holdout.Character:FindFirstChildOfClass("Humanoid")
+			humanoid:TakeDamage(9999)
+
+			checkEqual(DefeatService:IsDefeated(holdout), false, "falling with the anchor up is not a defeat")
+			checkEqual(holdout:GetAttribute("Defeated"), nil, "and raises no panel")
+
+			-- A new character appears at the anchor rather than at world spawn.
+			local revived = giveCharacter(holdout, Vector3.new(900, 3, 900))
+			holdout.CharacterAdded:Fire(revived)
+
+			local anchorBody = placed.Model.PrimaryPart
+			check(
+				Spatial.GroundDistance(revived.PrimaryPart.Position, anchorBody.Position) < 20,
+				"respawning puts the player at their Checkpoint, not where they fell"
+			)
+
+			--[[
+				Now destroy it. It must SHATTER - stay in the registry, stay in
+				the world, and stay on the player's record.
+			]]
+			DamageableService:ApplyDamage(placed.EntityId, 999999, "Siege", nil)
+
+			checkEqual(DefeatService:IsAnchorShattered(holdout), true, "a destroyed anchor shatters")
+			checkEqual(DefeatService:HasStandingAnchor(holdout), false, "so it is no longer standing")
+			check(placed.Model.Parent ~= nil, "but the wreck is still there")
+			check(
+				PlayerDataService:GetData(holdout).Structures[anchorId] ~= nil,
+				"and still on the player's record, unlike anything that is merely destroyed"
+			)
+
+			-- The wreck gains a rebuild prompt.
+			local wreckPrompt = placed.Model.PrimaryPart:FindFirstChild("RebuildPrompt")
+			check(wreckPrompt ~= nil, "the wreck offers a Rebuild prompt")
+
+			--[[
+				But not while raiders are standing over it. Rebuilding under
+				fire would make shattering meaningless - the player would tank
+				the raid and tap the prompt.
+			]]
+			checkEqual(DefeatService:IsSecure(holdout), true, "with the field clear, the area is secure")
+
+			local nearby = RaidService:SpawnRaider(holdout, "EnemyRaider", 0, 10)
+			check(nearby ~= nil, "a raider arrives at the wreck")
+			checkEqual(DefeatService:IsSecure(holdout), false, "which makes the area unsecured")
+			checkEqual(
+				DefeatService:TryRebuildAnchor(holdout).Reason,
+				"NotSecure",
+				"and rebuilding is refused until it is dealt with"
+			)
+
+			DamageableService:ApplyDamage(nearby, 999999, "Siege", nil)
+			checkEqual(DefeatService:IsSecure(holdout), true, "killing it secures the area again")
+
+			-- Rebuilding by prompt costs resources: this player survived.
+			local woodBefore = PlayerDataService:GetResource(holdout, "Wood")
+			local rebuilt = DefeatService:TryRebuildAnchor(holdout)
+
+			checkEqual(rebuilt.Ok, true, "a secured wreck can be rebuilt")
+			checkEqual(DefeatService:HasStandingAnchor(holdout), true, "and stands again")
+			check(PlayerDataService:GetResource(holdout, "Wood") < woodBefore, "which costs resources")
+			checkEqual(
+				placed.Model.PrimaryPart:FindFirstChild("RebuildPrompt"),
+				nil,
+				"and the prompt goes away with the rubble"
+			)
+
+			PlayersService.PlayerRemoving:Fire(holdout)
+			holdout.Parent = nil
+		end
+
+		------------------------------------------------------------------------
+		section("Defeat: falling with no anchor, and the two ways back")
+		------------------------------------------------------------------------
+
+		do
+			local doomed = newPlayer(7272, "Doomed")
+			giveCharacter(doomed, Vector3.new(-120, 3, -200))
+			PlayersService.PlayerAdded:Fire(doomed)
+			PlayerDataService:AddResource(doomed, "Wood", 50000)
+			PlayerDataService:AddResource(doomed, "Stone", 50000)
+
+			--[[
+				A Town Center as well as the anchor, so there is always
+				something for a raid to come for. With only a shattered
+				Checkpoint and a dead player, a base has no targets at all -
+				which is correct of RaidService and useless for this test.
+			]]
+			checkEqual(PlacementService:Place(doomed, "TownCenter", -160, -200).Ok, true, "a Town Center stands")
+			checkEqual(PlacementService:Place(doomed, "Checkpoint", -120, -200).Ok, true, "and a Checkpoint")
+
+			local _, placed = DefeatService:GetAnchor(doomed)
+
+			--- Dying, and the engine putting them back on their feet.
+			local function fall()
+				doomed.Character:FindFirstChildOfClass("Humanoid"):TakeDamage(9999)
+			end
+
+			local function respawn()
+				local character = giveCharacter(doomed, Vector3.new(-120, 3, -180))
+				doomed.CharacterAdded:Fire(character)
+			end
+
+			local function shatterAnchor()
+				DamageableService:ApplyDamage(placed.EntityId, 999999, "Siege", nil)
+			end
+
+			shatterAnchor()
+			checkEqual(DefeatService:IsAnchorShattered(doomed), true, "the anchor is in ruins")
+
+			fall()
+			checkEqual(DefeatService:IsDefeated(doomed), true, "falling while shattered IS a defeat")
+			checkEqual(doomed:GetAttribute("Defeated"), true, "replicated, so the panel appears")
+
+			-- Garbage answers are refused, and leave the defeat standing.
+			checkEqual(DefeatService:Resolve(doomed, "Nonsense").Reason, "UnknownChoice", "an unknown answer is refused")
+			checkEqual(DefeatService:Resolve(doomed, nil).Reason, "UnknownChoice", "and so is no answer")
+			checkEqual(DefeatService:IsDefeated(doomed), true, "leaving the player defeated")
+
+			respawn()
+
+			--[[
+				FIGHT ON. Spends a token, restores the anchor, calls off the
+				raid, and does NOT touch the stores.
+			]]
+			checkEqual(RaidService:SummonWave(doomed).Ok, true, "a raid is under way")
+			check(RaidService:CountRaiders(doomed.UserId) > 0, "with raiders on the field")
+
+			local tokensBefore = PlayerDataService:GetRevengeTokens(doomed)
+			local woodBefore = PlayerDataService:GetResource(doomed, "Wood")
+			check(tokensBefore > 0, `the player has tokens to spend ({tokensBefore})`)
+
+			local fought = DefeatService:Resolve(doomed, "FightOn")
+
+			checkEqual(fought.Ok, true, "fighting on is accepted")
+			checkEqual(
+				PlayerDataService:GetRevengeTokens(doomed),
+				tokensBefore - GameConfig.Defeat.FightOnTokenCost,
+				"spending a revenge token"
+			)
+			checkEqual(
+				PlayerDataService:GetResource(doomed, "Wood"),
+				woodBefore,
+				"and leaving the stores alone, which is what the token buys"
+			)
+			checkEqual(DefeatService:IsDefeated(doomed), false, "the player is back up")
+			checkEqual(doomed:GetAttribute("Defeated"), false, "so the panel closes")
+			checkEqual(DefeatService:HasStandingAnchor(doomed), true, "with the anchor raised again")
+			checkEqual(RaidService:CountRaiders(doomed.UserId), 0, "and the raid called off")
+
+			--[[
+				SURRENDER. Free in tokens, paid in stores. Rounded down, so a
+				nearly empty store loses nothing rather than its last unit.
+			]]
+			shatterAnchor()
+			fall()
+			checkEqual(DefeatService:IsDefeated(doomed), true, "defeated a second time")
+			respawn()
+
+			local storesBefore = {}
+			for _, resourceId in GameConfig.GetResourceIds() do
+				storesBefore[resourceId] = PlayerDataService:GetResource(doomed, resourceId)
+			end
+			local purseBefore = PlayerDataService:GetInventoryGold(doomed)
+			local tokensHeld = PlayerDataService:GetRevengeTokens(doomed)
+
+			local surrendered = DefeatService:Resolve(doomed, "Surrender")
+			checkEqual(surrendered.Ok, true, "surrender is accepted")
+			checkEqual(PlayerDataService:GetRevengeTokens(doomed), tokensHeld, "costing no tokens")
+
+			for _, resourceId in GameConfig.GetResourceIds() do
+				local taken = math.floor(storesBefore[resourceId] * GameConfig.Defeat.SurrenderLoss)
+
+				checkEqual(
+					PlayerDataService:GetResource(doomed, resourceId),
+					storesBefore[resourceId] - taken,
+					`the raiders carry off their cut of the {resourceId}`
+				)
+			end
+
+			--[[
+				The purse is untouched, and that is the same rule as
+				everywhere else: it is filled by kills and loot alone, and
+				nothing reaches into it.
+			]]
+			checkEqual(
+				PlayerDataService:GetInventoryGold(doomed),
+				purseBefore,
+				"while the personal purse is never touched"
+			)
+
+			checkEqual(DefeatService:HasStandingAnchor(doomed), true, "the anchor is raised either way")
+			checkEqual(DefeatService:IsDefeated(doomed), false, "and the player is back in the game")
+
+			--[[
+				A player with no tokens cannot fight on, and must NOT be
+				quietly handed a free recovery - they are told, and stay
+				defeated so they can surrender instead.
+			]]
+			PlayerDataService:TrySpendRevengeTokens(doomed, PlayerDataService:GetRevengeTokens(doomed))
+			checkEqual(PlayerDataService:GetRevengeTokens(doomed), 0, "the player is out of tokens")
+
+			shatterAnchor()
+			fall()
+			respawn()
+
+			local broke = DefeatService:Resolve(doomed, "FightOn")
+			checkEqual(broke.Ok, false, "fighting on with no tokens is refused")
+			checkEqual(broke.Reason, "NoTokens", "by name, so the panel can say so")
+			checkEqual(DefeatService:IsDefeated(doomed), true, "and the player stays defeated")
+			checkEqual(
+				DefeatService:HasStandingAnchor(doomed),
+				false,
+				"with the anchor still in ruins - a refused answer grants nothing"
+			)
+
+			checkEqual(DefeatService:Resolve(doomed, "Surrender").Ok, true, "but they can still surrender")
+
+			-- And answering when not defeated is refused.
+			checkEqual(
+				DefeatService:Resolve(doomed, "Surrender").Reason,
+				"NotDefeated",
+				"answering a defeat that is not happening is refused"
+			)
+
+			PlayersService.PlayerRemoving:Fire(doomed)
+			doomed.Parent = nil
+		end
+
+		------------------------------------------------------------------------
+		section("Defeat: raiders can hurt the player")
+		------------------------------------------------------------------------
+
+		--[[
+			Which the loop needs, or "fall while shattered" is unreachable
+			except by accident.
+
+			The player is NOT a damageable entity: their health is the
+			Humanoid's, because the engine already owns respawning and the bar
+			above their head. So this checks the bridge.
+		]]
+		do
+			local prey = newPlayer(7373, "Prey")
+			giveCharacter(prey, Vector3.new(0, 3, -2200))
+			PlayersService.PlayerAdded:Fire(prey)
+
+			local candidate = AttackService.GetPlayerCandidate(prey)
+			check(candidate ~= nil, "a living player is a valid target")
+			checkEqual(candidate.Tag, GameConfig.PlayerCombat.TargetTag, "tagged as a unit")
+			check(candidate.Humanoid ~= nil, "carrying a Humanoid rather than an entity id")
+			checkEqual(candidate.EntityId, nil, "because they are not in the damageable registry")
+
+			-- A raider beside them takes them down over time.
+			local club = GameConfig.Attacks.RaiderClub
+			local humanoid = prey.Character:FindFirstChildOfClass("Humanoid")
+			local fullHealth = humanoid.Health
+
+			local thug = spawnEntity("EnemyRaider", 4, -2200)
+			AttackService:Register(thug)
+
+			advance(club.Cooldown + GameConfig.Combat.AttackTickInterval * 2)
+			check(humanoid.Health < fullHealth, "a raider beside a player hurts them")
+
+			--[[
+				Through the counter table, like everything else. A club is
+				Siege, which is poor against a person - so a raid is
+				survivable in the open and ruinous to a base.
+			]]
+			local dealt = fullHealth - humanoid.Health
+			local expected = Combat.ComputeDamage(
+				club.Damage,
+				club.DamageType,
+				GameConfig.PlayerCombat.ArmourClass,
+				GameConfig.PlayerCombat.Armour
+			)
+			checkEqual(dealt, expected, "for the counter table's amount, not the raw damage")
+			check(
+				expected < club.Damage,
+				`and Siege is poor against a person ({expected} of {club.Damage})`
+			)
+
+			-- A dead player stops being a target, so raiders do not flog a corpse.
+			humanoid:TakeDamage(9999)
+			checkEqual(AttackService.GetPlayerCandidate(prey), nil, "a fallen player is no longer a target")
+
+			AttackService:Unregister(thug)
+			DamageableService:Unregister(thug)
+			PlayersService.PlayerRemoving:Fire(prey)
+			prey.Parent = nil
+		end
+
+		------------------------------------------------------------------------
 		section("Attacks: shots are announced to clients")
 		------------------------------------------------------------------------
 

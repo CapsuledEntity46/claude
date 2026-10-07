@@ -189,12 +189,21 @@ function FarmService:_renderCrop(farm, seedId: string, stage: string, count: num
 		container.Parent = farm.Model
 	end
 
-	-- The plants are rebuilt, the CONTAINER is not: it is the crop entity's
-	-- model reference and carries the health attributes, so destroying it
-	-- would leave the damageable registry pointing at nothing.
+	--[[
+		The plants are rebuilt, the CONTAINER is not: it is the crop entity's
+		model reference and carries the health attributes, so destroying it
+		would leave the damageable registry pointing at nothing.
+
+		PrimaryPart is cleared with them. It points at one of the plants, and
+		leaving it pointing at a destroyed one survives every check that asks
+		whether the MODEL is still parented - so an attacking plant would go
+		on firing from wherever its seedling used to stand.
+	]]
 	for _, child in container:GetChildren() do
 		child:Destroy()
 	end
+
+	container.PrimaryPart = nil
 
 	local structure = GameConfig.GetStructure("Farm")
 	local centre = farm.Model.PrimaryPart.Position + Vector3.new(0, structure.Size.Y / 2, 0)

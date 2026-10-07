@@ -20,3 +20,10 @@ rojo
 .vscode/
 .idea/
 .DS_Store
+
+# Test harness: generated bundles and the vendored Luau CLI, which is a
+# per-platform binary. See tests/README.md.
+tests/bundle.luau
+tests/bootstrap_bundle.luau
+tests/luau
+tests/luau.exe

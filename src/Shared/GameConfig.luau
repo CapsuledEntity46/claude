@@ -71,7 +71,7 @@ local GameConfig = {}
 	tree fails with a message naming the stale module instead of a nil-index
 	deep inside unrelated code.
 ]]
-GameConfig.FrameworkVersion = 7
+GameConfig.FrameworkVersion = 8
 
 --------------------------------------------------------------------------------
 -- Persistence
@@ -646,6 +646,135 @@ GameConfig.Garden = {
 }
 
 --------------------------------------------------------------------------------
+-- Combat
+--------------------------------------------------------------------------------
+
+export type ArchetypeDefinition = {
+	Id: string,
+	Name: string,
+	MaxHealth: number,
+	ArmourClass: string,
+	Armour: number,
+	RegenPerSecond: number, -- 0 = never self-heals
+	Repairable: boolean,
+	RepairCostPerHealth: { [string]: number }?,
+	DestroyBehaviour: string, -- "Remove" | "Shatter"
+	Rewards: { XP: number, Gold: number }?,
+}
+
+--[[
+	The rock-paper-scissors layer, as data.
+
+	Multipliers[damageType][armourClass]. Reading a row tells you what that
+	damage type is for: Siege flattens buildings and crops but is useless
+	against troops; Pierce (archers) shreds the unarmoured and glances off heavy
+	armour; Melee is the dependable middle.
+
+	Adding a damage type or armour class is a config edit - no combat code
+	changes.
+]]
+GameConfig.Combat = {
+	DamageTypes = { "Melee", "Pierce", "Siege", "Magic" },
+	ArmourClasses = { "Unarmoured", "Light", "Heavy", "Building", "Crop" },
+
+	-- Even a perfectly countered hit lands something. A truly immune target
+	-- would make a siege unwinnable rather than merely slow.
+	MinimumDamage = 1,
+
+	Multipliers = {
+		Melee = { Unarmoured = 1.00, Light = 1.00, Heavy = 0.60, Building = 0.50, Crop = 1.00 },
+		Pierce = { Unarmoured = 1.25, Light = 1.00, Heavy = 0.40, Building = 0.25, Crop = 0.75 },
+		Siege = { Unarmoured = 0.50, Light = 0.50, Heavy = 0.50, Building = 2.50, Crop = 1.50 },
+		Magic = { Unarmoured = 1.00, Light = 1.10, Heavy = 1.10, Building = 0.75, Crop = 1.00 },
+	},
+}
+
+--[[
+	Everything that can be damaged, declared in one table.
+
+	Crops regenerate slowly and cannot be repaired. Buildings never regenerate
+	and must be repaired with resources - the asymmetry is deliberate and is the
+	rule from docs/ROADMAP.md.
+
+	`DestroyBehaviour` of "Shatter" means the entity is NOT removed at zero
+	health: it persists in a ruined state and can be rebuilt. That is what the
+	Checkpoint needs, so a destroyed Checkpoint is a setback rather than an
+	instant loss.
+]]
+GameConfig.Archetypes = {
+	Crop = {
+		Id = "Crop",
+		Name = "Crop",
+		MaxHealth = 100,
+		ArmourClass = "Crop",
+		Armour = 0,
+		-- Tending (water, fertiliser, compost) will multiply this later.
+		RegenPerSecond = 0.5,
+		Repairable = false,
+		DestroyBehaviour = "Remove",
+	},
+
+	Mill = {
+		Id = "Mill",
+		Name = "Mill",
+		MaxHealth = 1_200,
+		ArmourClass = "Building",
+		Armour = 4,
+		RegenPerSecond = 0,
+		Repairable = true,
+		RepairCostPerHealth = { Wood = 0.5 },
+		DestroyBehaviour = "Remove",
+	},
+
+	WatchTower = {
+		Id = "WatchTower",
+		Name = "Watch Tower",
+		MaxHealth = 1_800,
+		ArmourClass = "Building",
+		Armour = 6,
+		RegenPerSecond = 0,
+		Repairable = true,
+		RepairCostPerHealth = { Wood = 0.3, Stone = 0.5 },
+		DestroyBehaviour = "Remove",
+	},
+
+	Checkpoint = {
+		Id = "Checkpoint",
+		Name = "Checkpoint",
+		MaxHealth = 2_000,
+		ArmourClass = "Building",
+		Armour = 6,
+		RegenPerSecond = 0,
+		Repairable = true,
+		RepairCostPerHealth = { Wood = 0.4, Stone = 0.4 },
+		-- Shattered, not gone: the player can still fight and rebuild.
+		DestroyBehaviour = "Shatter",
+	},
+
+	EnemyRaider = {
+		Id = "EnemyRaider",
+		Name = "Raider",
+		MaxHealth = 120,
+		ArmourClass = "Light",
+		Armour = 1,
+		RegenPerSecond = 0,
+		Repairable = false,
+		DestroyBehaviour = "Remove",
+		-- Per level. Gold here lands in the killer's PURSE, which is the only
+		-- thing that fills it.
+		Rewards = { XP = 12, Gold = 8 },
+	},
+} :: { [string]: ArchetypeDefinition }
+
+function GameConfig.GetArchetype(archetypeId: unknown): ArchetypeDefinition?
+	if type(archetypeId) ~= "string" then
+		return nil
+	end
+
+	return GameConfig.Archetypes[archetypeId]
+end
+
+--------------------------------------------------------------------------------
 -- Shop
 --------------------------------------------------------------------------------
 
@@ -692,6 +821,20 @@ GameConfig.Attributes = {
 	SelectedSeed = "SelectedSeed",
 	RevengeTokens = "RevengeTokens",
 	TargetPlot = "TargetPlot",
+}
+
+--[[
+	Published on every damageable entity's model. Clients derive current health
+	from these with Shared.Combat, so a health bar needs no remote and no
+	per-frame updates - exactly like crop growth derives from PlantedAt.
+]]
+GameConfig.HealthAttributes = {
+	MaxHealth = "MaxHealth",
+	HealthBase = "HealthBase",
+	DamagedAt = "DamagedAt",
+	RegenPerSecond = "RegenPerSecond",
+	ArmourClass = "ArmourClass",
+	Shattered = "Shattered",
 }
 
 GameConfig.PlotAttributes = {
@@ -956,6 +1099,41 @@ for seedId, plantable in GameConfig.Plantables do
 	)
 end
 
+for id, archetype in GameConfig.Archetypes do
+	assert(archetype.Id == id, `archetype {id} has a mismatched Id field`)
+	assert(archetype.MaxHealth > 0, `archetype {id} must have positive MaxHealth`)
+	assert(
+		table.find(GameConfig.Combat.ArmourClasses, archetype.ArmourClass) ~= nil,
+		`archetype {id} has unknown armour class {archetype.ArmourClass}`
+	)
+	assert(
+		archetype.DestroyBehaviour == "Remove" or archetype.DestroyBehaviour == "Shatter",
+		`archetype {id} has unknown DestroyBehaviour {tostring(archetype.DestroyBehaviour)}`
+	)
+
+	if archetype.Repairable then
+		assert(archetype.RepairCostPerHealth ~= nil, `repairable archetype {id} needs RepairCostPerHealth`)
+
+		for resourceId in archetype.RepairCostPerHealth do
+			assert(
+				GameConfig.Resources[resourceId] ~= nil,
+				`archetype {id} repair cost names unknown resource {resourceId}`
+			)
+		end
+	end
+end
+
+-- Every damage type must price every armour class, or a missing pairing would
+-- silently fall back to unmodified damage and quietly break the counter system.
+for _, damageType in GameConfig.Combat.DamageTypes do
+	local row = GameConfig.Combat.Multipliers[damageType]
+	assert(row ~= nil, `damage type {damageType} has no multiplier row`)
+
+	for _, armourClass in GameConfig.Combat.ArmourClasses do
+		assert(row[armourClass] ~= nil, `damage type {damageType} is missing a multiplier for {armourClass}`)
+	end
+end
+
 for index, age in GameConfig.Ages do
 	assert(age.Index == index, `age {index} has a mismatched Index field`)
 
@@ -988,6 +1166,7 @@ table.freeze(GameConfig.Attributes)
 table.freeze(GameConfig.PlotAttributes)
 table.freeze(GameConfig.RemoteNames)
 table.freeze(GameConfig.ItemCategories)
+table.freeze(GameConfig.HealthAttributes)
 table.freeze(GameConfig.TransactionActions)
 
 return GameConfig

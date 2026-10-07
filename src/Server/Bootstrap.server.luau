@@ -69,6 +69,7 @@ if not GameConfig then
 	table.insert(missing, "ReplicatedStorage.Shared.GameConfig")
 end
 
+local DamageableService = requireServer("Combat.DamageableService")
 local PlayerDataService = requireServer("Services.PlayerDataService")
 local PlotService = requireServer("Services.PlotService")
 local ShopService = requireServer("Services.ShopService")
@@ -115,6 +116,7 @@ local guardModule = resolve(serverRoot, "FrameworkGuard")
 
 if guardModule then
 	require(guardModule).Assert(GameConfig.FrameworkVersion, {
+		DamageableService = DamageableService,
 		PlayerDataService = PlayerDataService,
 		PlotService = PlotService,
 		ShopService = ShopService,
@@ -132,6 +134,7 @@ end
 --------------------------------------------------------------------------------
 
 PlayerDataService:Start()
+DamageableService:Start()
 PlotService:Start()
 ShopService:Start()
 

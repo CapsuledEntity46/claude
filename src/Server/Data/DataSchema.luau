@@ -106,7 +106,8 @@ DataSchema.Template = {
 
 	--[[
 		Planted crops, keyed by STRINGIFIED plot index:
-			Plots = { ["1"] = { SeedId = "CarrotSeed", PlantedAt = 1700000000 } }
+			Plots = { ["1"] = { SeedId = "CarrotSeed", PlantedAt = 1700000000,
+		                    Health = 100, DamagedAt = 1700000000 } }
 
 		String keys are deliberate. DataStores serialise through JSON, which
 		does not round-trip sparse integer keys. Growth is derived from
@@ -408,6 +409,19 @@ function DataSchema.Normalize(data: { [string]: any }): { [string]: any }
 		-- A PlantedAt in the future would stall growth forever, which is both a
 		-- clock-skew symptom and an obvious tamper target.
 		entry.PlantedAt = math.min(math.floor(plantedAt), now)
+
+		-- Crop health, persisted so damage survives a rejoin. Absent means
+		-- undamaged; the registry fills in full health on load.
+		local cropMax = GameConfig.Archetypes.Crop.MaxHealth
+		local health = toFiniteNumber(entry.Health)
+
+		if health == nil then
+			entry.Health = nil
+			entry.DamagedAt = nil
+		else
+			entry.Health = math.clamp(math.floor(health), 0, cropMax)
+			entry.DamagedAt = math.min(math.floor(toFiniteNumber(entry.DamagedAt) or now), now)
+		end
 	end
 
 	return data

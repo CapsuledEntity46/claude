@@ -37,6 +37,8 @@ local Growth = require(Shared.Growth)
 local Remotes = require(Shared.Remotes)
 local Signal = require(Shared.Signal)
 
+local DamageableService = require(script.Parent.Parent.Combat.DamageableService)
+
 local CropFactory = require(script.Parent.Parent.Plots.CropFactory)
 local PlotBuilder = require(script.Parent.Parent.Plots.PlotBuilder)
 local PlayerDataService = require(script.Parent.PlayerDataService)
@@ -47,7 +49,7 @@ local EMPTY_STAGE = GameConfig.Growth.EmptyStage
 local PlotService = {}
 
 -- Checked against GameConfig.FrameworkVersion by Server.FrameworkGuard.
-PlotService.FrameworkVersion = 7
+PlotService.FrameworkVersion = 8
 
 PlotService._started = false
 PlotService._gardens = {} :: { [Player]: any }
@@ -63,6 +65,7 @@ PlotService.Planted = Signal.new() -- (player, plotIndex, seedId)
 PlotService.Harvested = Signal.new() -- (player, plotIndex, seedId)
 PlotService.PlantFailed = Signal.new() -- (player, plotIndex, reason)
 PlotService.GrowthBoosted = Signal.new() -- (player, plotIndex, seedId)
+PlotService.CropDestroyed = Signal.new() -- (player, plotIndex, seedId)
 
 --------------------------------------------------------------------------------
 -- Helpers
@@ -146,6 +149,46 @@ function PlotService:_renderCrop(plot: Model, seedId: string, stage: string)
 	end
 end
 
+--[[
+	Registers a planted crop with the damageable registry, so it has health like
+	any building or unit, and keeps its health persisted on the plot entry.
+
+	Crops regenerate (slowly) and cannot be repaired - the asymmetry against
+	buildings is deliberate. Because health is derived from a timestamp, a crop
+	heals while the player is offline with no ticking.
+]]
+function PlotService:_registerCrop(player: Player, plot: Model, index: number, entry: { [string]: any })
+	self:_unregisterCrop(plot)
+
+	local entityId = DamageableService:Register({
+		ArchetypeId = "Crop",
+		Model = plot,
+		OwnerUserId = player.UserId,
+		Level = 1,
+		State = if entry.Health then { Health = entry.Health, DamagedAt = entry.DamagedAt } else nil,
+	})
+
+	if not entityId then
+		return
+	end
+
+	plot:SetAttribute("EntityId", entityId)
+
+	local garden = self._gardens[player]
+	if garden then
+		garden.Entities[index] = entityId
+	end
+end
+
+function PlotService:_unregisterCrop(plot: Model)
+	local existing = plot:GetAttribute("EntityId")
+
+	if existing then
+		DamageableService:Unregister(existing)
+		plot:SetAttribute("EntityId", nil)
+	end
+end
+
 --- Writes the planted state onto the plot's attributes and rebuilds its crop.
 function PlotService:_projectPlanted(plot: Model, seedId: string, plantedAt: number, now: number)
 	local stage = Growth.GetStage(seedId, plantedAt, now)
@@ -159,6 +202,8 @@ function PlotService:_projectPlanted(plot: Model, seedId: string, plantedAt: num
 end
 
 function PlotService:_projectEmpty(plot: Model)
+	self:_unregisterCrop(plot)
+
 	plot:SetAttribute(PLOT_ATTR.SeedId, "")
 	plot:SetAttribute(PLOT_ATTR.PlantedAt, 0)
 	plot:SetAttribute(PLOT_ATTR.ReadyAt, 0)
@@ -372,6 +417,7 @@ function PlotService:_tryPlant(player: Player, plot: Model): boolean
 	PlayerDataService:IncrementStat(player, "TotalPlanted", 1)
 
 	self:_projectPlanted(plot, seedId, plantedAt, plantedAt)
+	self:_registerCrop(player, plot, index, data.Plots[plotKey(index)])
 	self:_refreshPrompt(player, plot)
 	self.Planted:Fire(player, index, seedId)
 
@@ -488,6 +534,7 @@ function PlotService:_assignGarden(player: Player, data: { [string]: any })
 		Model = model,
 		Slot = slot,
 		Plots = {},
+		Entities = {},
 		Connections = {},
 	}
 
@@ -516,6 +563,7 @@ function PlotService:_assignGarden(player: Player, data: { [string]: any })
 
 		if entry and GameConfig.GetPlantable(entry.SeedId) then
 			self:_projectPlanted(plot, entry.SeedId, entry.PlantedAt, now)
+			self:_registerCrop(player, plot, index, entry)
 		else
 			data.Plots[plotKey(index)] = nil
 			self:_projectEmpty(plot)
@@ -748,6 +796,55 @@ function PlotService:Start()
 	-- Levelling up can unlock plots, so prompts and lock tints must refresh.
 	PlayerDataService.LevelChanged:Connect(function(player: Player)
 		self:_refreshAllPrompts(player)
+	end)
+
+	--[[
+		Crop health lives in the damageable registry, but must survive a rejoin,
+		so it is mirrored back onto the plot entry whenever it changes. The
+		registry deliberately knows nothing about profiles - persisting its
+		state is the owning system's job.
+	]]
+	local function resolveCrop(entity)
+		if entity.ArchetypeId ~= "Crop" or not entity.Model then
+			return nil, nil, nil
+		end
+
+		local owner = Players:GetPlayerByUserId(entity.OwnerUserId)
+		local data = if owner then PlayerDataService:GetData(owner) else nil
+
+		if not data then
+			return nil, nil, nil
+		end
+
+		local index = entity.Model:GetAttribute(PLOT_ATTR.PlotIndex)
+		local key = if index then plotKey(index) else nil
+
+		return owner, key, if key then data.Plots[key] else nil
+	end
+
+	DamageableService.StateChanged:Connect(function(_, state, entity)
+		local _owner, _key, plotEntry = resolveCrop(entity)
+
+		if plotEntry then
+			plotEntry.Health = state.Health
+			plotEntry.DamagedAt = state.DamagedAt
+		end
+	end)
+
+	-- A crop killed by damage frees its plot, exactly like harvesting does.
+	DamageableService.Destroyed:Connect(function(_, _killer, entity)
+		local owner, key, plotEntry = resolveCrop(entity)
+
+		if not owner or not plotEntry then
+			return
+		end
+
+		local seedId = plotEntry.SeedId
+		PlayerDataService:GetData(owner).Plots[key] = nil
+
+		self:_projectEmpty(entity.Model)
+		self:_refreshPrompt(owner, entity.Model)
+		self.CropDestroyed:Fire(owner, tonumber(key), seedId)
 	end)
 
 	local selectSeed = Remotes.GetEvent(GameConfig.RemoteNames.SelectSeed)

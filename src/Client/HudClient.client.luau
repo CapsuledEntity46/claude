@@ -29,7 +29,7 @@ local Shared = ReplicatedStorage:WaitForChild("Shared")
 local GameConfig = require(Shared.GameConfig)
 local Remotes = require(Shared.Remotes)
 
-local EXPECTED_FRAMEWORK = 7
+local EXPECTED_FRAMEWORK = 8
 
 local player = Players.LocalPlayer
 local ATTR = GameConfig.Attributes

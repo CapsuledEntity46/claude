@@ -52,11 +52,19 @@ export type ItemDefinition = {
 export type PlantableDefinition = {
 	SeedId: string, -- item id of the seed consumed when planting
 	Yields: string, -- item id of the crop produced on harvest
-	YieldAmount: number,
+	YieldAmount: number, -- per plant, so a full square yields this times its count
 	GrowTime: number, -- seconds from planting to fully grown
-	XPReward: number,
+	XPReward: number, -- per plant, scaled the same way
 	RequiredLevel: number, -- gates both buying and planting
+	PlantSize: string, -- key into GameConfig.PlantSizes; sets how many fit per farm
 	Color: Color3, -- growing plant tint, also used by shop UI swatches
+}
+
+export type PlantSizeDefinition = {
+	Id: string,
+	Name: string,
+	PerFarm: number, -- how many of this size fit in one farm square
+	VisualScale: number, -- multiplier on the rendered plant
 }
 
 local GameConfig = {}
@@ -71,7 +79,7 @@ local GameConfig = {}
 	tree fails with a message naming the stale module instead of a nil-index
 	deep inside unrelated code.
 ]]
-GameConfig.FrameworkVersion = 12
+GameConfig.FrameworkVersion = 13
 
 --------------------------------------------------------------------------------
 -- Persistence
@@ -233,8 +241,15 @@ end
 	every time the player logs in having spent it - an infinite item exploit.
 	Granting from here behind the StarterKitGranted flag happens exactly once.
 ]]
+--[[
+	Exactly enough to fill one farm square, so a new player's first planting
+	fills it rather than leaving six visible gaps and an empty seed pouch.
+
+	Tied to the Small tier's density on purpose: raising how many carrots fit
+	in a square without raising this would silently make the opening worse.
+]]
 GameConfig.StarterKit = {
-	CarrotSeed = 3,
+	CarrotSeed = 9,
 }
 
 --------------------------------------------------------------------------------
@@ -504,6 +519,77 @@ function GameConfig.IsSellable(item: ItemDefinition): boolean
 end
 
 --------------------------------------------------------------------------------
+-- Plant sizes (how densely a crop packs into one farm square)
+--------------------------------------------------------------------------------
+
+--[[
+	How many plants of a kind share a farm square, and how big each one looks.
+
+	The point is to make food cheap in SPACE. A farm square that holds one
+	carrot means a player feeding themselves has no room left for anything
+	else, and the interesting plants - the ones that shoot back - never get
+	built. Nine carrots to a square means food is a couple of squares and the
+	rest of the base can be defences.
+
+	So density is a property of the PLANT, not of the farm: the farm is just
+	tilled ground. A pumpkin takes a third of a square because it is a
+	pumpkin, and a combat plant takes a whole one because it needs the room to
+	work.
+
+	`VisualScale` keeps that readable at a glance - nine small plants, three
+	fat ones, or one big one - rather than making the player count.
+]]
+GameConfig.PlantSizes = {
+	Small = {
+		Id = "Small",
+		Name = "Small",
+		PerFarm = 9,
+		VisualScale = 0.55,
+	},
+
+	Large = {
+		Id = "Large",
+		Name = "Large",
+		PerFarm = 3,
+		VisualScale = 1.0,
+	},
+
+	--[[
+		One per square, reserved for the offensive and defensive plants in
+		docs/ROADMAP.md. Nothing uses this tier yet; it exists so the rule is
+		settled before the plants arrive, because retrofitting density onto a
+		combat plant means rebalancing every wave that fights it.
+	]]
+	Special = {
+		Id = "Special",
+		Name = "Special",
+		PerFarm = 1,
+		VisualScale = 1.3,
+	},
+} :: { [string]: PlantSizeDefinition }
+
+function GameConfig.GetPlantSize(sizeId: unknown): PlantSizeDefinition?
+	if type(sizeId) ~= "string" then
+		return nil
+	end
+
+	return GameConfig.PlantSizes[sizeId]
+end
+
+--- How many of `seedId` fit in one farm square. 0 for an unknown seed, so a
+--- caller that forgets to validate cannot accidentally plant something.
+function GameConfig.GetPlantCapacity(seedId: unknown): number
+	local plantable = GameConfig.GetPlantable(seedId)
+
+	if not plantable then
+		return 0
+	end
+
+	local size = GameConfig.GetPlantSize(plantable.PlantSize)
+	return if size then size.PerFarm else 0
+end
+
+--------------------------------------------------------------------------------
 -- Plantables (gardening behaviour, keyed by seed item id)
 --------------------------------------------------------------------------------
 
@@ -515,6 +601,7 @@ GameConfig.Plantables = {
 		GrowTime = 30,
 		XPReward = 10,
 		RequiredLevel = 1,
+		PlantSize = "Small",
 		Color = Color3.fromRGB(237, 139, 48),
 	},
 	WheatSeed = {
@@ -524,6 +611,7 @@ GameConfig.Plantables = {
 		GrowTime = 45,
 		XPReward = 16,
 		RequiredLevel = 2,
+		PlantSize = "Small",
 		Color = Color3.fromRGB(214, 183, 90),
 	},
 	TomatoSeed = {
@@ -533,6 +621,7 @@ GameConfig.Plantables = {
 		GrowTime = 60,
 		XPReward = 22,
 		RequiredLevel = 3,
+		PlantSize = "Small",
 		Color = Color3.fromRGB(214, 61, 56),
 	},
 	PumpkinSeed = {
@@ -542,6 +631,7 @@ GameConfig.Plantables = {
 		GrowTime = 150,
 		XPReward = 55,
 		RequiredLevel = 8,
+		PlantSize = "Large",
 		Color = Color3.fromRGB(226, 132, 38),
 	},
 	WatermelonSeed = {
@@ -551,6 +641,7 @@ GameConfig.Plantables = {
 		GrowTime = 320,
 		XPReward = 140,
 		RequiredLevel = 15,
+		PlantSize = "Large",
 		Color = Color3.fromRGB(72, 160, 84),
 	},
 	GoldenAppleSeed = {
@@ -560,6 +651,7 @@ GameConfig.Plantables = {
 		GrowTime = 600,
 		XPReward = 420,
 		RequiredLevel = 25,
+		PlantSize = "Large",
 		Color = Color3.fromRGB(240, 199, 62),
 	},
 	StarfruitSeed = {
@@ -569,6 +661,7 @@ GameConfig.Plantables = {
 		GrowTime = 1_200,
 		XPReward = 1_250,
 		RequiredLevel = 40,
+		PlantSize = "Large",
 		Color = Color3.fromRGB(126, 118, 224),
 	},
 } :: { [string]: PlantableDefinition }
@@ -1013,7 +1106,7 @@ GameConfig.Structures = {
 		RequiredAge = 1,
 		Prerequisites = {},
 		Cost = { Wood = 300, Stone = 100 },
-		Size = Vector3.new(14, 10, 14),
+		Size = Vector3.new(16, 10, 16),
 		Color = Color3.fromRGB(176, 148, 108),
 		MaxPerPlayer = 1,
 		SortOrder = 10,
@@ -1041,7 +1134,7 @@ GameConfig.Structures = {
 		RequiredAge = 1,
 		Prerequisites = { "TownCenter" },
 		Cost = { Wood = 100 },
-		Size = Vector3.new(10, 8, 10),
+		Size = Vector3.new(12, 8, 12),
 		Color = Color3.fromRGB(150, 118, 76),
 		MaxPerPlayer = 4,
 		SortOrder = 30,
@@ -1050,7 +1143,7 @@ GameConfig.Structures = {
 	Farm = {
 		Id = "Farm",
 		Name = "Farm",
-		Description = "A tilled plot for one crop. Requires a Mill in your settlement.",
+		Description = "Tilled ground. Holds a stack of one crop; requires a Mill in your settlement.",
 		ArchetypeId = "Farm",
 		RequiredAge = 1,
 		Prerequisites = { "Mill" },
@@ -1072,7 +1165,7 @@ GameConfig.Structures = {
 		RequiredAge = 2,
 		Prerequisites = { "TownCenter" },
 		Cost = { Wood = 50, Stone = 125 },
-		Size = Vector3.new(6, 16, 6),
+		Size = Vector3.new(8, 16, 8),
 		Color = Color3.fromRGB(142, 146, 152),
 		MaxPerPlayer = 6,
 		SortOrder = 50,
@@ -1080,9 +1173,32 @@ GameConfig.Structures = {
 } :: { [string]: StructureDefinition }
 
 GameConfig.Placement = {
-	-- Minimum gap between two structures' footprints, so bases cannot be built
-	-- as a solid impenetrable block.
-	MinimumGap = 2,
+	--[[
+		The tile the world is built on, in studs.
+
+		Age of Empires is a tile grid: every building occupies a whole number
+		of tiles and lands aligned to them, which is why farms there form an
+		unbroken quilt instead of a scatter with slivers between. Every
+		structure's footprint here is asserted to be a whole number of tiles,
+		so any two of them can sit flush.
+
+		This is also the snap tolerance: aim within half a tile of flush and
+		the structure locks to it.
+	]]
+	GridSize = 4,
+
+	--[[
+		Zero: structures may touch.
+
+		A gap was the old rule, to stop bases becoming a solid block. But a
+		farm quilt IS a solid block, and that is the point - AoE lets you build
+		walls and farms flush. Blocking it meant every farm was ringed by a
+		two-stud alley, which is exactly the look the grid is meant to remove.
+
+		Kept as config because "bases cannot be impenetrable" may come back as
+		a rule about walls and gates, which is where it actually belongs.
+	]]
+	MinimumGap = 0,
 
 	-- Half-extent of the buildable world, inside the baseplate.
 	WorldLimit = 240,
@@ -1093,6 +1209,31 @@ GameConfig.Placement = {
 	RequestsPerSecond = 4,
 	BurstSize = 6,
 }
+
+--[[
+	Snaps a placement centre onto the build grid.
+
+	Snapped by the footprint's MIN CORNER rather than its centre, and the
+	difference matters. A structure two tiles wide has its centre on a tile
+	boundary; one three tiles wide has its centre in the middle of a tile. Snap
+	centres to the grid and those two can never sit flush - the even ones end
+	up half a tile out from the odd ones. Snap corners and every footprint
+	tiles with every other, whatever its size.
+
+	Lives in config, not in the placement service, because the client's ghost
+	has to reach the same answer. Two implementations of this would drift and
+	the preview would start lying about where the building lands.
+]]
+function GameConfig.SnapPlacement(structure: StructureDefinition, x: number, z: number): (number, number)
+	local grid = GameConfig.Placement.GridSize
+
+	local function snap(value: number, halfExtent: number): number
+		local corner = value - halfExtent
+		return math.floor(corner / grid + 0.5) * grid + halfExtent
+	end
+
+	return snap(x, structure.Size.X / 2), snap(z, structure.Size.Z / 2)
+end
 
 function GameConfig.GetStructure(structureId: unknown): StructureDefinition?
 	if type(structureId) ~= "string" then
@@ -1215,6 +1356,10 @@ GameConfig.FarmAttributes = {
 	PlantedAt = "PlantedAt",
 	ReadyAt = "ReadyAt",
 	Stage = "Stage",
+	-- How many plants are in the square, and how many would fit. Both are
+	-- published so a client can draw "5/9" without consulting the plantable.
+	PlantCount = "PlantCount", -- 0 when fallow
+	PlantCapacity = "PlantCapacity", -- 0 when fallow
 }
 
 -- A single flat folder now: one attribute per item id, no category subfolders.
@@ -1466,10 +1611,27 @@ for id, item in GameConfig.Items do
 	assert(item.SellPrice == nil or item.SellPrice > 0, `item {id} has a non-positive SellPrice`)
 end
 
+for id, size in GameConfig.PlantSizes do
+	assert(size.Id == id, `plant size {id} has a mismatched Id field`)
+	assert(size.PerFarm >= 1, `plant size {id} must fit at least one plant per farm`)
+	assert(size.VisualScale > 0, `plant size {id} must have a positive VisualScale`)
+
+	--[[
+		Capped because the count is also a LAYOUT: the farm renders its plants
+		on a grid, and past about this many on an eight stud square they stop
+		being distinguishable from a green smear.
+	]]
+	assert(size.PerFarm <= 16, `plant size {id} packs {size.PerFarm} per farm, which cannot be rendered legibly`)
+end
+
 for seedId, plantable in GameConfig.Plantables do
 	assert(plantable.SeedId == seedId, `plantable {seedId} has a mismatched SeedId field`)
 	assert(plantable.GrowTime > 0, `plantable {seedId} must have a positive GrowTime`)
 	assert(plantable.YieldAmount > 0, `plantable {seedId} must yield a positive amount`)
+	assert(
+		GameConfig.PlantSizes[plantable.PlantSize] ~= nil,
+		`plantable {seedId} has unknown PlantSize {tostring(plantable.PlantSize)}`
+	)
 
 	local seedItem = GameConfig.Items[seedId]
 	assert(seedItem ~= nil, `plantable {seedId} has no matching item in the directory`)
@@ -1485,6 +1647,21 @@ end
 
 for id, structure in GameConfig.Structures do
 	assert(structure.Id == id, `structure {id} has a mismatched Id field`)
+
+	--[[
+		Footprints must be a whole number of tiles, or the structure cannot sit
+		flush against its neighbours and the grid stops meaning anything. A
+		farm quilt with slivers in it is the symptom, and it is a confusing one
+		to trace back to a Size field.
+	]]
+	for _, axis in { "X", "Z" } do
+		local extent = structure.Size[axis]
+		assert(
+			extent % GameConfig.Placement.GridSize == 0,
+			`structure {id} is {extent} studs on {axis}, which is not a whole number of `
+				.. `{GameConfig.Placement.GridSize} stud tiles`
+		)
+	end
 	assert(GameConfig.Archetypes[structure.ArchetypeId] ~= nil, `structure {id} names unknown archetype`)
 	assert(structure.MaxPerPlayer > 0, `structure {id} must allow at least one`)
 	assert(structure.RequiredAge >= 1 and structure.RequiredAge <= #GameConfig.Ages, `structure {id} has a bad age`)
@@ -1678,6 +1855,21 @@ end
 for itemId, amount in GameConfig.StarterKit do
 	assert(GameConfig.Items[itemId] ~= nil, `StarterKit references unknown item {itemId}`)
 	assert(amount > 0, `StarterKit entry {itemId} must be positive`)
+
+	--[[
+		A starting seed must arrive in square-filling quantity. Hand out fewer
+		than a square holds and the player's first action plants a sparse
+		square they can never top up, which looks like the farm is broken.
+	]]
+	local capacity = GameConfig.GetPlantCapacity(itemId)
+
+	if capacity > 0 then
+		assert(
+			amount >= capacity,
+			`StarterKit gives {amount} {itemId} but a square holds {capacity}, `
+				.. `so the first planting cannot fill one`
+		)
+	end
 end
 
 table.freeze(GameConfig.Attributes)
@@ -1689,6 +1881,7 @@ table.freeze(GameConfig.StructureAttributes)
 table.freeze(GameConfig.Interaction)
 table.freeze(GameConfig.TransactionActions)
 table.freeze(GameConfig.StatusEffectRules)
+table.freeze(GameConfig.PlantSizes)
 
 return GameConfig
 

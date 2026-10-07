@@ -57,7 +57,7 @@ local StructureBuilder = require(script.Parent.StructureBuilder)
 
 local PlacementService = {}
 
-PlacementService.FrameworkVersion = 12
+PlacementService.FrameworkVersion = 13
 
 PlacementService._started = false
 PlacementService._placed = {} :: { [Player]: any }
@@ -94,25 +94,29 @@ local function success(fields: { [string]: any })
 	return fields
 end
 
---- Coerces an untrusted coordinate, rejecting NaN, infinity and out-of-bounds.
-local function sanitizeCoordinate(value: unknown): number?
+--[[
+	Coerces an untrusted coordinate to a finite number.
+
+	Bounds are NOT checked here. Snapping moves a coordinate by up to half a
+	tile, so the limit has to be tested after the snap - otherwise a position
+	the ghost showed as legal could be rejected, or one it showed as illegal
+	accepted, and the preview would be subtly wrong near the world edge.
+]]
+local function toFiniteCoordinate(value: unknown): number?
 	local number = tonumber(value)
 
 	-- NaN fails the self-comparison; infinity survives math.floor and would
-	-- poison every later distance test, so both are rejected outright.
+	-- poison every later comparison, so both are rejected outright.
 	if number == nil or number ~= number or number == math.huge or number == -math.huge then
 		return nil
 	end
 
+	return number
+end
+
+local function isWithinWorld(value: number): boolean
 	local limit = GameConfig.Placement.WorldLimit
-
-	if number < -limit or number > limit then
-		return nil
-	end
-
-	-- Snapped to whole studs so saved positions stay compact and two players
-	-- cannot wedge structures together with sub-stud offsets.
-	return math.floor(number + 0.5)
+	return value >= -limit and value <= limit
 end
 
 --- Half-extents on the ground plane, plus the required gap.
@@ -287,10 +291,22 @@ function PlacementService:Place(player: Player, structureId: unknown, x: unknown
 		return failure(reason)
 	end
 
-	local px = sanitizeCoordinate(x)
-	local pz = sanitizeCoordinate(z)
+	local rawX = toFiniteCoordinate(x)
+	local rawZ = toFiniteCoordinate(z)
 
-	if px == nil or pz == nil then
+	if rawX == nil or rawZ == nil then
+		return failure("InvalidPosition")
+	end
+
+	--[[
+		Snapped server-side rather than trusting the client's snap. The ghost
+		snaps too, using the same config function, so an honest client sees
+		exactly where the building lands - but a dishonest one cannot wedge a
+		structure off-grid into a gap the grid is supposed to forbid.
+	]]
+	local px, pz = GameConfig.SnapPlacement(structure, rawX, rawZ)
+
+	if not isWithinWorld(px) or not isWithinWorld(pz) then
 		return failure("InvalidPosition")
 	end
 

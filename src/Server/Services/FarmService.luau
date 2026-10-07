@@ -27,12 +27,27 @@
 	-------------
 		Farm (Model)              structure entity - health, repairable
 		└── Crop (Model)          crop entity - health, regenerates
-		    └── Visual (Model)    rebuilt per growth stage
+		    ├── Plant1 (Model)    rebuilt per growth stage
+		    └── Plant2..N         laid out on a grid across the footprint
 		└── Body
 		    └── Interact          ProximityPrompt
 
 	The Crop container is stable so it can host the crop's health attributes,
-	while only the Visual inside it is rebuilt on a stage change.
+	while the plants inside it are rebuilt on a stage change.
+
+	STACKING
+	--------
+	One square holds SEVERAL plants of one kind - nine carrots, three
+	pumpkins, one combat plant - with the count set by the seed's size tier in
+	GameConfig.PlantSizes. The square is filled in a single planting action and
+	then committed: see TryPlant for why topping up a growing stack is not
+	allowed.
+
+	All the plants in a square share one `PlantedAt` and one crop entity.
+	That keeps growth derived from a single timestamp, as everywhere else, and
+	means a fire that reaches the square takes the whole stack - density buys
+	yield at the cost of concentrating risk, which is a trade worth having
+	rather than a bug.
 ]]
 
 local Players = game:GetService("Players")
@@ -55,9 +70,29 @@ local EMPTY_STAGE = GameConfig.Growth.EmptyStage
 local PROMPT_NAME = "Interact"
 local CROP_CONTAINER = "Crop"
 
+--- Fraction of the farm footprint the plants are laid out across, so the
+--- outer ones sit on soil rather than hanging over the edge.
+local PLANT_SPAN_FRACTION = 0.75
+
+--[[
+	How many plants are in the square. Zero when fallow.
+
+	Defaults to ONE rather than zero for an occupied square with no count,
+	which is what every record saved before stacking existed looks like. Read
+	as zero and an existing crop would render as bare soil and harvest for
+	nothing.
+]]
+local function plantCount(entry): number
+	if not entry.SeedId or entry.SeedId == "" then
+		return 0
+	end
+
+	return math.max(math.floor(tonumber(entry.PlantCount) or 1), 1)
+end
+
 local FarmService = {}
 
-FarmService.FrameworkVersion = 12
+FarmService.FrameworkVersion = 13
 
 FarmService._started = false
 FarmService._farms = {} :: { [Player]: any }
@@ -132,10 +167,10 @@ end
 	Rebuilds the crop visual for the current stage, keeping the Crop container
 	so the crop entity's model reference and health attributes stay valid.
 ]]
-function FarmService:_renderCrop(farm, seedId: string, stage: string)
+function FarmService:_renderCrop(farm, seedId: string, stage: string, count: number)
 	local container = farm.Model:FindFirstChild(CROP_CONTAINER)
 
-	if stage == EMPTY_STAGE or seedId == "" then
+	if stage == EMPTY_STAGE or seedId == "" or count < 1 then
 		if container then
 			container:Destroy()
 		end
@@ -148,18 +183,39 @@ function FarmService:_renderCrop(farm, seedId: string, stage: string)
 		container.Parent = farm.Model
 	end
 
-	local existing = container:FindFirstChild("Visual")
-	if existing then
-		existing:Destroy()
+	-- The plants are rebuilt, the CONTAINER is not: it is the crop entity's
+	-- model reference and carries the health attributes, so destroying it
+	-- would leave the damageable registry pointing at nothing.
+	for _, child in container:GetChildren() do
+		child:Destroy()
 	end
 
 	local structure = GameConfig.GetStructure("Farm")
-	local base = farm.Model.PrimaryPart.Position + Vector3.new(0, structure.Size.Y / 2, 0)
-	local visual = CropFactory.Create(seedId, stage, base)
+	local centre = farm.Model.PrimaryPart.Position + Vector3.new(0, structure.Size.Y / 2, 0)
 
-	if visual then
-		visual.Name = "Visual"
-		visual.Parent = container
+	local plantable = GameConfig.GetPlantable(seedId)
+	local size = if plantable then GameConfig.GetPlantSize(plantable.PlantSize) else nil
+
+	--[[
+		Slots come from CAPACITY, not from the count planted, so a part-filled
+		square shows its gaps. That is how a player discovers a carrot square
+		holds nine without being told, and it keeps the plants in the same
+		places as the square fills up.
+	]]
+	local slots = CropFactory.GetSlotPositions(
+		GameConfig.GetPlantCapacity(seedId),
+		centre,
+		structure.Size.X * PLANT_SPAN_FRACTION,
+		structure.Size.Z * PLANT_SPAN_FRACTION
+	)
+
+	for index = 1, math.min(count, #slots) do
+		local plant = CropFactory.Create(seedId, stage, slots[index], if size then size.VisualScale else 1)
+
+		if plant then
+			plant.Name = `Plant{index}`
+			plant.Parent = container
+		end
 	end
 
 	return container
@@ -172,8 +228,10 @@ function FarmService:_projectCrop(player: Player, farm, entry, now: number)
 	farm.Model:SetAttribute(FARM_ATTR.PlantedAt, entry.PlantedAt)
 	farm.Model:SetAttribute(FARM_ATTR.ReadyAt, Growth.GetReadyAt(entry.SeedId, entry.PlantedAt))
 	farm.Model:SetAttribute(FARM_ATTR.Stage, stage)
+	farm.Model:SetAttribute(FARM_ATTR.PlantCount, plantCount(entry))
+	farm.Model:SetAttribute(FARM_ATTR.PlantCapacity, GameConfig.GetPlantCapacity(entry.SeedId))
 
-	local container = self:_renderCrop(farm, entry.SeedId, stage)
+	local container = self:_renderCrop(farm, entry.SeedId, stage, plantCount(entry))
 
 	-- The crop is its own damageable entity: it regenerates, unlike the farm
 	-- it sits on, which must be repaired with resources.
@@ -199,8 +257,10 @@ function FarmService:_projectFallow(player: Player, farm)
 	farm.Model:SetAttribute(FARM_ATTR.PlantedAt, 0)
 	farm.Model:SetAttribute(FARM_ATTR.ReadyAt, 0)
 	farm.Model:SetAttribute(FARM_ATTR.Stage, EMPTY_STAGE)
+	farm.Model:SetAttribute(FARM_ATTR.PlantCount, 0)
+	farm.Model:SetAttribute(FARM_ATTR.PlantCapacity, 0)
 
-	self:_renderCrop(farm, "", EMPTY_STAGE)
+	self:_renderCrop(farm, "", EMPTY_STAGE, 0)
 	self:_refreshPrompt(player, farm)
 end
 
@@ -218,15 +278,22 @@ function FarmService:_refreshPrompt(player: Player, farm)
 		local selected = self:_resolveSeedId(player)
 		local item = GameConfig.GetItem(selected)
 
+		-- Shows how many this press would actually plant, which is the
+		-- cheapest way to teach that a square holds a stack.
+		local willPlant = if selected
+			then math.min(GameConfig.GetPlantCapacity(selected), PlayerDataService:GetItemCount(player, selected))
+			else 0
+
 		prompt.Enabled = true
 		prompt.ActionText = "Plant"
-		prompt.ObjectText = if item then item.Name else "No seeds"
+		prompt.ObjectText = if item and willPlant > 0 then `{item.Name} x{willPlant}` else "No seeds"
 		return
 	end
 
 	local plantable = GameConfig.GetPlantable(seedId)
 	local yieldItem = if plantable then GameConfig.GetItem(plantable.Yields) else nil
-	local displayName = if yieldItem then yieldItem.Name else seedId
+	local baseName = if yieldItem then yieldItem.Name else seedId
+	local displayName = `{baseName} x{plantCount(entry) * (if plantable then plantable.YieldAmount else 1)}`
 
 	if Growth.IsMature(farm.Model:GetAttribute(FARM_ATTR.Stage)) then
 		prompt.Enabled = true
@@ -299,7 +366,18 @@ function FarmService:TryPlant(player: Player, instanceId: string): boolean
 		return false
 	end
 
-	-- The profile, not the attribute, decides whether the farm is occupied.
+	--[[
+		The profile, not the attribute, decides whether the farm is occupied -
+		and an occupied square cannot be topped up.
+
+		Allowing a top-up means choosing between two bad options. Keep the
+		original PlantedAt and you can plant one carrot, wait until it is
+		nearly ripe, add eight more and harvest nine - a duplication exploit
+		of exactly the kind the Instant Grow backdating turned out to be.
+		Reset PlantedAt instead and adding a ninth carrot throws away the
+		progress of eight nearly-ripe ones, which reads as a bug rather than
+		as a rule. So the square fills in one action and is then committed.
+	]]
 	if entry.SeedId and entry.SeedId ~= "" then
 		self.PlantFailed:Fire(player, instanceId, "Occupied")
 		return false
@@ -317,9 +395,23 @@ function FarmService:TryPlant(player: Player, instanceId: string): boolean
 		return false
 	end
 
-	-- Atomic: the seed is consumed before the crop exists, so a spammed prompt
-	-- cannot plant twice from one seed.
-	if not PlayerDataService:RemoveItem(player, seedId, 1) then
+	--[[
+		One press fills the square: as many as fit, or as many as are held.
+
+		Planting fewer than a full square is allowed rather than refused - a
+		player with three seeds should be able to use them. They just cannot
+		add the other six later, per the commitment rule above.
+	]]
+	local count = math.min(GameConfig.GetPlantCapacity(seedId), PlayerDataService:GetItemCount(player, seedId))
+
+	if count < 1 then
+		self.PlantFailed:Fire(player, instanceId, "NoSeeds")
+		return false
+	end
+
+	-- Atomic: the seeds are consumed before the crop exists, so a spammed
+	-- prompt cannot plant two squares from one batch.
+	if not PlayerDataService:RemoveItem(player, seedId, count) then
 		self.PlantFailed:Fire(player, instanceId, "NoSeeds")
 		return false
 	end
@@ -327,13 +419,14 @@ function FarmService:TryPlant(player: Player, instanceId: string): boolean
 	local now = os.time()
 	entry.SeedId = seedId
 	entry.PlantedAt = now
+	entry.PlantCount = count
 	entry.CropHealth = nil
 	entry.CropDamagedAt = nil
 
-	PlayerDataService:IncrementStat(player, "TotalPlanted", 1)
+	PlayerDataService:IncrementStat(player, "TotalPlanted", count)
 
 	self:_projectCrop(player, farm, entry, now)
-	self.Planted:Fire(player, instanceId, seedId)
+	self.Planted:Fire(player, instanceId, seedId, count)
 
 	return true
 end
@@ -361,22 +454,28 @@ function FarmService:TryHarvest(player: Player, instanceId: string): boolean
 		return false
 	end
 
-	-- Granted before the farm is cleared, so a full stack leaves the crop in
-	-- the ground rather than destroying it.
-	if not PlayerDataService:AddItem(player, plantable.Yields, plantable.YieldAmount) then
+	-- Yield and XP are per PLANT, so a full square pays its whole stack. This
+	-- is the entire point of density: nine carrots of ground, nine carrots.
+	local count = plantCount(entry)
+	local yield = plantable.YieldAmount * count
+
+	-- Granted before the farm is cleared, so a full inventory leaves the crop
+	-- in the ground rather than destroying it.
+	if not PlayerDataService:AddItem(player, plantable.Yields, yield) then
 		return false
 	end
 
-	PlayerDataService:AddXP(player, plantable.XPReward)
-	PlayerDataService:IncrementStat(player, "TotalHarvested", 1)
+	PlayerDataService:AddXP(player, plantable.XPReward * count)
+	PlayerDataService:IncrementStat(player, "TotalHarvested", count)
 
 	entry.SeedId = ""
 	entry.PlantedAt = nil
+	entry.PlantCount = nil
 	entry.CropHealth = nil
 	entry.CropDamagedAt = nil
 
 	self:_projectFallow(player, farm)
-	self.Harvested:Fire(player, instanceId, plantable.Yields, plantable.YieldAmount)
+	self.Harvested:Fire(player, instanceId, plantable.Yields, yield)
 
 	return true
 end
@@ -604,7 +703,7 @@ function FarmService:_tick()
 
 				if stage ~= farm.Model:GetAttribute(FARM_ATTR.Stage) then
 					farm.Model:SetAttribute(FARM_ATTR.Stage, stage)
-					self:_renderCrop(farm, entry.SeedId, stage)
+					self:_renderCrop(farm, entry.SeedId, stage, plantCount(entry))
 					self:_refreshPrompt(player, farm)
 				end
 			end

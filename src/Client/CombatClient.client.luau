@@ -27,7 +27,7 @@ local Combat = require(Shared.Combat)
 local GameConfig = require(Shared.GameConfig)
 local StatusEffects = require(Shared.StatusEffects)
 
-local EXPECTED_FRAMEWORK = 12
+local EXPECTED_FRAMEWORK = 13
 
 if GameConfig.FrameworkVersion ~= EXPECTED_FRAMEWORK then
 	warn(

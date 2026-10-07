@@ -51,7 +51,7 @@ local RULES = GameConfig.StatusEffectRules
 
 local StatusEffectService = {}
 
-StatusEffectService.FrameworkVersion = 12
+StatusEffectService.FrameworkVersion = 13
 
 StatusEffectService._started = false
 --- entityId -> { [effectId]: record }

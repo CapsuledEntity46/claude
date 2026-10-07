@@ -27,7 +27,7 @@ local Shared = ReplicatedStorage:WaitForChild("Shared")
 local GameConfig = require(Shared.GameConfig)
 local Remotes = require(Shared.Remotes)
 
-local EXPECTED_FRAMEWORK = 12
+local EXPECTED_FRAMEWORK = 13
 
 local player = Players.LocalPlayer
 local ATTR = GameConfig.Attributes
@@ -368,8 +368,9 @@ local function beginPlacing(structure)
 			return
 		end
 
-		local x = math.floor(point.X + 0.5)
-		local z = math.floor(point.Z + 0.5)
+		-- The same config function the server uses, so the ghost sits exactly
+		-- where the building will land rather than approximately there.
+		local x, z = GameConfig.SnapPlacement(structure, point.X, point.Z)
 		lastPosition = Vector3.new(x, GameConfig.Placement.GroundY, z)
 
 		body.Position = Vector3.new(x, GameConfig.Placement.GroundY + structure.Size.Y / 2, z)

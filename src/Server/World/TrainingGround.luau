@@ -41,7 +41,7 @@ local StatusEffectService = require(script.Parent.Parent.Combat.StatusEffectServ
 
 local TrainingGround = {}
 
-TrainingGround.FrameworkVersion = 12
+TrainingGround.FrameworkVersion = 13
 
 local FOLDER_NAME = "TrainingGround"
 local DUMMY_ARCHETYPE = "EnemyRaider"

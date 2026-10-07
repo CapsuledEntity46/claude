@@ -61,7 +61,7 @@ end
 	`basePosition`. Returns nil when there is nothing to show (empty plot or an
 	unknown seed/stage), so callers can treat nil as "no crop".
 ]]
-function CropFactory.Create(seedId: string, stage: string, basePosition: Vector3): Model?
+function CropFactory.Create(seedId: string, stage: string, basePosition: Vector3, scale: number?): Model?
 	local plantable = GameConfig.GetPlantable(seedId)
 	if not plantable then
 		return nil
@@ -77,8 +77,12 @@ function CropFactory.Create(seedId: string, stage: string, basePosition: Vector3
 	local rarityScale = RARITY_SCALE[yieldItem and yieldItem.Rarity] or 1
 	local isMature = stage == GameConfig.Growth.MatureStage
 
-	local stemHeight = FULL_STEM_HEIGHT * stageScale
-	local fruitDiameter = FULL_FRUIT_DIAMETER * stageScale * rarityScale
+	-- Density scale, from the plant's size tier: nine carrots to a square have
+	-- to be smaller than the one pumpkin that would fill a third of it.
+	local sizeScale = math.max(tonumber(scale) or 1, 0.05)
+
+	local stemHeight = FULL_STEM_HEIGHT * stageScale * sizeScale
+	local fruitDiameter = FULL_FRUIT_DIAMETER * stageScale * rarityScale * sizeScale
 
 	local crop = Instance.new("Model")
 	crop.Name = CropFactory.ModelName
@@ -125,6 +129,62 @@ function CropFactory.Create(seedId: string, stage: string, basePosition: Vector3
 	crop.PrimaryPart = stem
 
 	return crop
+end
+
+--------------------------------------------------------------------------------
+-- Stack layout
+--------------------------------------------------------------------------------
+
+--[[
+	The most-square grid that holds exactly `capacity` plants, as (cols, rows).
+
+	Exactly, not at least: a 3x3 for nine and a 3x1 for three, never a 2x2 with
+	a hole in it. The grid is sized from CAPACITY rather than from how many are
+	actually planted, so a half-filled square shows its empty slots - which is
+	how the player learns a carrot square holds nine without being told.
+]]
+function CropFactory.GetLayout(capacity: number): (number, number)
+	local total = math.max(math.floor(tonumber(capacity) or 1), 1)
+
+	-- Largest divisor at or below the square root gives the squarest pair.
+	for rows = math.floor(math.sqrt(total)), 1, -1 do
+		if total % rows == 0 then
+			return total // rows, rows
+		end
+	end
+
+	return total, 1
+end
+
+--[[
+	Base positions for every slot in a square, in a stable order.
+
+	Ordered row by row so filling a square looks deliberate rather than
+	scattered, and so the same plant count always occupies the same slots.
+]]
+function CropFactory.GetSlotPositions(capacity: number, centre: Vector3, spanX: number, spanZ: number): { Vector3 }
+	local cols, rows = CropFactory.GetLayout(capacity)
+	local positions = {}
+
+	-- Cell centres: a single column sits on the middle, not against an edge.
+	local stepX = if cols > 1 then spanX / cols else 0
+	local stepZ = if rows > 1 then spanZ / rows else 0
+
+	for row = 1, rows do
+		for col = 1, cols do
+			table.insert(
+				positions,
+				centre
+					+ Vector3.new(
+						(col - (cols + 1) / 2) * stepX,
+						0,
+						(row - (rows + 1) / 2) * stepZ
+					)
+			)
+		end
+	end
+
+	return positions
 end
 
 return CropFactory

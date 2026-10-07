@@ -446,10 +446,32 @@ function DataSchema.Normalize(data: { [string]: any }): { [string]: any }
 			if type(entry.SeedId) ~= "string" or GameConfig.GetPlantable(entry.SeedId) == nil or plantedAt == nil then
 				entry.SeedId = ""
 				entry.PlantedAt = nil
+				entry.PlantCount = nil
 				entry.CropHealth = nil
 				entry.CropDamagedAt = nil
 			else
 				entry.PlantedAt = math.min(math.floor(plantedAt), now)
+
+				--[[
+					How many plants are in the square, clamped to what the seed
+					allows.
+
+					No schema migration accompanies this field, deliberately.
+					Structure entries are not covered by the Template, so
+					Reconcile never sees them and this block is the only place
+					they are defaulted - which means a record saved before
+					stacking existed is handled here, by reading a missing
+					count as ONE. That is exactly what such a record holds: a
+					single plant. A migration would do the same work in a
+					place that only runs once.
+
+					The clamp also matters after a config edit: dropping a
+					crop's capacity must not leave old squares over-full and
+					paying out more than the tier allows.
+				]]
+				local capacity = GameConfig.GetPlantCapacity(entry.SeedId)
+				local count = math.floor(toFiniteNumber(entry.PlantCount) or 1)
+				entry.PlantCount = math.clamp(count, 1, math.max(capacity, 1))
 
 				local cropMax = GameConfig.Archetypes.Crop.MaxHealth
 				local cropHealth = toFiniteNumber(entry.CropHealth)

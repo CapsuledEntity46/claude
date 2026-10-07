@@ -115,6 +115,23 @@ DataSchema.Template = {
 	]]
 	Plots = {},
 
+	--[[
+		Placed structures, keyed by STRINGIFIED instance id:
+			Structures = { ["1"] = { StructureId = "Mill", X = 20, Z = -10,
+			                         Health = 1200, DamagedAt = 1700000000 } }
+
+		String keys for the same reason as Plots: DataStores serialise through
+		JSON, which does not round-trip sparse integer keys.
+
+		Purely additive, so Reconcile backfills it and no migration is needed.
+		This is the collection that will eventually subsume Plots, once farms
+		become placed structures.
+	]]
+	Structures = {},
+
+	-- Monotonic, so an instance id is never reused even after a demolish.
+	NextStructureId = 0,
+
 	-- PurchaseIds already granted, oldest first: the receipt idempotency ledger.
 	PurchaseHistory = {},
 
@@ -375,6 +392,60 @@ function DataSchema.Normalize(data: { [string]: any }): { [string]: any }
 	end
 
 	data.PurchaseHistory = history
+
+	--------------------------------------------------------------------------
+	-- Structures
+	--------------------------------------------------------------------------
+
+	if type(data.Structures) ~= "table" then
+		data.Structures = {}
+	end
+
+	data.NextStructureId = math.max(math.floor(toFiniteNumber(data.NextStructureId) or 0), 0)
+
+	local highestId = 0
+
+	for key, entry in data.Structures do
+		local numericKey = toFiniteNumber(key)
+		local structure = if type(entry) == "table" then GameConfig.GetStructure(entry.StructureId) else nil
+		local x = if type(entry) == "table" then toFiniteNumber(entry.X) else nil
+		local z = if type(entry) == "table" then toFiniteNumber(entry.Z) else nil
+
+		-- Drop anything that cannot map onto a real structure, or that names a
+		-- structure removed from the directory.
+		local usable = type(key) == "string"
+			and numericKey ~= nil
+			and numericKey >= 1
+			and structure ~= nil
+			and x ~= nil
+			and z ~= nil
+
+		if not usable then
+			data.Structures[key] = nil
+			continue
+		end
+
+		local limit = GameConfig.Placement.WorldLimit
+		entry.X = math.clamp(math.floor(x), -limit, limit)
+		entry.Z = math.clamp(math.floor(z), -limit, limit)
+		entry.Shattered = entry.Shattered == true
+
+		local archetype = GameConfig.Archetypes[structure.ArchetypeId]
+		local health = toFiniteNumber(entry.Health)
+
+		if health == nil then
+			entry.Health = nil
+			entry.DamagedAt = nil
+		else
+			entry.Health = math.clamp(math.floor(health), 0, archetype.MaxHealth)
+			entry.DamagedAt = math.min(math.floor(toFiniteNumber(entry.DamagedAt) or now), now)
+		end
+
+        highestId = math.max(highestId, numericKey)
+	end
+
+	-- Never hand out an id that is already in use, even if the counter was lost.
+	data.NextStructureId = math.max(data.NextStructureId, highestId)
 
 	--------------------------------------------------------------------------
 	-- Plots

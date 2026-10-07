@@ -71,7 +71,7 @@ local GameConfig = {}
 	tree fails with a message naming the stale module instead of a nil-index
 	deep inside unrelated code.
 ]]
-GameConfig.FrameworkVersion = 8
+GameConfig.FrameworkVersion = 9
 
 --------------------------------------------------------------------------------
 -- Persistence
@@ -192,7 +192,7 @@ export type AgeDefinition = {
 	Advancing costs resources, never XP.
 ]]
 GameConfig.Ages = {
-	{ Index = 1, Name = "Dark Age", AdvanceCost = {} },
+	{ Index = 1, Name = "Stone Age", AdvanceCost = {} },
 	{ Index = 2, Name = "Feudal Age", AdvanceCost = { Food = 500 } },
 	{ Index = 3, Name = "Castle Age", AdvanceCost = { Food = 800, Gold = 200 } },
 	{ Index = 4, Name = "Imperial Age", AdvanceCost = { Food = 1_000, Gold = 800 } },
@@ -714,6 +714,30 @@ GameConfig.Archetypes = {
 		DestroyBehaviour = "Remove",
 	},
 
+	TownCenter = {
+		Id = "TownCenter",
+		Name = "Town Center",
+		MaxHealth = 3_000,
+		ArmourClass = "Building",
+		Armour = 8,
+		RegenPerSecond = 0,
+		Repairable = true,
+		RepairCostPerHealth = { Wood = 0.4, Stone = 0.2 },
+		DestroyBehaviour = "Remove",
+	},
+
+	Farm = {
+		Id = "Farm",
+		Name = "Farm",
+		MaxHealth = 300,
+		ArmourClass = "Building",
+		Armour = 0,
+		RegenPerSecond = 0,
+		Repairable = true,
+		RepairCostPerHealth = { Wood = 0.2 },
+		DestroyBehaviour = "Remove",
+	},
+
 	Mill = {
 		Id = "Mill",
 		Name = "Mill",
@@ -772,6 +796,165 @@ function GameConfig.GetArchetype(archetypeId: unknown): ArchetypeDefinition?
 	end
 
 	return GameConfig.Archetypes[archetypeId]
+end
+
+--------------------------------------------------------------------------------
+-- Structures (the build tree)
+--------------------------------------------------------------------------------
+
+export type StructureDefinition = {
+	Id: string,
+	Name: string,
+	Description: string,
+	ArchetypeId: string,
+	RequiredAge: number,
+	Prerequisites: { string },
+	Cost: { [string]: number },
+	Size: Vector3,
+	Color: Color3,
+	ProvidesRadius: number?,
+	RequiresWithinRadiusOf: string?,
+	MaxPerPlayer: number,
+	SortOrder: number,
+}
+
+--[[
+	The build tree, expressed entirely as data so adding a building is a config
+	edit.
+
+	Two distinct requirement types, and the game needs both:
+
+	  Prerequisites            the parent must EXIST somewhere you own. A plain
+	                           dependency check - Town Center before Mill.
+	  RequiresWithinRadiusOf   the new building must be placed INSIDE the
+	                           parent's ProvidesRadius. The aura requirement
+	                           that makes Mills matter: farms cluster around
+	                           them rather than sprawling.
+
+	A structure can have one, both or neither. Farm has both: you must own a
+	Mill, and the farm must sit next to one.
+
+	        TownCenter ──▶ Mill ──▶ Farm
+	                   └─▶ WatchTower (Bronze Age)
+	        Checkpoint (independent - the respawn anchor)
+]]
+GameConfig.Structures = {
+	TownCenter = {
+		Id = "TownCenter",
+		Name = "Town Center",
+		Description = "The heart of your settlement. Projects influence for everything else.",
+		ArchetypeId = "TownCenter",
+		RequiredAge = 1,
+		Prerequisites = {},
+		Cost = { Wood = 300, Stone = 100 },
+		Size = Vector3.new(14, 10, 14),
+		Color = Color3.fromRGB(176, 148, 108),
+		ProvidesRadius = 48,
+		MaxPerPlayer = 1,
+		SortOrder = 10,
+	},
+
+	Checkpoint = {
+		Id = "Checkpoint",
+		Name = "Checkpoint",
+		Description = "Your respawn anchor. If it falls it shatters rather than ending your run.",
+		ArchetypeId = "Checkpoint",
+		RequiredAge = 1,
+		Prerequisites = {},
+		Cost = { Wood = 150, Stone = 50 },
+		Size = Vector3.new(8, 12, 8),
+		Color = Color3.fromRGB(120, 132, 170),
+		ProvidesRadius = 32,
+		MaxPerPlayer = 1,
+		SortOrder = 20,
+	},
+
+	Mill = {
+		Id = "Mill",
+		Name = "Mill",
+		Description = "Processes harvests. Farms must be built within its influence.",
+		ArchetypeId = "Mill",
+		RequiredAge = 1,
+		Prerequisites = { "TownCenter" },
+		Cost = { Wood = 100 },
+		Size = Vector3.new(10, 8, 10),
+		Color = Color3.fromRGB(150, 118, 76),
+		ProvidesRadius = 26,
+		RequiresWithinRadiusOf = "TownCenter",
+		MaxPerPlayer = 4,
+		SortOrder = 30,
+	},
+
+	Farm = {
+		Id = "Farm",
+		Name = "Farm",
+		Description = "A tilled plot for one crop. Must be built beside a Mill.",
+		ArchetypeId = "Farm",
+		RequiredAge = 1,
+		Prerequisites = { "Mill" },
+		Cost = { Wood = 60 },
+		Size = Vector3.new(8, 1, 8),
+		Color = Color3.fromRGB(94, 66, 45),
+		RequiresWithinRadiusOf = "Mill",
+		MaxPerPlayer = 20,
+		SortOrder = 40,
+	},
+
+	WatchTower = {
+		Id = "WatchTower",
+		Name = "Watch Tower",
+		Description = "Defends your settlement. Requires the Bronze Age.",
+		ArchetypeId = "WatchTower",
+		RequiredAge = 2,
+		Prerequisites = { "TownCenter" },
+		Cost = { Wood = 50, Stone = 125 },
+		Size = Vector3.new(6, 16, 6),
+		Color = Color3.fromRGB(142, 146, 152),
+		RequiresWithinRadiusOf = "TownCenter",
+		MaxPerPlayer = 6,
+		SortOrder = 50,
+	},
+} :: { [string]: StructureDefinition }
+
+GameConfig.Placement = {
+	-- Minimum gap between two structures' footprints, so bases cannot be built
+	-- as a solid impenetrable block.
+	MinimumGap = 2,
+
+	-- Half-extent of the buildable world, inside the baseplate.
+	WorldLimit = 240,
+
+	-- Structures sit on the ground plane.
+	GroundY = 0,
+
+	RequestsPerSecond = 4,
+	BurstSize = 6,
+}
+
+function GameConfig.GetStructure(structureId: unknown): StructureDefinition?
+	if type(structureId) ~= "string" then
+		return nil
+	end
+
+	return GameConfig.Structures[structureId]
+end
+
+--- Structures in display order, for the build menu.
+function GameConfig.GetStructureList(): { StructureDefinition }
+	local list = {}
+
+	for _, structure in GameConfig.Structures do
+		table.insert(list, structure)
+	end
+
+	table.sort(list, function(a, b)
+		if a.SortOrder == b.SortOrder then
+			return a.Id < b.Id
+		end
+		return a.SortOrder < b.SortOrder
+	end)
+
+	return list
 end
 
 --------------------------------------------------------------------------------
@@ -851,6 +1034,14 @@ GameConfig.PlotAttributes = {
 -- A single flat folder now: one attribute per item id, no category subfolders.
 GameConfig.InventoryFolderName = "Inventory"
 GameConfig.GardensFolderName = "Gardens"
+GameConfig.StructuresFolderName = "Structures"
+
+GameConfig.StructureAttributes = {
+	OwnerUserId = "OwnerUserId",
+	StructureId = "StructureId",
+	InstanceId = "InstanceId",
+	ProvidesRadius = "ProvidesRadius",
+}
 
 GameConfig.RemoteNames = {
 	SelectSeed = "SelectSeed",
@@ -860,6 +1051,8 @@ GameConfig.RemoteNames = {
 	-- RemoteFunctions
 	ProcessTransaction = "ProcessTransaction",
 	SellAll = "SellAll",
+	PlaceStructure = "PlaceStructure",
+	DemolishStructure = "DemolishStructure",
 
 	-- Client asks the server to open a Robux dialog BY PRODUCT NAME, so
 	-- Developer Product ids never leave the server.
@@ -1099,6 +1292,32 @@ for seedId, plantable in GameConfig.Plantables do
 	)
 end
 
+for id, structure in GameConfig.Structures do
+	assert(structure.Id == id, `structure {id} has a mismatched Id field`)
+	assert(GameConfig.Archetypes[structure.ArchetypeId] ~= nil, `structure {id} names unknown archetype`)
+	assert(structure.MaxPerPlayer > 0, `structure {id} must allow at least one`)
+	assert(structure.RequiredAge >= 1 and structure.RequiredAge <= #GameConfig.Ages, `structure {id} has a bad age`)
+
+	for resourceId in structure.Cost do
+		assert(GameConfig.Resources[resourceId] ~= nil, `structure {id} costs unknown resource {resourceId}`)
+	end
+
+	-- A prerequisite or radius parent that does not exist would make the
+	-- structure permanently unbuildable, which is worse than a loud failure.
+	for _, prerequisiteId in structure.Prerequisites do
+		assert(GameConfig.Structures[prerequisiteId] ~= nil, `structure {id} requires unknown structure {prerequisiteId}`)
+	end
+
+	if structure.RequiresWithinRadiusOf then
+		local parent = GameConfig.Structures[structure.RequiresWithinRadiusOf]
+		assert(parent ~= nil, `structure {id} needs unknown radius parent`)
+		assert(
+			parent.ProvidesRadius ~= nil and parent.ProvidesRadius > 0,
+			`structure {id} requires the radius of {parent.Id}, which provides none`
+		)
+	end
+end
+
 for id, archetype in GameConfig.Archetypes do
 	assert(archetype.Id == id, `archetype {id} has a mismatched Id field`)
 	assert(archetype.MaxHealth > 0, `archetype {id} must have positive MaxHealth`)
@@ -1167,6 +1386,7 @@ table.freeze(GameConfig.PlotAttributes)
 table.freeze(GameConfig.RemoteNames)
 table.freeze(GameConfig.ItemCategories)
 table.freeze(GameConfig.HealthAttributes)
+table.freeze(GameConfig.StructureAttributes)
 table.freeze(GameConfig.TransactionActions)
 
 return GameConfig

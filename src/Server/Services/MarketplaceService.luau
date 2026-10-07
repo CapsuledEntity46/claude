@@ -61,7 +61,7 @@ local NOT_PROCESSED = Enum.ProductPurchaseDecision.NotProcessedYet
 local MarketplaceService = {}
 
 -- Checked against GameConfig.FrameworkVersion by Server.FrameworkGuard.
-MarketplaceService.FrameworkVersion = 8
+MarketplaceService.FrameworkVersion = 9
 
 MarketplaceService._started = false
 MarketplaceService._handlers = {}

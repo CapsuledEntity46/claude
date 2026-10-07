@@ -50,7 +50,7 @@ local HEALTH_ATTR = GameConfig.HealthAttributes
 
 local DamageableService = {}
 
-DamageableService.FrameworkVersion = 8
+DamageableService.FrameworkVersion = 9
 
 DamageableService._started = false
 DamageableService._entities = {}

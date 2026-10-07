@@ -74,6 +74,7 @@ local PlayerDataService = requireServer("Services.PlayerDataService")
 local PlotService = requireServer("Services.PlotService")
 local ShopService = requireServer("Services.ShopService")
 local MarketplaceService = requireServer("Services.MarketplaceService")
+local PlacementService = requireServer("World.PlacementService")
 local ShopBuilder = requireServer("World.ShopBuilder")
 
 if #missing > 0 then
@@ -119,6 +120,7 @@ if guardModule then
 		DamageableService = DamageableService,
 		PlayerDataService = PlayerDataService,
 		PlotService = PlotService,
+		PlacementService = PlacementService,
 		ShopService = ShopService,
 		MarketplaceService = MarketplaceService,
 	})
@@ -136,6 +138,7 @@ end
 PlayerDataService:Start()
 DamageableService:Start()
 PlotService:Start()
+PlacementService:Start()
 ShopService:Start()
 
 -- Started last: its receipt handlers grant through the services above.

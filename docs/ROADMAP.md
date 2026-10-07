@@ -316,6 +316,36 @@ Damage flavours: **fire**, **ice**, **poison**, **splash**.
 >   cooldown would round to 2 and become indistinguishable from a 2 second one
 >   — every attack profile would collapse into the same rate.
 
+### 2c. Selection and building menus ⬜
+
+Interaction is currently all ProximityPrompts, and it does not scale. Reported
+from play: the harvest prompt is large, repeatedly pressing **E** down a row of
+farms uproots combat plants by accident, and there is no way to *choose* which
+seed to plant — the server picks from a `SelectedSeed` attribute that nothing
+sets.
+
+The fix is the one an RTS wants anyway. Roblox gives a free mouse cursor, so:
+
+- **Click a building to select it.** A panel opens with the actions that
+  building actually has.
+- **A farm's panel** lists the player's seeds in tabs — food crops and combat
+  plants — so planting is a choice rather than whatever the server guessed. Plus
+  **Harvest All** and **Uproot**, so a mis-planted square can be cleared without
+  waiting for it to grow.
+- **Other buildings** get their own actions in the same frame: repair, demolish,
+  upgrade, and the per-building technology from the Mill/Barracks model.
+
+> **Architectural notes.**
+>
+> - Prompts stay for *world* interactions that are not about a building you own
+>   (the shop, the practice range, the raid horn). They are wrong for owned
+>   buildings, where the action list is long and some of it is irreversible.
+> - Selection is **client-side**; every action it offers goes through the
+>   existing validated remotes. Nothing new becomes trustworthy.
+> - 🟡 Partial mitigation already shipped: uprooting now needs a
+>   `Interaction.DestructiveHoldDuration` hold rather than a tap, so mashing E
+>   cannot destroy a defence. The real fix is the panel.
+
 ### 3. Animal husbandry 🟡
 
 Drop items exist and are sellable; nothing produces them.
@@ -395,10 +425,17 @@ The player's survival structure, distinct from match victory:
    raid and tap it. Rebuilding this way costs the normal repair bill: this
    player survived and still has an economy.
 6. ✅ Fall while shattered → **defeat**, offering two ways back.
-7. 🟡 **Fight On** spends a Revenge Token (`TrySpendRevengeTokens` first, so a
+7. ✅ **Fight On** spends a Revenge Token (`TrySpendRevengeTokens` first, so a
    player with none is told rather than quietly given a free recovery);
-   **Surrender** is free but the raiders carry off `Defeat.SurrenderLoss` of
-   each treasury resource. The purse is untouched either way.
+   **Surrender** is free in tokens but costs `Defeat.SurrenderPurseLoss` of
+   the carried purse.
+
+> **The penalty is the purse, not the treasury.** An earlier revision took a
+> quarter of every treasury resource, and that was the wrong pocket. The
+> treasury is the settlement — its stores are what farms and mills exist to
+> fill, and emptying them undoes hours of building to punish one bad fight.
+> The purse is loot won from kills and carried on the person. A raid can cost
+> you what you were carrying; it cannot cost you what you built.
 
 > **Why shattering is the whole design.** An anchor that can be destroyed
 > outright makes a bad raid unrecoverable — lose it at the wrong moment and you
@@ -410,6 +447,15 @@ The player's survival structure, distinct from match victory:
 > It is also why respawning deliberately does **not** work on a wreck. The
 > anchor is the safe place to reappear and the raid has just taken it; putting
 > the player back on it would hand straight back the only thing that was lost.
+
+> **Defeat by another player** is agreed and recorded in
+> `GameConfig.Defeat.PlayerVictory`, but not reachable: nothing can attack
+> another player's base. The victor takes 40% of the loser's purse into their
+> own and 60% of each treasury resource into their base, and the loser's
+> treasury then **resets to `StartingResources`** rather than being left at
+> whatever remained. The reset is a floor as much as a penalty — a wiped-out
+> player restarts with a working economy instead of a ruin they cannot rebuild
+> from.
 
 > ⚠️ **Revenge as a counter-raid is deferred.** The roadmap said revenge "may
 > target a player or a horde" — attacking someone else's base. Nothing can
@@ -571,6 +617,7 @@ Each step should be shippable and testable on its own.
 | **Shared damageable system** | Blocks buildings, sieges, repair and combat at once |
 | **Placement service** (prerequisites, free placement, overlap only) | The foundation for farms, drop-off points, defences and base building |
 | **Rework farming onto placement** | Farms become Mill-dependent structures; retires the fixed plot map |
+| **Selection and building menus** ⬜ | Prompts do not scale: no seed picker, and E-spam destroys defences. An RTS wants click-to-select anyway |
 | **Checkpoint and the defeat loop** ✅ | Gives a raid stakes: an anchor that shatters, and two ways back that cost different things |
 | **Combat plants, attacks and raiders** ✅ | Towers and plants shoot, raiders walk in and pick targets; the spatial helper three systems wanted |
 | **Build UX: sticky placement** ✅ | Hold a building and place a row of them; one shared buildability rule for the server and the menu |

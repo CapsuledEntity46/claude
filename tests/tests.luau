@@ -4526,6 +4526,20 @@ local function runTests()
 			check(wreckPrompt ~= nil, "the wreck offers a Rebuild prompt")
 
 			--[[
+				And respawning no longer brings the player to it. This is the
+				point of shattering: the anchor is the safe place to reappear,
+				and the raid has just taken it. Respawning on the wreck would
+				hand straight back the only thing that was actually lost.
+			]]
+			local homeless = giveCharacter(holdout, Vector3.new(60, 3, -60))
+			holdout.CharacterAdded:Fire(homeless)
+
+			check(
+				Spatial.GroundDistance(homeless.PrimaryPart.Position, anchorBody.Position) > 20,
+				"respawning does NOT return the player to a shattered anchor"
+			)
+
+			--[[
 				But not while raiders are standing over it. Rebuilding under
 				fire would make shattering meaningless - the player would tank
 				the raid and tap the prompt.

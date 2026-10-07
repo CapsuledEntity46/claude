@@ -376,24 +376,56 @@ foundations, snapping and stability.
 > likely source of rework in this plan, and it blocks sieges, building repair
 > and combat simultaneously.
 
-### 7. Checkpoint and the defeat loop ⬜
+### 7. Checkpoint and the defeat loop ✅
 
 The player's survival structure, distinct from match victory:
 
-1. The player starts with **nothing but a `Checkpoint`** in inventory.
-2. Placing it establishes the respawn point.
-3. While it stands, death simply respawns the player.
-4. Destroyed while the player lives → **shattered** state, not a loss. The
-   player keeps fighting.
-5. Survive and secure the area → a **Rebuild** prompt appears near the wreck.
-6. Fall while shattered → **defeat**, offering **Revenge** or **Surrender**.
-7. Revenge spends a **Revenge Token**: two free, more purchasable. Revenge may
-   target a player or a horde.
+✅ Built as `Server.Combat.DefeatService`.
 
-> ✅ `RevengeTokens` already exists as a tracked, purchasable, atomically
-> spendable counter — this is what it is for. Whatever consumes it must call
-> `TrySpendRevengeTokens` **before** granting the revenge, and validate the
-> target server-side.
+1. ✅ The Checkpoint is **built from the build menu** rather than held in
+   inventory — it is a structure like any other, and the placement system
+   arrived after this was written. It costs 150 Wood and 50 Stone, needs no
+   prerequisites, and is available from the Stone Age.
+2. ✅ Placing it establishes the respawn point.
+3. ✅ While it stands, death respawns the player beside it.
+4. ✅ Destroyed while the player lives → **shattered**, not a loss.
+5. ✅ A **Rebuild** prompt appears on the wreck, and is blocked while hostiles
+   are within `Defeat.SecureRadius` — "secure the area" enforced rather than
+   implied, because otherwise a player would stand in the rubble tanking the
+   raid and tap it. Rebuilding this way costs the normal repair bill: this
+   player survived and still has an economy.
+6. ✅ Fall while shattered → **defeat**, offering two ways back.
+7. 🟡 **Fight On** spends a Revenge Token (`TrySpendRevengeTokens` first, so a
+   player with none is told rather than quietly given a free recovery);
+   **Surrender** is free but the raiders carry off `Defeat.SurrenderLoss` of
+   each treasury resource. The purse is untouched either way.
+
+> **Why shattering is the whole design.** An anchor that can be destroyed
+> outright makes a bad raid unrecoverable — lose it at the wrong moment and you
+> are homeless with no way home. One that cannot be destroyed makes a raid
+> toothless. Shattering is the third option: the anchor is gone but the *site*
+> remains. That is why the only thing that ends a run is falling while
+> *already* shattered — one disaster is a story, two in a row is a defeat.
+>
+> It is also why respawning deliberately does **not** work on a wreck. The
+> anchor is the safe place to reappear and the raid has just taken it; putting
+> the player back on it would hand straight back the only thing that was lost.
+
+> ⚠️ **Revenge as a counter-raid is deferred.** The roadmap said revenge "may
+> target a player or a horde" — attacking someone else's base. Nothing can
+> attack another player's base yet, so the token buys the thing that is
+> actually available: getting back on your feet without paying in resources.
+> When raiding another base exists, a true revenge raid is the natural second
+> use of the same counter.
+
+> ✅ **Raiders can hurt the player**, which the loop needs or "fall while
+> shattered" is unreachable except by accident. The player is **not** a
+> damageable entity: their health belongs to their Humanoid, because the engine
+> already owns respawning and the bar above a character, and a second authority
+> for one number shows up as health flickering between two values. So a player
+> is a target carrying a Humanoid instead of an `EntityId`, and the one place
+> that difference matters is where damage lands — the counter table still
+> prices the hit, from `GameConfig.PlayerCombat`.
 
 ### 7b. Troops and the Barracks ⬜
 
@@ -539,6 +571,7 @@ Each step should be shippable and testable on its own.
 | **Shared damageable system** | Blocks buildings, sieges, repair and combat at once |
 | **Placement service** (prerequisites, free placement, overlap only) | The foundation for farms, drop-off points, defences and base building |
 | **Rework farming onto placement** | Farms become Mill-dependent structures; retires the fixed plot map |
+| **Checkpoint and the defeat loop** ✅ | Gives a raid stakes: an anchor that shatters, and two ways back that cost different things |
 | **Combat plants, attacks and raiders** ✅ | Towers and plants shoot, raiders walk in and pick targets; the spatial helper three systems wanted |
 | **Build UX: sticky placement** ✅ | Hold a building and place a row of them; one shared buildability rule for the server and the menu |
 | **Grid snapping + plant density** ✅ | Farms tile like AoE's, and a square holds a stack so food stops eating the whole base |

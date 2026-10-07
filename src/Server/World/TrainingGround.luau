@@ -42,7 +42,7 @@ local StatusEffectService = require(script.Parent.Parent.Combat.StatusEffectServ
 
 local TrainingGround = {}
 
-TrainingGround.FrameworkVersion = 14
+TrainingGround.FrameworkVersion = 15
 
 local FOLDER_NAME = "TrainingGround"
 --[[

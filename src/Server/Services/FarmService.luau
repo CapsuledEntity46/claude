@@ -96,7 +96,7 @@ end
 
 local FarmService = {}
 
-FarmService.FrameworkVersion = 14
+FarmService.FrameworkVersion = 15
 
 FarmService._started = false
 FarmService._farms = {} :: { [Player]: any }
@@ -353,8 +353,22 @@ function FarmService:_refreshPrompt(player: Player, farm)
 		prompt.Enabled = grown
 		prompt.ActionText = if grown then "Uproot" else "Growing"
 		prompt.ObjectText = if archetype then archetype.Name else seedId
+
+		--[[
+			HELD, not tapped, and this is the whole point.
+
+			Harvesting is a tap, and a player mashing E down a row of farms
+			was destroying combat plants by accident - a two hundred gold
+			defence gone to a keypress meant for the carrots next to it. An
+			irreversible action beside a repeatable one has to need a
+			different gesture.
+		]]
+		prompt.HoldDuration = GameConfig.Interaction.DestructiveHoldDuration
 		return
 	end
+
+	-- Tap, for the repeatable actions.
+	prompt.HoldDuration = 0
 
 	local yieldItem = if plantable then GameConfig.GetItem(plantable.Yields) else nil
 	local baseName = if yieldItem then yieldItem.Name else seedId
@@ -550,6 +564,7 @@ function FarmService:TryHarvest(player: Player, instanceId: string): boolean
 	-- Granted before the farm is cleared, so a full inventory leaves the crop
 	-- in the ground rather than destroying it.
 	if not PlayerDataService:AddItem(player, plantable.Yields, yield) then
+		self.PlantFailed:Fire(player, instanceId, "InventoryFull")
 		return false
 	end
 
@@ -847,6 +862,20 @@ end
 -- Startup
 --------------------------------------------------------------------------------
 
+--[[
+	Why a planting was refused, in words the player can act on.
+
+	Same reasoning as the rebuild prompt: a prompt that declines silently is
+	indistinguishable from a prompt that is broken.
+]]
+local PLANT_REFUSALS = {
+	NoSeeds = "You have no seeds of that kind to plant.",
+	LevelTooLow = "You are not experienced enough to plant that yet.",
+	Occupied = "That square is already planted. Harvest or uproot it first.",
+	NotHarvestable = "That is a defence, not a crop. Hold E to uproot it.",
+	InventoryFull = "Your inventory is full, so the crop stays in the ground.",
+}
+
 function FarmService:Start()
 	assert(RunService:IsServer(), "FarmService is server-only")
 
@@ -932,6 +961,20 @@ function FarmService:Start()
 
 				return
 			end
+		end
+	end)
+
+	--[[
+		Refusals reach the player. Without this, pressing E on a farm and
+		having nothing happen is the same experience as a bug.
+	]]
+	local notice = Remotes.GetEvent(GameConfig.RemoteNames.Notice)
+
+	self.PlantFailed:Connect(function(player: Player, _instanceId, reason: string)
+		local message = PLANT_REFUSALS[reason]
+
+		if message then
+			notice:FireClient(player, message)
 		end
 	end)
 

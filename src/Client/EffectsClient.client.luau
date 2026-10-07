@@ -33,7 +33,7 @@ local Shared = ReplicatedStorage:WaitForChild("Shared")
 local GameConfig = require(Shared.GameConfig)
 local Remotes = require(Shared.Remotes)
 
-local EXPECTED_FRAMEWORK = 14
+local EXPECTED_FRAMEWORK = 15
 
 if GameConfig.FrameworkVersion ~= EXPECTED_FRAMEWORK then
 	warn(

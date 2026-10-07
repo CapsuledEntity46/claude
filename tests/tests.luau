@@ -27,9 +27,17 @@ local function newPlayer(userId, name)
 	return player
 end
 
---- Gives a player a character with a PrimaryPart, which PlotService needs for
---- its server-side distance check.
-local function giveCharacter(player, position)
+--[[
+	Gives a player a character with a PrimaryPart, for the server-side distance
+	checks.
+
+	`deferRoot` builds it the way the ENGINE does: the model arrives first and
+	its PrimaryPart is assigned a moment later. That ordering matters - code
+	that reads character.PrimaryPart the instant CharacterAdded fires sees nil
+	in a real game, and a stub that is readier than the engine hides it. It did
+	hide it: the respawn-at-anchor move silently never ran.
+]]
+local function giveCharacter(player, position, deferRoot)
 	local character = Instance.new("Model")
 	character.Name = player.Name
 
@@ -44,9 +52,19 @@ local function giveCharacter(player, position)
 	humanoid.Name = "Humanoid"
 	humanoid.Parent = character
 
-	character.PrimaryPart = root
+	if not deferRoot then
+		character.PrimaryPart = root
+	end
+
 	character.Parent = WorkspaceService
 	player.Character = character
+
+	if deferRoot then
+		-- Assigned after the current frame, as the engine does it.
+		task.delay(0.1, function()
+			character.PrimaryPart = root
+		end)
+	end
 
 	return character
 end
@@ -1004,7 +1022,7 @@ local function runTests()
 
 	local FrameworkGuard = require(FrameworkGuardModule)
 
-	checkEqual(GameConfig.FrameworkVersion, 14, "GameConfig declares a framework revision")
+	checkEqual(GameConfig.FrameworkVersion, 15, "GameConfig declares a framework revision")
 	checkEqual(PlayerDataService.FrameworkVersion, GameConfig.FrameworkVersion, "PlayerDataService matches the config")
 	checkEqual(FARMS.FrameworkVersion, GameConfig.FrameworkVersion, "FarmService matches the config")
 	checkEqual(ShopService.FrameworkVersion, GameConfig.FrameworkVersion, "ShopService matches the config")
@@ -4497,15 +4515,35 @@ local function runTests()
 			checkEqual(DefeatService:IsDefeated(holdout), false, "falling with the anchor up is not a defeat")
 			checkEqual(holdout:GetAttribute("Defeated"), nil, "and raises no panel")
 
-			-- A new character appears at the anchor rather than at world spawn.
-			local revived = giveCharacter(holdout, Vector3.new(900, 3, 900))
+			--[[
+				A new character appears at the anchor rather than at world
+				spawn - and built the way the ENGINE builds one, with its
+				PrimaryPart assigned a moment after the signal fires.
+
+				That ordering is the bug this covers. The move used to read
+				character.PrimaryPart immediately, find nil, and give up
+				silently, so players respawned at the world spawn with a
+				perfectly good Checkpoint standing. The old test passed
+				because its fake character was ready before the signal, which
+				the engine never is.
+			]]
+			local anchorBody = placed.Model.PrimaryPart
+			local revived = giveCharacter(holdout, Vector3.new(220, 3, 220), true)
 			holdout.CharacterAdded:Fire(revived)
 
-			local anchorBody = placed.Model.PrimaryPart
+			checkEqual(revived.PrimaryPart, nil, "the character has no root part yet, as in a real game")
+
+			-- Long enough for the root part to arrive and the move to run.
+			advance(1)
+
 			check(
 				Spatial.GroundDistance(revived.PrimaryPart.Position, anchorBody.Position) < 20,
-				"respawning puts the player at their Checkpoint, not where they fell"
+				"respawning waits for the character and puts them at their Checkpoint"
 			)
+
+			-- And the engine's own respawn point follows the anchor, so there
+			-- is no visible teleport on the next death.
+			check(holdout.RespawnLocation ~= nil, "the engine respawn point is set to the anchor")
 
 			--[[
 				Now destroy it. It must SHATTER - stay in the registry, stay in
@@ -4558,13 +4596,41 @@ local function runTests()
 			DamageableService:ApplyDamage(nearby, 999999, "Siege", nil)
 			checkEqual(DefeatService:IsSecure(holdout), true, "killing it secures the area again")
 
-			-- Rebuilding by prompt costs resources: this player survived.
+			--[[
+				Rebuilding by prompt costs resources - this player survived -
+				but it costs the BUILD price, not the repair price.
+
+				Priced per health point, a two thousand health anchor comes to
+				800 Wood and 800 Stone: five times what the Checkpoint costs
+				new, and far beyond what a player holds after losing a raid.
+				The prompt just refused, silently, which is how this was found.
+			]]
+			local checkpointCost = GameConfig.Structures.Checkpoint.Cost
+
+			-- Exactly the build price in hand, and nothing spare.
+			local inventory = PlayerDataService:GetData(holdout)
+			for resourceId in checkpointCost do
+				inventory.Resources[resourceId] = 0
+			end
+			for resourceId, amount in checkpointCost do
+				PlayerDataService:AddResource(holdout, resourceId, amount)
+			end
+
 			local woodBefore = PlayerDataService:GetResource(holdout, "Wood")
 			local rebuilt = DefeatService:TryRebuildAnchor(holdout)
 
-			checkEqual(rebuilt.Ok, true, "a secured wreck can be rebuilt")
+			checkEqual(rebuilt.Ok, true, "a secured wreck can be rebuilt for exactly the build price")
 			checkEqual(DefeatService:HasStandingAnchor(holdout), true, "and stands again")
 			check(PlayerDataService:GetResource(holdout, "Wood") < woodBefore, "which costs resources")
+
+			for resourceId, amount in checkpointCost do
+				checkEqual(rebuilt.Cost[resourceId], amount, `billed the Checkpoint's {resourceId} cost`)
+				checkEqual(
+					PlayerDataService:GetResource(holdout, resourceId),
+					0,
+					`and the {resourceId} was actually taken`
+				)
+			end
 			checkEqual(
 				placed.Model.PrimaryPart:FindFirstChild("RebuildPrompt"),
 				nil,
@@ -4667,6 +4733,9 @@ local function runTests()
 			for _, resourceId in GameConfig.GetResourceIds() do
 				storesBefore[resourceId] = PlayerDataService:GetResource(doomed, resourceId)
 			end
+
+			-- Something in the purse to lose.
+			PlayerDataService:AddInventoryGold(doomed, 1000)
 			local purseBefore = PlayerDataService:GetInventoryGold(doomed)
 			local tokensHeld = PlayerDataService:GetRevengeTokens(doomed)
 
@@ -4674,26 +4743,39 @@ local function runTests()
 			checkEqual(surrendered.Ok, true, "surrender is accepted")
 			checkEqual(PlayerDataService:GetRevengeTokens(doomed), tokensHeld, "costing no tokens")
 
-			for _, resourceId in GameConfig.GetResourceIds() do
-				local taken = math.floor(storesBefore[resourceId] * GameConfig.Defeat.SurrenderLoss)
+			--[[
+				It costs the PURSE, and only the purse.
 
+				An earlier rule took a quarter of every treasury resource.
+				That was the wrong pocket: the treasury is the settlement, and
+				emptying it undoes hours of building to punish one bad fight.
+				The purse is loot carried on the person, and losing it is
+				exactly the kind of setback a lost fight should be.
+			]]
+			local expectedLoss = math.floor(purseBefore * GameConfig.Defeat.SurrenderPurseLoss)
+			check(expectedLoss > 0, `there is purse gold to lose ({purseBefore})`)
+
+			checkEqual(
+				PlayerDataService:GetInventoryGold(doomed),
+				purseBefore - expectedLoss,
+				"the raiders carry off their cut of the purse"
+			)
+			checkEqual(surrendered.Lost.Purse, expectedLoss, "and the result reports what was taken")
+
+			for _, resourceId in GameConfig.GetResourceIds() do
 				checkEqual(
 					PlayerDataService:GetResource(doomed, resourceId),
-					storesBefore[resourceId] - taken,
-					`the raiders carry off their cut of the {resourceId}`
+					storesBefore[resourceId],
+					`while the {resourceId} in the treasury is untouched`
 				)
 			end
 
 			--[[
-				The purse is untouched, and that is the same rule as
-				everywhere else: it is filled by kills and loot alone, and
-				nothing reaches into it.
+				And an empty purse costs nothing rather than erroring or
+				going negative: being broke should not be made worse.
 			]]
-			checkEqual(
-				PlayerDataService:GetInventoryGold(doomed),
-				purseBefore,
-				"while the personal purse is never touched"
-			)
+			PlayerDataService:TrySpendInventoryGold(doomed, PlayerDataService:GetInventoryGold(doomed))
+			checkEqual(PlayerDataService:GetInventoryGold(doomed), 0, "the purse is emptied")
 
 			checkEqual(DefeatService:HasStandingAnchor(doomed), true, "the anchor is raised either way")
 			checkEqual(DefeatService:IsDefeated(doomed), false, "and the player is back in the game")

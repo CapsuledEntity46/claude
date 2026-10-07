@@ -73,7 +73,7 @@ local StatusEffectService = require(script.Parent.StatusEffectService)
 
 local AttackService = {}
 
-AttackService.FrameworkVersion = 14
+AttackService.FrameworkVersion = 15
 
 AttackService._started = false
 --- entityId -> { EntityId, LastAttackAt, Suspended }

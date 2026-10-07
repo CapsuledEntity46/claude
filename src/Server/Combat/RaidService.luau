@@ -71,7 +71,7 @@ local StatusEffectService = require(script.Parent.StatusEffectService)
 
 local RaidService = {}
 
-RaidService.FrameworkVersion = 14
+RaidService.FrameworkVersion = 15
 
 RaidService._started = false
 --- entityId -> { EntityId, Model, OwnerUserId, TargetUserId, LastMoveAt }

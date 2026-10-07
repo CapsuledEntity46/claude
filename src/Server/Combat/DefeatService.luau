@@ -60,6 +60,20 @@ DefeatService._defeated = {}
 DefeatService._wreckPrompts = {}
 
 local PROMPT_NAME = "RebuildPrompt"
+
+--[[
+	Why a rebuild was refused, in words the player can act on.
+
+	A refusal with no explanation is indistinguishable from a broken button -
+	the prompt was turning down rebuilds for want of resources and saying
+	nothing at all, which read as the prompt not working.
+]]
+local REBUILD_REFUSALS = {
+	NotSecure = "Clear the raiders near the wreck before rebuilding.",
+	NotEnoughResources = "Not enough resources to rebuild the Checkpoint.",
+	NotShattered = "Your Checkpoint is already standing.",
+	NoAnchor = "You have no Checkpoint to rebuild.",
+}
 local ANCHOR_STRUCTURE = "Checkpoint"
 
 --- (player) - the anchor shattered; the player is still up
@@ -116,36 +130,114 @@ end
 	the player has lost their safe place to reappear, so respawning on the
 	wreck would hand back the thing the raid just took.
 ]]
-function DefeatService:_placeAtAnchor(player: Player, character: Instance)
+--- Where a character should appear, given a standing anchor. Nil otherwise.
+function DefeatService:GetAnchorSpawn(player: Player): Vector3?
 	if not self:HasStandingAnchor(player) then
-		return false
+		return nil
 	end
 
 	local _, placed = self:GetAnchor(player)
 	local model = if placed then placed.Model else nil
 	local body = if model then model.PrimaryPart else nil
-	local root = character.PrimaryPart
 
-	if not body or not root then
-		return false
+	if not body then
+		return nil
 	end
-
-	local structure = GameConfig.GetStructure(ANCHOR_STRUCTURE)
 
 	--[[
 		Beside it, not inside it. The anchor is a solid building, and spawning
 		a character in the middle of one either wedges them or shunts them
 		somewhere arbitrary.
 	]]
+	local structure = GameConfig.GetStructure(ANCHOR_STRUCTURE)
 	local clearance = structure.Size.X / 2 + 4
 
-	root.CFrame = CFrame.new(
+	return Vector3.new(
 		body.Position.X + clearance,
 		GameConfig.Placement.GroundY + 4,
 		body.Position.Z
 	)
+end
+
+--[[
+	Moves a freshly spawned character to their anchor.
+
+	WAITS FOR THE ROOT PART, and that is the bug this function used to have.
+	It read `character.PrimaryPart` the instant CharacterAdded fired and gave
+	up when it was nil - which in the engine it almost always is, because the
+	HumanoidRootPart has not been added and assigned yet. So the move silently
+	never happened and players respawned at the world spawn with a perfectly
+	good Checkpoint standing.
+
+	The test harness hid it: its fake characters were fully built before the
+	signal fired, so the stub was readier than the engine ever is.
+]]
+function DefeatService:_placeAtAnchor(player: Player, character: Instance)
+	local position = self:GetAnchorSpawn(player)
+
+	if not position then
+		return false
+	end
+
+	local root = character.PrimaryPart or character:WaitForChild("HumanoidRootPart", 5)
+
+	-- Gone again already: the player died or left while we waited.
+	if not root or not character.Parent then
+		return false
+	end
+
+	-- Re-checked after the wait, because the anchor could have fallen during
+	-- it - and respawning onto a wreck is exactly what must not happen.
+	if not self:HasStandingAnchor(player) then
+		return false
+	end
+
+	root.CFrame = CFrame.new(position)
 
 	return true
+end
+
+--[[
+	Keeps the engine's own respawn point on the anchor.
+
+	Belt and braces with the move above, and worth having: RespawnLocation
+	means the character APPEARS at the anchor instead of appearing at the
+	world spawn and being teleported a frame later, which the player sees as
+	a flash. Cleared when the anchor falls, so a shattered anchor sends them
+	back to the world spawn.
+]]
+function DefeatService:_syncRespawnLocation(player: Player)
+	local _, placed = self:GetAnchor(player)
+	local model = if placed then placed.Model else nil
+
+	if not model or not self:HasStandingAnchor(player) then
+		player.RespawnLocation = nil
+		return
+	end
+
+	local spawn = model:FindFirstChild("AnchorSpawn")
+
+	if not spawn then
+		local position = self:GetAnchorSpawn(player)
+
+		if not position then
+			return
+		end
+
+		spawn = Instance.new("SpawnLocation")
+		spawn.Name = "AnchorSpawn"
+		spawn.Size = Vector3.new(6, 1, 6)
+		spawn.Position = Vector3.new(position.X, GameConfig.Placement.GroundY, position.Z)
+		spawn.Anchored = true
+		spawn.CanCollide = false
+		spawn.Transparency = 1
+		-- Neutral, because teams are not a concept here.
+		spawn.Neutral = true
+		spawn.Duration = 0
+		spawn.Parent = model
+	end
+
+	player.RespawnLocation = spawn
 end
 
 --------------------------------------------------------------------------------
@@ -199,7 +291,7 @@ function DefeatService:_attachWreckPrompt(player: Player, model: Instance)
 	prompt.Name = PROMPT_NAME
 	prompt.ActionText = "Rebuild"
 	prompt.ObjectText = "Ruined Checkpoint"
-	prompt.HoldDuration = 0.6
+	prompt.HoldDuration = GameConfig.Interaction.DestructiveHoldDuration
 	prompt.KeyboardKeyCode = Enum.KeyCode.E
 	prompt.MaxActivationDistance = GameConfig.Interaction.MaxActivationDistance
 	prompt.RequiresLineOfSight = false
@@ -225,7 +317,11 @@ function DefeatService:_attachWreckPrompt(player: Player, model: Instance)
 			return
 		end
 
-		self:TryRebuildAnchor(triggering)
+		local result = self:TryRebuildAnchor(triggering)
+
+		if not result.Ok then
+			self:_notify(triggering, REBUILD_REFUSALS[result.Reason] or tostring(result.Reason))
+		end
 	end)
 
 	self._wreckPrompts[model] = prompt
@@ -262,18 +358,37 @@ function DefeatService:TryRebuildAnchor(player: Player): { [string]: any }
 		return { Ok = false, Reason = "NotSecure" }
 	end
 
-	local result = DamageableService:Rebuild(placed.EntityId, player)
+	--[[
+		Charged the BUILD price, not the repair price.
 
-	if not result.Ok then
-		return result
+		Repair is per health point, which for a two thousand health anchor is
+		800 Wood and 800 Stone - five times what the Checkpoint costs new, and
+		far beyond what a player holds after losing a raid. The prompt simply
+		refused, silently, which is how this was found. A ruin costing what a
+		new one costs is also easier to reason about than a number derived
+		from a health total.
+	]]
+	local cost = GameConfig.GetStructure(ANCHOR_STRUCTURE).Cost
+
+	if not PlayerDataService:TryPayConstruction(player, cost) then
+		return { Ok = false, Reason = "NotEnoughResources", Cost = cost }
 	end
 
-	return { Ok = true, Cost = result.Cost }
+	DamageableService:Restore(placed.EntityId)
+
+	return { Ok = true, Cost = cost }
 end
 
 --------------------------------------------------------------------------------
 -- Defeat
 --------------------------------------------------------------------------------
+
+--- Sends a short message to one player. Silent if the remote is not up yet.
+function DefeatService:_notify(player: Player, message: string)
+	if self._notice then
+		self._notice:FireClient(player, message)
+	end
+end
 
 function DefeatService:_setDefeated(player: Player, defeated: boolean)
 	self._defeated[player] = if defeated then true else nil
@@ -362,28 +477,27 @@ function DefeatService:Resolve(player: Player, choice: unknown): { [string]: any
 end
 
 --[[
-	Takes the raiders' cut of the treasury.
+	Takes the raiders' cut: a share of the PURSE, and nothing else.
 
-	The personal purse is untouched, which is the same rule as everywhere
-	else: it is filled by kills and loot alone and nothing reaches into it. A
-	defeat costs the settlement's stores, not what the player is carrying.
+	The treasury is untouched. Its stores are what the player's farms and
+	mills exist to fill, and emptying them undoes hours of building to punish
+	one bad fight. The purse is loot - gold won from kills, carried on the
+	person - and losing it is exactly the kind of setback a lost fight should
+	be. A raid can cost you what you were carrying; it cannot cost you what
+	you built.
 
-	Rounded DOWN, so a nearly empty store loses nothing rather than its last
-	unit - being broke should not be made worse.
+	Rounded DOWN, so a nearly empty purse loses nothing rather than its last
+	coin: being broke should not be made worse.
 ]]
 function DefeatService:_takeSurrenderLoss(player: Player): { [string]: number }
-	local lost = {}
+	local held = PlayerDataService:GetInventoryGold(player)
+	local take = math.floor(held * GameConfig.Defeat.SurrenderPurseLoss)
 
-	for _, resourceId in GameConfig.GetResourceIds() do
-		local held = PlayerDataService:GetResource(player, resourceId)
-		local take = math.floor(held * GameConfig.Defeat.SurrenderLoss)
-
-		if take > 0 and PlayerDataService:TrySpendResource(player, resourceId, take) then
-			lost[resourceId] = take
-		end
+	if take > 0 and PlayerDataService:TrySpendInventoryGold(player, take) then
+		return { Purse = take }
 	end
 
-	return lost
+	return {}
 end
 
 --------------------------------------------------------------------------------
@@ -398,8 +512,21 @@ function DefeatService:Start()
 	end
 	self._started = true
 
+	self._notice = Remotes.GetEvent(GameConfig.RemoteNames.Notice)
+
+	--[[
+		A newly placed or restored anchor becomes the respawn point at once,
+		rather than at the next death.
+	]]
+	PlacementService.Spawned:Connect(function(player: Player)
+		self:_syncRespawnLocation(player)
+	end)
+
 	local function watchCharacter(player: Player, character: Instance)
-		self:_placeAtAnchor(player, character)
+		-- Spawned, so the wait inside cannot block the signal.
+		task.spawn(function()
+			self:_placeAtAnchor(player, character)
+		end)
 
 		local humanoid = character:FindFirstChildOfClass("Humanoid")
 
@@ -446,6 +573,12 @@ function DefeatService:Start()
 		end
 
 		self:_attachWreckPrompt(owner, entity.Model)
+
+		-- Back to the world spawn: the safe place to reappear is what the
+		-- raid just took.
+		self:_syncRespawnLocation(owner)
+
+		self:_notify(owner, "Your Checkpoint has shattered. Clear the area, then rebuild it.")
 		self.AnchorLost:Fire(owner)
 	end)
 
@@ -460,6 +593,7 @@ function DefeatService:Start()
 		local owner = Players:GetPlayerByUserId(entity.OwnerUserId)
 
 		if owner then
+			self:_syncRespawnLocation(owner)
 			self.AnchorRestored:Fire(owner)
 		end
 	end)

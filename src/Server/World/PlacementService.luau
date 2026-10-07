@@ -59,7 +59,7 @@ local StructureBuilder = require(script.Parent.StructureBuilder)
 
 local PlacementService = {}
 
-PlacementService.FrameworkVersion = 14
+PlacementService.FrameworkVersion = 15
 
 PlacementService._started = false
 PlacementService._placed = {} :: { [Player]: any }

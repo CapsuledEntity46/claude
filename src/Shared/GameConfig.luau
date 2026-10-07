@@ -85,7 +85,7 @@ local GameConfig = {}
 	tree fails with a message naming the stale module instead of a nil-index
 	deep inside unrelated code.
 ]]
-GameConfig.FrameworkVersion = 14
+GameConfig.FrameworkVersion = 15
 
 --------------------------------------------------------------------------------
 -- Persistence
@@ -860,6 +860,16 @@ GameConfig.Interaction = {
 
 	-- Minimum seconds between accepted interactions from one player.
 	Cooldown = 0.35,
+
+	--[[
+		How long an IRREVERSIBLE prompt must be held.
+
+		Harvesting is a tap, and a player mashing E down a row of farms was
+		uprooting combat plants by accident. An action that cannot be undone,
+		sitting next to one meant to be repeated, has to need a different
+		gesture rather than the same one slightly too often.
+	]]
+	DestructiveHoldDuration = 1.2,
 }
 
 --------------------------------------------------------------------------------
@@ -1694,18 +1704,61 @@ GameConfig.Defeat = {
 	SecureRadius = 55,
 
 	--[[
-		Fraction of each TREASURY resource the raiders carry off on a
-		surrender.
+		What surrendering to a HORDE costs: a cut of the personal purse, and
+		nothing else.
 
-		The personal purse is untouched, and that is the same rule as
-		everywhere else: the purse is filled by kills and loot alone and
-		nothing reaches into it. A defeat costs you the settlement's stores,
-		not what you are carrying.
+		This replaces an earlier rule that took a quarter of every treasury
+		resource. That was the wrong pocket. The treasury is the settlement -
+		its stores are what the player's farms and mills exist to fill, and
+		emptying them undoes hours of building to punish one bad fight. The
+		purse is loot: gold won from kills, carried on the person, and losing
+		it is exactly the kind of setback a lost fight should be.
+
+		So a raid can cost you what you were carrying. It cannot cost you what
+		you built.
 	]]
-	SurrenderLoss = 0.25,
+	SurrenderPurseLoss = 0.4,
 
 	-- Tokens one "fight on" costs.
 	FightOnTokenCost = 1,
+
+	--[[
+		Rebuilding the wreck costs what the Checkpoint cost to BUILD, not what
+		its repair table says.
+
+		Repair is priced per health point, which for a two thousand health
+		anchor comes to 800 Wood and 800 Stone - five times the build cost,
+		and far beyond what a player who has just lost a raid is holding. The
+		prompt simply refused, silently, which is how this was found.
+
+		A ruin costing what a new one costs is also easier to reason about
+		than a number derived from a health total.
+	]]
+	RebuildCostsBuildPrice = true,
+
+	--[[
+		DEFEAT BY ANOTHER PLAYER - agreed, and not yet reachable.
+
+		Nothing can attack another player's base, so none of this runs. It is
+		recorded here rather than in a document because this is where whoever
+		builds player raids will look, and because the numbers are a decision
+		that has already been made:
+
+		  * the victor takes PurseStolen of the loser's purse into their own,
+		  * and TreasuryStolen of each of the loser's treasury resources into
+		    their base,
+		  * and the loser's treasury is then RESET to StartingResources
+		    rather than left at whatever remained.
+
+		The reset is the part worth flagging. It is a floor as much as a
+		penalty: a player who loses everything restarts with a working
+		economy instead of a ruin they cannot rebuild from.
+	]]
+	PlayerVictory = {
+		PurseStolen = 0.4,
+		TreasuryStolen = 0.6,
+		ResetTreasuryToStarting = true,
+	},
 }
 
 GameConfig.Placement = {
@@ -1941,6 +1994,15 @@ GameConfig.RemoteNames = {
 		rather than left looking at a panel that did nothing.
 	]]
 	ResolveDefeat = "ResolveDefeat",
+
+	--[[
+		Server -> one client: a short message to show the player.
+
+		Added because a refusal with no explanation is indistinguishable from
+		a broken button. The rebuild prompt was refusing for want of resources
+		and saying nothing, so it looked like the prompt did not work.
+	]]
+	Notice = "Notice",
 	UseBoost = "UseBoost",
 	SelectFarm = "SelectFarm",
 
@@ -2505,9 +2567,17 @@ do
 		treasury, which is the kind of punishment players quit over.
 	]]
 	assert(
-		defeat.SurrenderLoss > 0 and defeat.SurrenderLoss < 1,
-		"Defeat.SurrenderLoss must be in (0, 1): at 0 surrender is free, at 1 it is total"
+		defeat.SurrenderPurseLoss > 0 and defeat.SurrenderPurseLoss < 1,
+		"Defeat.SurrenderPurseLoss must be in (0, 1): at 0 surrender is free, at 1 it is total"
 	)
+
+	for _, key in { "PurseStolen", "TreasuryStolen" } do
+		local fraction = defeat.PlayerVictory[key]
+		assert(
+			fraction > 0 and fraction <= 1,
+			`Defeat.PlayerVictory.{key} must be in (0, 1]`
+		)
+	end
 
 	assert(defeat.FightOnTokenCost >= 1, "fighting on must cost at least one token")
 

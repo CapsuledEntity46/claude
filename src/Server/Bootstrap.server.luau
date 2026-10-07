@@ -77,6 +77,7 @@ local ShopService = requireServer("Services.ShopService")
 local MarketplaceService = requireServer("Services.MarketplaceService")
 local PlacementService = requireServer("World.PlacementService")
 local ShopBuilder = requireServer("World.ShopBuilder")
+local TrainingGround = requireServer("World.TrainingGround")
 
 if #missing > 0 then
 	error(
@@ -120,6 +121,7 @@ if guardModule then
 	require(guardModule).Assert(GameConfig.FrameworkVersion, {
 		DamageableService = DamageableService,
 		StatusEffectService = StatusEffectService,
+		TrainingGround = TrainingGround,
 		PlayerDataService = PlayerDataService,
 		FarmService = FarmService,
 		PlacementService = PlacementService,
@@ -152,6 +154,16 @@ MarketplaceService:Start()
 
 -- The storefront the client's ProximityPrompt listener attaches to.
 ShopBuilder.Build()
+
+--[[
+	A practice range: one dummy per status effect, with a prompt that applies
+	it. Status effects have no producer in play yet - combat plants, troops and
+	tower volleys are later steps - and a combat layer nobody can trigger can
+	only be judged from a test suite, never by feel.
+
+	Safe to delete along with the module once real attackers exist.
+]]
+TrainingGround.Build()
 
 -- Examples of how downstream systems consume these layers. Safe to delete.
 PlayerDataService.LevelChanged:Connect(function(player: Player, newLevel: number, previousLevel: number)

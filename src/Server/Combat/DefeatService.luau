@@ -51,7 +51,7 @@ local PlacementService = require(script.Parent.Parent.World.PlacementService)
 
 local DefeatService = {}
 
-DefeatService.FrameworkVersion = 14
+DefeatService.FrameworkVersion = 15
 
 DefeatService._started = false
 --- player -> true while down and yet to choose

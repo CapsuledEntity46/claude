@@ -129,6 +129,38 @@ check(warnedAboutGuard, "a missing guard warns rather than crashing")
 
 guard.Parent = Server
 
+----------------------------------------------------------------------
+-- Case C: the tree is complete but INCONSISTENT
+--
+-- The guard exists to turn a half-synced tree into a named, actionable
+-- failure instead of a mystery nil-index deep in unrelated code. This
+-- checks it actually does that - a mismatch shipped once because the
+-- suite verified the version numbers and never the guard's reaction.
+----------------------------------------------------------------------
+local staleModule = Server:FindFirstChild("Combat"):FindFirstChild("DefeatService")
+local stale = require(staleModule)
+local realVersion = stale.FrameworkVersion
+
+stale.FrameworkVersion = realVersion - 1
+
+local okC, errC = runBootstrap()
+
+checkEqual(okC, false, "a tree whose modules disagree aborts startup")
+check(
+    string.find(tostring(errC), "PARTIALLY SYNCED", 1, true) ~= nil,
+    "naming the real problem rather than surfacing a nil later"
+)
+check(
+    string.find(tostring(errC), "DefeatService", 1, true) ~= nil,
+    "and naming the module that is out of step"
+)
+check(
+    string.find(tostring(errC), "rojo", 1, true) ~= nil,
+    "with instructions for fixing it"
+)
+
+stale.FrameworkVersion = realVersion
+
 print("\n================================")
 print(`passed: {PASSES}   failed: {#FAILURES}`)
 if #FAILURES > 0 then

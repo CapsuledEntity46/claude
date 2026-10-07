@@ -1023,6 +1023,56 @@ local function runTests()
 	local FrameworkGuard = require(FrameworkGuardModule)
 
 	checkEqual(GameConfig.FrameworkVersion, 15, "GameConfig declares a framework revision")
+
+	--[[
+		EVERY module in the tree must agree with it.
+
+		This is the assertion that was missing, and its absence shipped a
+		broken build: DefeatService was left declaring v14 while everything
+		else moved to v15, and nothing here noticed. FrameworkGuard caught it
+		correctly - in Studio, on the player's machine, which is the one place
+		it should never have had to.
+
+		Enumerated from the instance tree rather than from a hand-written
+		list, so a service added later is covered without anyone remembering
+		to add it here. That is the whole point: a list you have to maintain
+		is a list that will be out of date exactly when it matters.
+	]]
+	do
+		local serverRoot = ServerScriptService:FindFirstChild("Server")
+		check(serverRoot ~= nil, "the server tree is mounted")
+
+		local checked = 0
+
+		local function auditFolder(folder: Instance)
+			for _, child in folder:GetChildren() do
+				if child.ClassName == "Folder" then
+					auditFolder(child)
+				elseif child.ClassName == "ModuleScript" then
+					local ok, module = pcall(require, child)
+
+					--[[
+						Only modules that DECLARE a version are audited. A
+						pure helper (CropFactory, DataSchema, ProfileStore)
+						has no cross-module config surface and deliberately
+						has none.
+					]]
+					if ok and type(module) == "table" and module.FrameworkVersion ~= nil then
+						checkEqual(
+							module.FrameworkVersion,
+							GameConfig.FrameworkVersion,
+							`{child.Name} declares the same framework revision as GameConfig`
+						)
+						checked += 1
+					end
+				end
+			end
+		end
+
+		auditFolder(serverRoot)
+
+		check(checked >= 8, `every versioned service was audited ({checked} of them)`)
+	end
 	checkEqual(PlayerDataService.FrameworkVersion, GameConfig.FrameworkVersion, "PlayerDataService matches the config")
 	checkEqual(FARMS.FrameworkVersion, GameConfig.FrameworkVersion, "FarmService matches the config")
 	checkEqual(ShopService.FrameworkVersion, GameConfig.FrameworkVersion, "ShopService matches the config")

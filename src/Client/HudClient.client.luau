@@ -508,7 +508,32 @@ end
 -- Store panel
 --------------------------------------------------------------------------------
 
-local promptPurchase = Remotes.GetEvent(GameConfig.RemoteNames.PromptPurchase)
+--[[
+	Acquired defensively, and the HUD carries on without it.
+
+	This used to be a bare GetEvent, which waits thirty seconds and then
+	THROWS - taking the rest of this script with it, including the code that
+	fills in the stat labels. A server that failed to start therefore left the
+	HUD showing a column of the word "Label", which tells the player nothing
+	and hides the real error in the Server output.
+
+	The resources, purse, age and XP all come from replicated attributes and
+	need no remote at all. Only buying Robux products does, so only that is
+	disabled.
+]]
+local purchaseReady, promptPurchase = pcall(function()
+	return Remotes.GetEvent(GameConfig.RemoteNames.PromptPurchase)
+end)
+
+if not purchaseReady then
+	warn(
+		"[HudClient] The purchase remote never replicated, so the server did not finish starting. "
+			.. "Check the Server output for a Bootstrap error - that is the real failure. "
+			.. "The Robux store is disabled; the rest of the HUD still works."
+	)
+	promptPurchase = nil
+end
+
 local MarketplaceService = game:GetService("MarketplaceService")
 
 --[[
@@ -590,7 +615,7 @@ local function refreshStore()
 		buy.Parent = row
 
 		buy.MouseButton1Click:Connect(function()
-			if not configured then
+			if not configured or not promptPurchase then
 				return
 			end
 

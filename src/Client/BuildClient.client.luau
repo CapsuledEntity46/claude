@@ -615,13 +615,19 @@ local function onBuildabilityChanged()
 	reviewSelection()
 end
 
+--[[
+	The panel is a picker, not a mode: closing it does NOT cancel placement.
+
+	Laying out a row of farms is easier with the menu out of the way, and
+	having it cancel the selection on the way out would undo the point of
+	keeping the selection at all. Right-click and Escape are the ways to stop,
+	and the status line says so.
+]]
 toggle.MouseButton1Click:Connect(function()
 	panel.Visible = not panel.Visible
 
 	if panel.Visible then
 		refreshMenu()
-	else
-		clearGhost()
 	end
 end)
 

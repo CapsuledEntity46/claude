@@ -508,6 +508,7 @@ Each step should be shippable and testable on its own.
 | **Shared damageable system** | Blocks buildings, sieges, repair and combat at once |
 | **Placement service** (prerequisites, free placement, overlap only) | The foundation for farms, drop-off points, defences and base building |
 | **Rework farming onto placement** | Farms become Mill-dependent structures; retires the fixed plot map |
+| **Build UX: sticky placement** ✅ | Hold a building and place a row of them; one shared buildability rule for the server and the menu |
 | **Grid snapping + plant density** ✅ | Farms tile like AoE's, and a square holds a stack so food stops eating the whole base |
 | **Status effects** ✅ | Burn/Chill/Poison; the layer combat plants, troops and towers all need before any of them can be interesting |
 | **Animal husbandry** | Herds near a Mill; directory already supports the drops |

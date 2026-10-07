@@ -71,7 +71,7 @@ local GameConfig = {}
 	tree fails with a message naming the stale module instead of a nil-index
 	deep inside unrelated code.
 ]]
-GameConfig.FrameworkVersion = 11
+GameConfig.FrameworkVersion = 12
 
 --------------------------------------------------------------------------------
 -- Persistence
@@ -819,8 +819,6 @@ export type StructureDefinition = {
 	Cost: { [string]: number },
 	Size: Vector3,
 	Color: Color3,
-	ProvidesRadius: number?,
-	RequiresWithinRadiusOf: string?,
 	MaxPerPlayer: number,
 	SortOrder: number,
 }
@@ -829,17 +827,15 @@ export type StructureDefinition = {
 	The build tree, expressed entirely as data so adding a building is a config
 	edit.
 
-	Two distinct requirement types, and the game needs both:
+	`Prerequisites` means the parent must EXIST somewhere you own - a plain
+	dependency check, Town Center before Mill.
 
-	  Prerequisites            the parent must EXIST somewhere you own. A plain
-	                           dependency check - Town Center before Mill.
-	  RequiresWithinRadiusOf   the new building must be placed INSIDE the
-	                           parent's ProvidesRadius. The aura requirement
-	                           that makes Mills matter: farms cluster around
-	                           them rather than sprawling.
-
-	A structure can have one, both or neither. Farm has both: you must own a
-	Mill, and the farm must sit next to one.
+	PLACEMENT IS OTHERWISE FREE. Build anywhere, the only restriction being
+	that footprints may not overlap. This matches Age of Empires, where
+	proximity to a Mill or Lumber Camp is an OPTIMISATION (it shortens villager
+	walking time) rather than a rule that forbids placement. An earlier
+	revision enforced a radius; that was the city-builder model, not the RTS
+	one.
 
 	        TownCenter ──▶ Mill ──▶ Farm
 	                   └─▶ WatchTower (Bronze Age)
@@ -856,7 +852,6 @@ GameConfig.Structures = {
 		Cost = { Wood = 300, Stone = 100 },
 		Size = Vector3.new(14, 10, 14),
 		Color = Color3.fromRGB(176, 148, 108),
-		ProvidesRadius = 48,
 		MaxPerPlayer = 1,
 		SortOrder = 10,
 	},
@@ -871,7 +866,6 @@ GameConfig.Structures = {
 		Cost = { Wood = 150, Stone = 50 },
 		Size = Vector3.new(8, 12, 8),
 		Color = Color3.fromRGB(120, 132, 170),
-		ProvidesRadius = 32,
 		MaxPerPlayer = 1,
 		SortOrder = 20,
 	},
@@ -886,8 +880,6 @@ GameConfig.Structures = {
 		Cost = { Wood = 100 },
 		Size = Vector3.new(10, 8, 10),
 		Color = Color3.fromRGB(150, 118, 76),
-		ProvidesRadius = 26,
-		RequiresWithinRadiusOf = "TownCenter",
 		MaxPerPlayer = 4,
 		SortOrder = 30,
 	},
@@ -902,7 +894,6 @@ GameConfig.Structures = {
 		Cost = { Wood = 60 },
 		Size = Vector3.new(8, 1, 8),
 		Color = Color3.fromRGB(94, 66, 45),
-		RequiresWithinRadiusOf = "Mill",
 		MaxPerPlayer = 20,
 		SortOrder = 40,
 		-- The only structure that grows something, so FarmService attaches a
@@ -920,7 +911,6 @@ GameConfig.Structures = {
 		Cost = { Wood = 50, Stone = 125 },
 		Size = Vector3.new(6, 16, 6),
 		Color = Color3.fromRGB(142, 146, 152),
-		RequiresWithinRadiusOf = "TownCenter",
 		MaxPerPlayer = 6,
 		SortOrder = 50,
 	},
@@ -1072,8 +1062,18 @@ GameConfig.StructureAttributes = {
 	OwnerUserId = "OwnerUserId",
 	StructureId = "StructureId",
 	InstanceId = "InstanceId",
-	ProvidesRadius = "ProvidesRadius",
 }
+
+--[[
+	A folder on the Player holding one attribute per structure id, counting how
+	many that player owns.
+
+	The build menu reads its counts from here rather than scanning Workspace.
+	Scanning raced replication: a newly placed model can arrive on the client
+	before its OwnerUserId attribute does, so the menu counted it as unowned and
+	kept showing the next building as locked until reopened.
+]]
+GameConfig.StructureCountsFolderName = "StructureCounts"
 
 GameConfig.RemoteNames = {
 	SelectSeed = "SelectSeed",
@@ -1334,15 +1334,6 @@ for id, structure in GameConfig.Structures do
 	-- structure permanently unbuildable, which is worse than a loud failure.
 	for _, prerequisiteId in structure.Prerequisites do
 		assert(GameConfig.Structures[prerequisiteId] ~= nil, `structure {id} requires unknown structure {prerequisiteId}`)
-	end
-
-	if structure.RequiresWithinRadiusOf then
-		local parent = GameConfig.Structures[structure.RequiresWithinRadiusOf]
-		assert(parent ~= nil, `structure {id} needs unknown radius parent`)
-		assert(
-			parent.ProvidesRadius ~= nil and parent.ProvidesRadius > 0,
-			`structure {id} requires the radius of {parent.Id}, which provides none`
-		)
 	end
 end
 

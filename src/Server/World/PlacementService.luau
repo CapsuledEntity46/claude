@@ -57,7 +57,7 @@ local StructureBuilder = require(script.Parent.StructureBuilder)
 
 local PlacementService = {}
 
-PlacementService.FrameworkVersion = 11
+PlacementService.FrameworkVersion = 12
 
 PlacementService._started = false
 PlacementService._placed = {} :: { [Player]: any }
@@ -146,34 +146,57 @@ function PlacementService:HasStructure(player: Player, structureId: string): boo
 	return self:CountOwned(player, structureId) > 0
 end
 
+--------------------------------------------------------------------------------
+-- Count replication
+--------------------------------------------------------------------------------
+
 --[[
-	Whether (x, z) lies inside the influence radius of any owned structure of
-	type `parentId`.
+	Mirrors "how many of each structure does this player own" onto attributes of
+	a folder under the Player.
 
-	Measured on the ground plane only - height is irrelevant, and including it
-	would make a radius behave differently on a slope.
+	The build menu needs this to know when a prerequisite has just been met. The
+	obvious alternative - have the client count the models in Workspace.Structures
+	as they arrive - loses a race: a model replicates before its OwnerUserId
+	attribute does, so the client either miscounts or has to poll. Replicating the
+	count the server already knows removes the race entirely.
+
+	Every known structure gets an attribute, zero included, so a reader never has
+	to distinguish "none built" from "not replicated yet".
 ]]
-function PlacementService:IsWithinRadiusOf(player: Player, parentId: string, x: number, z: number): boolean
-	local parent = GameConfig.GetStructure(parentId)
+function PlacementService:_countsFolder(player: Player): Folder
+	local name = GameConfig.StructureCountsFolderName
+	local folder = player:FindFirstChild(name)
 
-	if not parent or not parent.ProvidesRadius then
-		return false
+	if not folder then
+		folder = Instance.new("Folder")
+		folder.Name = name
+
+		for structureId in GameConfig.Structures do
+			folder:SetAttribute(structureId, 0)
+		end
+
+		folder.Parent = player
 	end
 
-	local radiusSquared = parent.ProvidesRadius * parent.ProvidesRadius
+	return folder
+end
+
+function PlacementService:_publishCounts(player: Player)
+	-- Parent may be gone if this runs during a disconnect.
+	if not player.Parent then
+		return
+	end
+
+	local folder = self:_countsFolder(player)
+	local counts = {}
 
 	for _, placed in self:GetPlaced(player) do
-		if placed.StructureId == parentId then
-			local dx = placed.X - x
-			local dz = placed.Z - z
-
-			if dx * dx + dz * dz <= radiusSquared then
-				return true
-			end
-		end
+		counts[placed.StructureId] = (counts[placed.StructureId] or 0) + 1
 	end
 
-	return false
+	for structureId in GameConfig.Structures do
+		folder:SetAttribute(structureId, counts[structureId] or 0)
+	end
 end
 
 --- Axis-aligned footprint overlap against every structure already placed,
@@ -242,8 +265,11 @@ end
 
 	Returns a result table. Failure reasons are stable codes:
 	  NoData, UnknownStructure, AgeTooLow, LimitReached, MissingPrerequisite,
-	  InvalidPosition, OutsideRadius, Blocked, NotEnoughResources, RateLimited,
-	  InternalError
+	  InvalidPosition, Blocked, NotEnoughResources, RateLimited, InternalError
+
+	Position is unrestricted inside the world bounds: anywhere not already
+	occupied is legal. Ownership of ground is established by building on it,
+	not granted by an existing building's radius.
 ]]
 function PlacementService:Place(player: Player, structureId: unknown, x: unknown, z: unknown)
 	local data = PlayerDataService:GetData(player)
@@ -266,12 +292,6 @@ function PlacementService:Place(player: Player, structureId: unknown, x: unknown
 
 	if px == nil or pz == nil then
 		return failure("InvalidPosition")
-	end
-
-	if structure.RequiresWithinRadiusOf then
-		if not self:IsWithinRadiusOf(player, structure.RequiresWithinRadiusOf, px, pz) then
-			return failure("OutsideRadius", { ParentId = structure.RequiresWithinRadiusOf })
-		end
 	end
 
 	if self:IsBlocked(structure, px, pz) then
@@ -343,6 +363,9 @@ function PlacementService:_spawn(player: Player, instanceId: string, entry: { [s
 		EntityId = entityId,
 	}
 
+	-- Published before the signal so any listener already sees the new count.
+	self:_publishCounts(player)
+
 	self.Spawned:Fire(player, instanceId, entry, model, entityId)
 end
 
@@ -401,6 +424,8 @@ function PlacementService:_despawn(player: Player, instanceId: string)
 	end
 
 	owned[instanceId] = nil
+
+	self:_publishCounts(player)
 end
 
 --------------------------------------------------------------------------------
@@ -420,6 +445,9 @@ function PlacementService:_restore(player: Player, data: { [string]: any })
 		return (tonumber(a) or 0) < (tonumber(b) or 0)
 	end)
 
+	-- Also covers the empty-base case, where no _spawn runs to publish.
+	self:_publishCounts(player)
+
 	for _, instanceId in ids do
 		self:_spawn(player, instanceId, data.Structures[instanceId])
 	end
@@ -432,6 +460,11 @@ function PlacementService:_release(player: Player)
 
 	self._placed[player] = nil
 	self._limiter:Forget(player)
+
+	local folder = player:FindFirstChild(GameConfig.StructureCountsFolderName)
+	if folder then
+		folder:Destroy()
+	end
 end
 
 --------------------------------------------------------------------------------

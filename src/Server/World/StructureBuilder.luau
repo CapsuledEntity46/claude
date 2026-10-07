@@ -65,31 +65,9 @@ function StructureBuilder.Build(structure, instanceId: string, ownerUserId: numb
 
 	label.Parent = body
 
-	--[[
-		Influence ring. Makes the proximity rule visible instead of invisible
-		geometry the player has to guess at - the most common complaint about
-		radius-locked building.
-	]]
-	if structure.ProvidesRadius and structure.ProvidesRadius > 0 then
-		local ring = Instance.new("Part")
-		ring.Name = "InfluenceRing"
-		ring.Shape = Enum.PartType.Cylinder
-		-- A cylinder's height runs along X, so it is rotated flat.
-		ring.Size = Vector3.new(0.4, structure.ProvidesRadius * 2, structure.ProvidesRadius * 2)
-		ring.CFrame = CFrame.new(x, GameConfig.Placement.GroundY + 0.2, z) * CFrame.Angles(0, 0, math.rad(90))
-		ring.Anchored = true
-		ring.CanCollide = false
-		ring.CanQuery = false
-		ring.Transparency = 0.85
-		ring.Color = structure.Color
-		ring.Material = Enum.Material.Neon
-		ring.Parent = model
-	end
-
 	model:SetAttribute(STRUCT_ATTR.OwnerUserId, ownerUserId)
 	model:SetAttribute(STRUCT_ATTR.StructureId, structure.Id)
 	model:SetAttribute(STRUCT_ATTR.InstanceId, instanceId)
-	model:SetAttribute(STRUCT_ATTR.ProvidesRadius, structure.ProvidesRadius or 0)
 
 	model.PrimaryPart = body
 	model.Parent = parent

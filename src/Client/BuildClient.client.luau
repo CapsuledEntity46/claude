@@ -27,7 +27,7 @@ local Shared = ReplicatedStorage:WaitForChild("Shared")
 local GameConfig = require(Shared.GameConfig)
 local Remotes = require(Shared.Remotes)
 
-local EXPECTED_FRAMEWORK = 11
+local EXPECTED_FRAMEWORK = 12
 
 local player = Players.LocalPlayer
 local ATTR = GameConfig.Attributes
@@ -197,7 +197,6 @@ screen.Parent = player:WaitForChild("PlayerGui")
 
 local selected = nil
 local ghost = nil
-local ghostRing = nil
 local lastPosition = nil
 local busy = false
 local statusToken = 0
@@ -225,28 +224,49 @@ end
 -- Client-side legality guess (feedback only; the server decides)
 --------------------------------------------------------------------------------
 
-local function getOwnedStructures(): { { StructureId: string, X: number, Z: number, Radius: number } }
-	local owned = {}
+--- Half-extents plus the gap, matching PlacementService.footprint exactly.
+local function footprint(structure): (number, number)
+	local gap = GameConfig.Placement.MinimumGap
+	return structure.Size.X / 2 + gap / 2, structure.Size.Z / 2 + gap / 2
+end
+
+--[[
+	Every structure standing in the world, whoever owns it. Overlap is the only
+	placement restriction, and it applies against all players - so unlike the
+	menu's count, this deliberately does not filter by owner.
+]]
+local function occupied(): { { X: number, Z: number, HalfX: number, HalfZ: number } }
+	local result = {}
 	local folder = Workspace:FindFirstChild(GameConfig.StructuresFolderName)
 
 	if not folder then
-		return owned
+		return result
 	end
 
 	for _, model in folder:GetChildren() do
-		if model:GetAttribute(STRUCT_ATTR.OwnerUserId) == player.UserId and model.PrimaryPart then
-			table.insert(owned, {
-				StructureId = model:GetAttribute(STRUCT_ATTR.StructureId),
+		local structure = GameConfig.GetStructure(model:GetAttribute(STRUCT_ATTR.StructureId))
+
+		-- A model mid-replication has no PrimaryPart yet. Skipping it only
+		-- costs a frame of preview accuracy; the server still rejects overlap.
+		if structure and model.PrimaryPart then
+			local halfX, halfZ = footprint(structure)
+
+			table.insert(result, {
 				X = model.PrimaryPart.Position.X,
 				Z = model.PrimaryPart.Position.Z,
-				Radius = model:GetAttribute(STRUCT_ATTR.ProvidesRadius) or 0,
+				HalfX = halfX,
+				HalfZ = halfZ,
 			})
 		end
 	end
 
-	return owned
+	return result
 end
 
+--[[
+	Anywhere inside the world bounds that is not already built on. Position
+	carries no other rule: picking the spot is the player's call.
+]]
 local function looksLegal(structure, x: number, z: number): boolean
 	local limit = GameConfig.Placement.WorldLimit
 
@@ -254,21 +274,18 @@ local function looksLegal(structure, x: number, z: number): boolean
 		return false
 	end
 
-	if not structure.RequiresWithinRadiusOf then
-		return true
-	end
+	local halfX, halfZ = footprint(structure)
 
-	for _, owned in getOwnedStructures() do
-		if owned.StructureId == structure.RequiresWithinRadiusOf and owned.Radius > 0 then
-			local dx, dz = owned.X - x, owned.Z - z
-
-			if dx * dx + dz * dz <= owned.Radius * owned.Radius then
-				return true
-			end
+	for _, other in occupied() do
+		if
+			math.abs(other.X - x) < halfX + other.HalfX
+			and math.abs(other.Z - z) < halfZ + other.HalfZ
+		then
+			return false
 		end
 	end
 
-	return false
+	return true
 end
 
 --------------------------------------------------------------------------------
@@ -286,7 +303,6 @@ local function clearGhost()
 		ghost = nil
 	end
 
-	ghostRing = nil
 	selected = nil
 	lastPosition = nil
 end
@@ -340,20 +356,6 @@ local function beginPlacing(structure)
 	body.Color = COLORS.GhostOk
 	body.Parent = ghost
 
-	if structure.ProvidesRadius and structure.ProvidesRadius > 0 then
-		ghostRing = Instance.new("Part")
-		ghostRing.Name = "Radius"
-		ghostRing.Shape = Enum.PartType.Cylinder
-		ghostRing.Size = Vector3.new(0.4, structure.ProvidesRadius * 2, structure.ProvidesRadius * 2)
-		ghostRing.Anchored = true
-		ghostRing.CanCollide = false
-		ghostRing.CanQuery = false
-		ghostRing.Transparency = 0.9
-		ghostRing.Material = Enum.Material.Neon
-		ghostRing.Color = COLORS.GhostOk
-		ghostRing.Parent = ghost
-	end
-
 	ghost.PrimaryPart = body
 	ghost.Parent = Workspace
 
@@ -373,14 +375,7 @@ local function beginPlacing(structure)
 		body.Position = Vector3.new(x, GameConfig.Placement.GroundY + structure.Size.Y / 2, z)
 
 		local legal = looksLegal(structure, x, z)
-		local tint = if legal then COLORS.GhostOk else COLORS.GhostBad
-		body.Color = tint
-
-		if ghostRing then
-			ghostRing.CFrame = CFrame.new(x, GameConfig.Placement.GroundY + 0.2, z)
-				* CFrame.Angles(0, 0, math.rad(90))
-			ghostRing.Color = tint
-		end
+		body.Color = if legal then COLORS.GhostOk else COLORS.GhostBad
 	end)
 end
 
@@ -416,6 +411,29 @@ end
 -- Menu
 --------------------------------------------------------------------------------
 
+--[[
+	How many of each structure the player owns, as replicated by the server.
+
+	Read from the counts folder rather than counted from Workspace. The folder
+	is written in one go by the server after the model exists, so a prerequisite
+	that was just satisfied is visible immediately - whereas counting models
+	raced their own attributes and left the menu a build behind.
+]]
+local function getCounts(): { [string]: number }
+	local counts = {}
+	local folder = player:FindFirstChild(GameConfig.StructureCountsFolderName)
+
+	if not folder then
+		return counts
+	end
+
+	for structureId, count in folder:GetAttributes() do
+		counts[structureId] = count
+	end
+
+	return counts
+end
+
 local function refreshMenu()
 	if not panel.Visible then
 		return
@@ -428,12 +446,7 @@ local function refreshMenu()
 	end
 
 	local age = player:GetAttribute(ATTR.Age) or 1
-	local owned = getOwnedStructures()
-
-	local counts = {}
-	for _, entry in owned do
-		counts[entry.StructureId] = (counts[entry.StructureId] or 0) + 1
-	end
+	local counts = getCounts()
 
 	for order, structure in GameConfig.GetStructureList() do
 		-- Mirrors PlacementService:GetBuildability. Both read the same config,
@@ -547,16 +560,24 @@ for _, resourceId in GameConfig.GetResourceIds() do
 	player:GetAttributeChangedSignal(resourceId):Connect(refreshMenu)
 end
 
-local structuresFolder = Workspace:FindFirstChild(GameConfig.StructuresFolderName)
+--[[
+	Building or demolishing changes limits and prerequisites, so the open menu
+	has to follow the counts folder. The folder arrives with the profile, which
+	can be after this script runs, hence the ChildAdded fallback.
+]]
+local function watchCounts(folder: Instance)
+	folder.AttributeChanged:Connect(refreshMenu)
+	refreshMenu()
+end
 
-if structuresFolder then
-	structuresFolder.ChildAdded:Connect(refreshMenu)
-	structuresFolder.ChildRemoved:Connect(refreshMenu)
+local countsFolder = player:FindFirstChild(GameConfig.StructureCountsFolderName)
+
+if countsFolder then
+	watchCounts(countsFolder)
 else
-	Workspace.ChildAdded:Connect(function(child: Instance)
-		if child.Name == GameConfig.StructuresFolderName then
-			child.ChildAdded:Connect(refreshMenu)
-			child.ChildRemoved:Connect(refreshMenu)
+	player.ChildAdded:Connect(function(child: Instance)
+		if child.Name == GameConfig.StructureCountsFolderName then
+			watchCounts(child)
 		end
 	end)
 end

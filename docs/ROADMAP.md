@@ -205,6 +205,44 @@ Still to add: watering, fertiliser and compost to accelerate growth; crop health
 that regenerates slowly and faster when tended; companion creatures and flying
 robots that tend crops automatically.
 
+### 2b. Combat plants ⬜
+
+A gardening *and defence* simulator: alongside food crops, plants that fight.
+Reference is Plants vs Zombies, adapted to a 3D base under siege.
+
+| Role | Behaviour |
+| ---- | --------- |
+| **Offensive** | Attack enemies in range on a cooldown |
+| **Defensive / tank** | High health, soaks damage and shields plants behind it |
+| **Support** | Area effects — slows, buffs, damage over time |
+
+Damage flavours: **fire**, **ice**, **poison**, **splash**.
+
+> **Architectural notes.**
+>
+> - Most of this is already built. `DamageableService` gives plants health,
+>   armour, death and rewards; `GameConfig.Archetypes` gives them stats. A
+>   combat plant is an archetype plus a behaviour, not a new system.
+> - **Add Fire/Ice/Poison to `GameConfig.Combat.DamageTypes`** and a row each in
+>   the multiplier table. The config asserts every damage type prices every
+>   armour class, so a half-added type fails at startup rather than silently
+>   dealing unmodified damage.
+> - **Status effects need their own module**, and must be *derived from
+>   timestamps* like growth and health: store `{ EffectId, AppliedAt, Stacks }`
+>   and compute whether it is still active on read. Ticking burn damage every
+>   second for every enemy is the obvious implementation and the wrong one — it
+>   does not survive a restart and costs CPU proportional to the battlefield.
+> - **Splash damage** is a radius query, the same primitive the placement
+>   service already needs for proximity. Worth extracting one spatial helper
+>   rather than writing the distance loop twice.
+> - **"Tanks protect plants behind" is an enemy-targeting rule, not a plant
+>   property.** In a lane game it falls out of the geometry; in 3D it has to be
+>   explicit — enemies must prefer the nearest blocking entity over whatever is
+>   closest in a straight line. That belongs in enemy target selection, and is
+>   the one piece here with no existing foundation.
+> - Attack cadence should be **derived**: store `LastAttackAt` and compare
+>   against a config cooldown, rather than running a timer per plant.
+
 ### 3. Animal husbandry 🟡
 
 Drop items exist and are sellable; nothing produces them.

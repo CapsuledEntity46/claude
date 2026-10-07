@@ -46,6 +46,7 @@ local Workspace = game:GetService("Workspace")
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Shared = ReplicatedStorage:WaitForChild("Shared")
+local Buildability = require(Shared.Buildability)
 local GameConfig = require(Shared.GameConfig)
 local RateLimiter = require(Shared.RateLimiter)
 local Remotes = require(Shared.Remotes)
@@ -236,27 +237,22 @@ end
 	would reject them - no second rule set to drift.
 ]]
 function PlacementService:GetBuildability(player: Player, structureId: string): (boolean, string?)
-	local structure = GameConfig.GetStructure(structureId)
+	--[[
+		Delegated to Shared.Buildability so the build menu reaches the same
+		verdict from replicated data. This used to be written here and again on
+		the client, with a comment on each promising they matched.
 
-	if not structure then
-		return false, "UnknownStructure"
+		Cost is deliberately NOT included: it is taken in TryPayConstruction
+		after the position has been validated, so that aiming at an illegal
+		spot reports the position rather than the price.
+	]]
+	local counts = {}
+
+	for _, placed in self:GetPlaced(player) do
+		counts[placed.StructureId] = (counts[placed.StructureId] or 0) + 1
 	end
 
-	if PlayerDataService:GetAge(player) < structure.RequiredAge then
-		return false, "AgeTooLow"
-	end
-
-	if self:CountOwned(player, structure.Id) >= structure.MaxPerPlayer then
-		return false, "LimitReached"
-	end
-
-	for _, prerequisiteId in structure.Prerequisites do
-		if not self:HasStructure(player, prerequisiteId) then
-			return false, "MissingPrerequisite"
-		end
-	end
-
-	return true, nil
+	return Buildability.CheckTree(structureId, counts, PlayerDataService:GetAge(player))
 end
 
 --------------------------------------------------------------------------------

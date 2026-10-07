@@ -24,6 +24,7 @@ local UserInputService = game:GetService("UserInputService")
 local Workspace = game:GetService("Workspace")
 
 local Shared = ReplicatedStorage:WaitForChild("Shared")
+local Buildability = require(Shared.Buildability)
 local GameConfig = require(Shared.GameConfig)
 local Remotes = require(Shared.Remotes)
 
@@ -221,6 +222,91 @@ local function setStatus(message: string, isError: boolean?)
 end
 
 --------------------------------------------------------------------------------
+-- Buildability (feedback only; the server decides)
+--------------------------------------------------------------------------------
+
+--[[
+	How many of each structure the player owns, as replicated by the server.
+
+	Read from the counts folder rather than counted from Workspace. The folder
+	is written in one go by the server after the model exists, so a prerequisite
+	that was just satisfied is visible immediately - whereas counting models
+	raced their own attributes and left the menu a build behind.
+]]
+local function getCounts(): { [string]: number }
+	local counts = {}
+	local folder = player:FindFirstChild(GameConfig.StructureCountsFolderName)
+
+	if not folder then
+		return counts
+	end
+
+	for structureId, count in folder:GetAttributes() do
+		counts[structureId] = count
+	end
+
+	return counts
+end
+
+--- What the player is holding, for the affordability check.
+local function getResources(): { [string]: number }
+	local held = {}
+
+	for _, resourceId in GameConfig.GetResourceIds() do
+		held[resourceId] = player:GetAttribute(resourceId) or 0
+	end
+
+	return held
+end
+
+--[[
+	Why `structure` cannot be built right now, as a sentence, or nil.
+
+	The RULE comes from Shared.Buildability, which the server uses too, so the
+	greying cannot drift from what placement actually allows. Only the WORDING
+	is here, because wording is this menu's business.
+
+	Answers two questions that must never disagree: which rows are greyed out,
+	and whether placement mode can continue after a build.
+]]
+local function blockedFor(structure, counts: { [string]: number }, age: number): string?
+	local ok, code, resourceId = Buildability.Check(structure.Id, counts, age, getResources())
+
+	if ok then
+		return nil
+	end
+
+	if code == "AgeTooLow" then
+		local required = GameConfig.GetAge(structure.RequiredAge)
+		return `Requires the {if required then required.Name else "next age"}`
+	end
+
+	if code == "LimitReached" then
+		return `Limit reached ({structure.MaxPerPlayer})`
+	end
+
+	if code == "MissingPrerequisite" then
+		-- Named rather than listed: the first unmet one is the next thing to
+		-- go and build, and listing all of them is noise in a 58px row.
+		for _, prerequisiteId in structure.Prerequisites do
+			if (counts[prerequisiteId] or 0) < 1 then
+				local parent = GameConfig.GetStructure(prerequisiteId)
+				return `Requires a {if parent then parent.Name else prerequisiteId}`
+			end
+		end
+
+		return "Requires another building"
+	end
+
+	if code == "NotEnoughResources" then
+		local resource = if resourceId then GameConfig.Resources[resourceId] else nil
+		return `Not enough {if resource then resource.Name else resourceId or "resources"}`
+	end
+
+	return "Cannot build this"
+end
+
+--------------------------------------------------------------------------------
 -- Client-side legality guess (feedback only; the server decides)
 --------------------------------------------------------------------------------
 
@@ -359,7 +445,7 @@ local function beginPlacing(structure)
 	ghost.PrimaryPart = body
 	ghost.Parent = Workspace
 
-	setStatus(`Placing {structure.Name} — click to confirm, Escape to cancel.`)
+	setStatus(`Placing {structure.Name} — click to place, right-click or Escape to stop.`)
 
 	renderConnection = RunService.RenderStepped:Connect(function()
 		local point = getGroundPoint()
@@ -399,41 +485,33 @@ local function confirmPlacement()
 		return
 	end
 
-	if result.Ok then
-		setStatus(`{structure.Name} built.`)
-		clearGhost()
-	else
+	if not result.Ok then
 		-- The server saw something the preview could not, so say what.
 		setStatus(result.Reason or "Placement refused.", true)
+		return
 	end
+
+	--[[
+		THE GHOST STAYS UP.
+
+		Placing a row of farms used to mean reopening the menu between every
+		one, which is a lot of clicks to lay out a base. So the selection
+		survives a successful placement, and only ends on right-click, Escape,
+		picking something else, or running out of road.
+
+		Deliberately NOT checked here: whether another one could be placed.
+		The count and the resources both change on the server and replicate
+		when they replicate, so reading them now is a race. `reviewSelection`
+		runs when the new values actually arrive and ends placement mode then
+		- which also covers the cases this never sees, like a second player
+		taking the last of something.
+	]]
+	setStatus(`{structure.Name} built. Click to place another, right-click to stop.`)
 end
 
 --------------------------------------------------------------------------------
 -- Menu
 --------------------------------------------------------------------------------
-
---[[
-	How many of each structure the player owns, as replicated by the server.
-
-	Read from the counts folder rather than counted from Workspace. The folder
-	is written in one go by the server after the model exists, so a prerequisite
-	that was just satisfied is visible immediately - whereas counting models
-	raced their own attributes and left the menu a build behind.
-]]
-local function getCounts(): { [string]: number }
-	local counts = {}
-	local folder = player:FindFirstChild(GameConfig.StructureCountsFolderName)
-
-	if not folder then
-		return counts
-	end
-
-	for structureId, count in folder:GetAttributes() do
-		counts[structureId] = count
-	end
-
-	return counts
-end
 
 local function refreshMenu()
 	if not panel.Visible then
@@ -450,24 +528,7 @@ local function refreshMenu()
 	local counts = getCounts()
 
 	for order, structure in GameConfig.GetStructureList() do
-		-- Mirrors PlacementService:GetBuildability. Both read the same config,
-		-- so the greying matches the server's reasons.
-		local blockedReason = nil
-
-		if age < structure.RequiredAge then
-			local required = GameConfig.GetAge(structure.RequiredAge)
-			blockedReason = `Requires the {if required then required.Name else "next age"}`
-		elseif (counts[structure.Id] or 0) >= structure.MaxPerPlayer then
-			blockedReason = `Limit reached ({structure.MaxPerPlayer})`
-		else
-			for _, prerequisiteId in structure.Prerequisites do
-				if (counts[prerequisiteId] or 0) < 1 then
-					local parent = GameConfig.GetStructure(prerequisiteId)
-					blockedReason = `Requires a {if parent then parent.Name else prerequisiteId}`
-					break
-				end
-			end
-		end
+		local blockedReason = blockedFor(structure, counts, age)
 
 		local row = Instance.new("Frame")
 		row.Size = UDim2.new(1, -6, 0, 58)
@@ -521,6 +582,39 @@ end
 -- Wiring
 --------------------------------------------------------------------------------
 
+--[[
+	Ends placement mode once the held structure stops being placeable.
+
+	Run from the same signals that refresh the menu, rather than immediately
+	after a build, because the count and the resource totals change on the
+	SERVER and replicate when they replicate. Checking at the moment of
+	placement would be a race; checking when the new values arrive is not, and
+	it also catches changes this client did not cause - another player taking
+	the last of something, or an age-up from elsewhere.
+
+	Without this, spending the last of your wood would leave a ghost under the
+	cursor that can only ever be refused.
+]]
+local function reviewSelection()
+	if not selected then
+		return
+	end
+
+	local reason = blockedFor(selected, getCounts(), player:GetAttribute(ATTR.Age) or 1)
+
+	if reason then
+		local name = selected.Name
+		clearGhost()
+		setStatus(`{reason}. Stopped placing {name}.`, true)
+	end
+end
+
+--- Everything that can change what is buildable has to do both.
+local function onBuildabilityChanged()
+	refreshMenu()
+	reviewSelection()
+end
+
 toggle.MouseButton1Click:Connect(function()
 	panel.Visible = not panel.Visible
 
@@ -555,10 +649,10 @@ UserInputService.InputBegan:Connect(function(input: InputObject, processed: bool
 end)
 
 -- Aging up and spending resources both change what is buildable.
-player:GetAttributeChangedSignal(ATTR.Age):Connect(refreshMenu)
+player:GetAttributeChangedSignal(ATTR.Age):Connect(onBuildabilityChanged)
 
 for _, resourceId in GameConfig.GetResourceIds() do
-	player:GetAttributeChangedSignal(resourceId):Connect(refreshMenu)
+	player:GetAttributeChangedSignal(resourceId):Connect(onBuildabilityChanged)
 end
 
 --[[
@@ -567,7 +661,7 @@ end
 	can be after this script runs, hence the ChildAdded fallback.
 ]]
 local function watchCounts(folder: Instance)
-	folder.AttributeChanged:Connect(refreshMenu)
+	folder.AttributeChanged:Connect(onBuildabilityChanged)
 	refreshMenu()
 end
 

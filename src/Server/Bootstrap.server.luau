@@ -71,6 +71,8 @@ end
 
 local DamageableService = requireServer("Combat.DamageableService")
 local StatusEffectService = requireServer("Combat.StatusEffectService")
+local AttackService = requireServer("Combat.AttackService")
+local RaidService = requireServer("Combat.RaidService")
 local PlayerDataService = requireServer("Services.PlayerDataService")
 local FarmService = requireServer("Services.FarmService")
 local ShopService = requireServer("Services.ShopService")
@@ -121,6 +123,8 @@ if guardModule then
 	require(guardModule).Assert(GameConfig.FrameworkVersion, {
 		DamageableService = DamageableService,
 		StatusEffectService = StatusEffectService,
+		AttackService = AttackService,
+		RaidService = RaidService,
 		TrainingGround = TrainingGround,
 		PlayerDataService = PlayerDataService,
 		FarmService = FarmService,
@@ -142,8 +146,10 @@ end
 PlayerDataService:Start()
 DamageableService:Start()
 
--- After the registry it hooks, so no Destroyed signal fires before it listens.
+-- After the registry they hook, so no Destroyed signal fires before they listen.
 StatusEffectService:Start()
+AttackService:Start()
+RaidService:Start()
 
 FarmService:Start()
 PlacementService:Start()
@@ -172,6 +178,14 @@ end)
 
 FarmService.Harvested:Connect(function(player: Player, instanceId: string, itemId: string, amount: number)
 	print(`[Farm] {player.Name} harvested {amount}x {itemId} from farm {instanceId}`)
+end)
+
+RaidService.WaveStarted:Connect(function(userId: number, raiders: number)
+	print(`[Raid] a wave of {raiders} is heading for {userId}`)
+end)
+
+RaidService.WaveCleared:Connect(function(userId: number)
+	print(`[Raid] {userId} cleared the wave`)
 end)
 
 -- << Register additional services here as later steps are added >>

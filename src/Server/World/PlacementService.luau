@@ -52,6 +52,7 @@ local RateLimiter = require(Shared.RateLimiter)
 local Remotes = require(Shared.Remotes)
 local Signal = require(Shared.Signal)
 
+local AttackService = require(script.Parent.Parent.Combat.AttackService)
 local DamageableService = require(script.Parent.Parent.Combat.DamageableService)
 local PlayerDataService = require(script.Parent.Parent.Services.PlayerDataService)
 local StructureBuilder = require(script.Parent.StructureBuilder)
@@ -361,6 +362,18 @@ function PlacementService:_spawn(player: Player, instanceId: string, entry: { [s
 		State = if entry.Health then { Health = entry.Health, DamagedAt = entry.DamagedAt } else nil,
 	})
 
+	--[[
+		A structure whose archetype names an attack becomes an attacker. This
+		is the whole of the Watch Tower's behaviour: it had stats and a
+		footprint and did nothing, and now it shoots, with no tower-specific
+		code anywhere.
+
+		Declines for everything else, so Mills and Farms take the same path.
+	]]
+	if entityId then
+		AttackService:Register(entityId)
+	end
+
 	local owned = self._placed[player]
 	if not owned then
 		owned = {}
@@ -425,6 +438,7 @@ function PlacementService:_despawn(player: Player, instanceId: string)
 	end
 
 	if placed.EntityId then
+		AttackService:Unregister(placed.EntityId)
 		DamageableService:Unregister(placed.EntityId)
 	end
 

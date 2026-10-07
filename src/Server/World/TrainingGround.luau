@@ -37,6 +37,7 @@ local Shared = ReplicatedStorage:WaitForChild("Shared")
 local GameConfig = require(Shared.GameConfig)
 
 local DamageableService = require(script.Parent.Parent.Combat.DamageableService)
+local RaidService = require(script.Parent.Parent.Combat.RaidService)
 local StatusEffectService = require(script.Parent.Parent.Combat.StatusEffectService)
 
 local TrainingGround = {}
@@ -44,7 +45,15 @@ local TrainingGround = {}
 TrainingGround.FrameworkVersion = 13
 
 local FOLDER_NAME = "TrainingGround"
-local DUMMY_ARCHETYPE = "EnemyRaider"
+--[[
+	A dedicated NEUTRAL archetype, not EnemyRaider.
+
+	Two reasons. A tower built near the range would otherwise shoot the
+	dummies, and a range you cannot stand a tower next to is not much of a
+	range. And EnemyRaider carries kill rewards: with a six second respawn,
+	the range was an endless source of purse gold and XP.
+]]
+local DUMMY_ARCHETYPE = "PracticeDummy"
 
 --- Seconds before a destroyed dummy is back on its feet.
 local RESPAWN_DELAY = 6
@@ -177,6 +186,60 @@ local function build(effect, index: number, folder: Instance)
 end
 
 --------------------------------------------------------------------------------
+-- The raid horn
+--------------------------------------------------------------------------------
+
+local function buildHorn(folder: Instance, index: number)
+	local model = Instance.new("Model")
+	model.Name = "RaidHorn"
+
+	local body = Instance.new("Part")
+	body.Name = "Body"
+	body.Size = Vector3.new(4, 8, 4)
+	body.Position = ORIGIN + Vector3.new((index - 1) * SPACING + 4, 4, 0)
+	body.Anchored = true
+	body.CanCollide = true
+	body.Color = Color3.fromRGB(96, 58, 58)
+	body.Material = Enum.Material.Rock
+	body.Parent = model
+
+	local prompt = Instance.new("ProximityPrompt")
+	prompt.Name = "SummonPrompt"
+	prompt.ActionText = "Sound the Horn"
+	prompt.ObjectText = "Raid Horn"
+	prompt.HoldDuration = 0.5
+	prompt.KeyboardKeyCode = Enum.KeyCode.E
+	prompt.MaxActivationDistance = GameConfig.Interaction.MaxActivationDistance
+	prompt.RequiresLineOfSight = false
+	prompt.Parent = body
+
+	label(body, "Raid Horn", 6, 16)
+
+	model.PrimaryPart = body
+	model.Parent = folder
+
+	prompt.Triggered:Connect(function(player: Player)
+		-- Reach is enforced on the client, which an exploiter owns.
+		local character = player.Character
+		local root = if character then character.PrimaryPart else nil
+
+		if not root then
+			return
+		end
+
+		local reach = GameConfig.Interaction.MaxActivationDistance + GameConfig.Interaction.DistanceTolerance
+
+		if (root.Position - body.Position).Magnitude > reach then
+			return
+		end
+
+		RaidService:SummonWave(player)
+	end)
+
+	return model
+end
+
+--------------------------------------------------------------------------------
 -- Entry point
 --------------------------------------------------------------------------------
 
@@ -202,6 +265,16 @@ function TrainingGround.Build()
 	for index, effectId in effectIds do
 		build(GameConfig.StatusEffects[effectId], index, folder)
 	end
+
+	--[[
+		THE RAID HORN.
+
+		Waves are summoned rather than timed, so this is how a raid starts.
+		It sits with the practice range because it serves the same purpose:
+		letting the player find out whether their defences work, when they
+		choose to, instead of being told while they are mid-build.
+	]]
+	buildHorn(folder, #effectIds + 1)
 
 	--[[
 		A felled dummy goes back up after a pause, so the range can be used

@@ -511,6 +511,24 @@ end
 -- Queries
 --------------------------------------------------------------------------------
 
+--[[
+	Every registered entity id, in ascending order.
+
+	Sorted because callers iterate it to pick targets, and hash order would
+	make an attacker choose a different equidistant target every tick - it
+	would stutter between two raiders forever instead of killing either.
+]]
+function DamageableService:GetAllEntityIds(): { number }
+	local ids = {}
+
+	for id in self._entities do
+		table.insert(ids, id)
+	end
+
+	table.sort(ids)
+	return ids
+end
+
 function DamageableService:GetEntitiesOwnedBy(userId: number): { number }
 	local ids = {}
 

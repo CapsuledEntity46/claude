@@ -58,6 +58,12 @@ export type PlantableDefinition = {
 	RequiredLevel: number, -- gates both buying and planting
 	PlantSize: string, -- key into GameConfig.PlantSizes; sets how many fit per farm
 	Color: Color3, -- growing plant tint, also used by shop UI swatches
+	-- Archetype the grown plant registers as. Defaults to "Crop"; a combat
+	-- plant names its own, which is what gives it an attack and real health.
+	ArchetypeId: string?,
+	-- False for a plant that is not picked but kept, like every combat plant.
+	-- Such a plant has no Yields and is uprooted rather than harvested.
+	Harvestable: boolean?,
 }
 
 export type PlantSizeDefinition = {
@@ -291,6 +297,50 @@ GameConfig.Items = {
 		SellPrice = nil,
 		MaxStack = 999,
 		Rarity = "Common",
+	},
+
+	--------------------------------------------------------------------------
+	-- Combat plant seeds
+	--
+	-- Priced well above food seeds and gated by level: a square given to a
+	-- defence is a square not growing anything, so the cost has to reflect
+	-- that it buys safety rather than income.
+	--------------------------------------------------------------------------
+	EmberBloomSeed = {
+		Id = "EmberBloomSeed",
+		Name = "Ember Bloom Seed",
+		Category = "Seeds",
+		BuyPrice = 120,
+		SellPrice = nil,
+		MaxStack = 999,
+		Rarity = "Uncommon",
+	},
+	FrostLilySeed = {
+		Id = "FrostLilySeed",
+		Name = "Frost Lily Seed",
+		Category = "Seeds",
+		BuyPrice = 150,
+		SellPrice = nil,
+		MaxStack = 999,
+		Rarity = "Uncommon",
+	},
+	VenomCapSeed = {
+		Id = "VenomCapSeed",
+		Name = "Venom Cap Seed",
+		Category = "Seeds",
+		BuyPrice = 180,
+		SellPrice = nil,
+		MaxStack = 999,
+		Rarity = "Rare",
+	},
+	BulwarkSeed = {
+		Id = "BulwarkSeed",
+		Name = "Bulwark Gourd Seed",
+		Category = "Seeds",
+		BuyPrice = 200,
+		SellPrice = nil,
+		MaxStack = 999,
+		Rarity = "Rare",
 	},
 	TomatoSeed = {
 		Id = "TomatoSeed",
@@ -654,6 +704,55 @@ GameConfig.Plantables = {
 		PlantSize = "Large",
 		Color = Color3.fromRGB(240, 199, 62),
 	},
+	--------------------------------------------------------------------------
+	-- Combat plants
+	--
+	-- Special tier, so one per square: a defence needs the room to work, and
+	-- the space it costs is the real price. None of them is harvestable - a
+	-- combat plant is kept, not picked - so they have no Yields and are
+	-- uprooted when the player wants the square back.
+	--------------------------------------------------------------------------
+	EmberBloomSeed = {
+		SeedId = "EmberBloomSeed",
+		GrowTime = 45,
+		XPReward = 40,
+		RequiredLevel = 2,
+		PlantSize = "Special",
+		ArchetypeId = "EmberBloom",
+		Harvestable = false,
+		Color = Color3.fromRGB(236, 112, 48),
+	},
+	FrostLilySeed = {
+		SeedId = "FrostLilySeed",
+		GrowTime = 50,
+		XPReward = 45,
+		RequiredLevel = 3,
+		PlantSize = "Special",
+		ArchetypeId = "FrostLily",
+		Harvestable = false,
+		Color = Color3.fromRGB(120, 196, 236),
+	},
+	VenomCapSeed = {
+		SeedId = "VenomCapSeed",
+		GrowTime = 60,
+		XPReward = 55,
+		RequiredLevel = 4,
+		PlantSize = "Special",
+		ArchetypeId = "VenomCap",
+		Harvestable = false,
+		Color = Color3.fromRGB(126, 196, 76),
+	},
+	BulwarkSeed = {
+		SeedId = "BulwarkSeed",
+		GrowTime = 75,
+		XPReward = 60,
+		RequiredLevel = 4,
+		PlantSize = "Special",
+		ArchetypeId = "Bulwark",
+		Harvestable = false,
+		Color = Color3.fromRGB(176, 158, 96),
+	},
+
 	StarfruitSeed = {
 		SeedId = "StarfruitSeed",
 		Yields = "Starfruit",
@@ -665,6 +764,24 @@ GameConfig.Plantables = {
 		Color = Color3.fromRGB(126, 118, 224),
 	},
 } :: { [string]: PlantableDefinition }
+
+--- Whether a planted `seedId` is picked (a food crop) or kept (a defence).
+function GameConfig.IsHarvestable(seedId: unknown): boolean
+	local plantable = GameConfig.GetPlantable(seedId)
+	return plantable ~= nil and plantable.Harvestable ~= false
+end
+
+--- The archetype a grown `seedId` registers as. Food crops share "Crop";
+--- a combat plant names its own.
+function GameConfig.GetPlantArchetypeId(seedId: unknown): string?
+	local plantable = GameConfig.GetPlantable(seedId)
+
+	if not plantable then
+		return nil
+	end
+
+	return plantable.ArchetypeId or "Crop"
+end
 
 --- Resolves an untrusted seed item id to its planting behaviour.
 function GameConfig.GetPlantable(seedId: unknown): PlantableDefinition?
@@ -760,6 +877,18 @@ export type ArchetypeDefinition = {
 	RepairCostPerHealth: { [string]: number }?,
 	DestroyBehaviour: string, -- "Remove" | "Shatter"
 	Rewards: { XP: number, Gold: number }?,
+
+	-- Who it fights. See GameConfig.Factions.
+	Faction: string,
+	-- What KIND of thing it is, for an attacker's target priority.
+	TargetTag: string,
+	-- Attack profile it fires, or nil for anything that cannot fight back.
+	AttackId: string?,
+	-- Which tag it prefers to attack. Only read for an archetype with an
+	-- AttackId.
+	TargetPriority: string?,
+	-- Studs per second. 0 for anything rooted, which is most things.
+	MoveSpeed: number?,
 }
 
 --[[
@@ -773,9 +902,59 @@ export type ArchetypeDefinition = {
 	Adding a damage type or armour class is a config edit - no combat code
 	changes.
 ]]
+--[[
+	Who fights whom.
+
+	Player and Hostile are mutually hostile; Neutral fights nobody and nobody
+	fights it, which is what makes a practice dummy safe to stand next to a
+	tower.
+
+	Player-versus-player is deliberately absent. Two players are not hostile,
+	so a tower will never shoot a visitor - and when PvP arrives it needs a
+	raid/truce model rather than a third faction, because "are these two at
+	war" is a relationship, not a property of either one.
+]]
+GameConfig.Factions = {
+	Player = "Player",
+	Hostile = "Hostile",
+	Neutral = "Neutral",
+}
+
+--[[
+	What an attacker goes for, from Clash of Clans' three priorities.
+
+	This is DATA ON THE ARCHETYPE, never a branch in the targeting code: the
+	selector reads the tag and the priority and has no idea what a Mill is.
+	Adding a siege unit that hunts walls is then a config edit.
+]]
+GameConfig.TargetPriorities = { "Any", "Defence", "Resource" }
+
+--- What a thing is, for the priorities above to discriminate on.
+GameConfig.TargetTags = { "Core", "Defence", "Resource", "Crop", "Unit" }
+
 GameConfig.Combat = {
 	DamageTypes = { "Melee", "Pierce", "Siege", "Magic", "Fire", "Ice", "Poison" },
 	ArmourClasses = { "Unarmoured", "Light", "Heavy", "Building", "Crop" },
+
+	--[[
+		How often attackers look for something to shoot.
+
+		UNLIKE STATUS EFFECTS, this interval is not just precision - it is the
+		granularity of the whole fight, because an attack is a discrete event
+		rather than an accruing quantity. A stalled loop must NOT let a tower
+		bank up shots and fire them all at once: cadence is "has the cooldown
+		elapsed", so a tower that was starved of ticks fires once and then
+		resumes. Missing damage is the right failure here; a burst of stored
+		arrows is not.
+	]]
+	AttackTickInterval = 0.25,
+
+	--[[
+		Half-width of the corridor an attacker scans for something blocking its
+		path. Roughly a couple of building footprints, so a wall of defences
+		reads as a wall rather than as a line of gaps.
+	]]
+	BlockingCorridor = 14,
 
 	-- Even a perfectly countered hit lands something. A truly immune target
 	-- would make a siege unwinnable rather than merely slow.
@@ -805,6 +984,117 @@ GameConfig.Combat = {
 	},
 }
 
+--------------------------------------------------------------------------------
+-- Attack profiles
+--------------------------------------------------------------------------------
+
+export type AttackDefinition = {
+	Id: string,
+	Name: string,
+	Range: number, -- studs, measured on the ground plane
+	Damage: number, -- before the counter table and armour
+	DamageType: string,
+	Cooldown: number, -- seconds between shots
+	SplashRadius: number?, -- nil for a single-target hit
+	SplashMinFraction: number?, -- damage fraction at the blast rim
+	StatusEffect: string?, -- applied to everything the shot hits
+}
+
+--[[
+	What a shot does, separated from what fires it.
+
+	A tower, a combat plant and a raider's club are the same mechanism with
+	different numbers, so they share one table and one code path. Giving a new
+	defence an attack is then a config edit, which is the test of whether this
+	is really data.
+
+	CADENCE IS DERIVED. An attacker stores `LastAttackAt` and compares it
+	against `Cooldown`; there is no timer per attacker. A thousand idle towers
+	cost one subtraction each.
+]]
+GameConfig.Attacks = {
+	--[[
+		The Watch Tower. Pierce, so it shreds raiders and would be a poor
+		choice against a building - a tower is not a siege engine.
+	]]
+	TowerBolt = {
+		Id = "TowerBolt",
+		Name = "Bolt",
+		Range = 60,
+		Damage = 22,
+		DamageType = "Pierce",
+		Cooldown = 1.2,
+	},
+
+	--[[
+		Ember Bloom: the splash plant. Modest direct damage, but it sets
+		everything near the impact alight, so its value rises with how tightly
+		packed the horde is.
+	]]
+	EmberBurst = {
+		Id = "EmberBurst",
+		Name = "Ember Burst",
+		Range = 34,
+		Damage = 9,
+		DamageType = "Fire",
+		Cooldown = 2,
+		SplashRadius = 12,
+		SplashMinFraction = 0.4,
+		StatusEffect = "Burn",
+	},
+
+	--[[
+		Frost Lily: the support plant. Its damage is almost an afterthought -
+		it exists to Chill, which stacks and compounds, and a slowed horde
+		spends longer in everything else's range.
+	]]
+	FrostTouch = {
+		Id = "FrostTouch",
+		Name = "Frost Touch",
+		Range = 30,
+		Damage = 3,
+		DamageType = "Ice",
+		Cooldown = 1.6,
+		StatusEffect = "Chill",
+	},
+
+	--[[
+		Venom Cap: the attrition plant. Poison ignores the idea of armour, so
+		this is the answer to anything heavy that a tower's Pierce glances off.
+	]]
+	VenomSpit = {
+		Id = "VenomSpit",
+		Name = "Venom Spit",
+		Range = 38,
+		Damage = 5,
+		DamageType = "Poison",
+		Cooldown = 2.4,
+		StatusEffect = "Poison",
+	},
+
+	--[[
+		A raider's club. Siege-flavoured because a raid is aimed at buildings;
+		it is poor against units, which is why raiders lose to towers but win
+		against an undefended base.
+	]]
+	RaiderClub = {
+		Id = "RaiderClub",
+		Name = "Club",
+		Range = 9,
+		Damage = 14,
+		DamageType = "Siege",
+		Cooldown = 1.5,
+	},
+} :: { [string]: AttackDefinition }
+
+function GameConfig.GetAttack(attackId: unknown): AttackDefinition?
+	if type(attackId) ~= "string" then
+		return nil
+	end
+
+	return GameConfig.Attacks[attackId]
+end
+
 --[[
 	Everything that can be damaged, declared in one table.
 
@@ -828,6 +1118,8 @@ GameConfig.Archetypes = {
 		RegenPerSecond = 0.5,
 		Repairable = false,
 		DestroyBehaviour = "Remove",
+		Faction = "Player",
+		TargetTag = "Crop",
 	},
 
 	TownCenter = {
@@ -840,6 +1132,9 @@ GameConfig.Archetypes = {
 		Repairable = true,
 		RepairCostPerHealth = { Wood = 0.4, Stone = 0.2 },
 		DestroyBehaviour = "Remove",
+		Faction = "Player",
+		-- The thing a raid is ultimately aimed at.
+		TargetTag = "Core",
 	},
 
 	Farm = {
@@ -852,6 +1147,8 @@ GameConfig.Archetypes = {
 		Repairable = true,
 		RepairCostPerHealth = { Wood = 0.2 },
 		DestroyBehaviour = "Remove",
+		Faction = "Player",
+		TargetTag = "Resource",
 	},
 
 	Mill = {
@@ -864,6 +1161,8 @@ GameConfig.Archetypes = {
 		Repairable = true,
 		RepairCostPerHealth = { Wood = 0.5 },
 		DestroyBehaviour = "Remove",
+		Faction = "Player",
+		TargetTag = "Resource",
 	},
 
 	WatchTower = {
@@ -876,6 +1175,11 @@ GameConfig.Archetypes = {
 		Repairable = true,
 		RepairCostPerHealth = { Wood = 0.3, Stone = 0.5 },
 		DestroyBehaviour = "Remove",
+		Faction = "Player",
+		TargetTag = "Defence",
+		-- The tower stops being scenery.
+		AttackId = "TowerBolt",
+		TargetPriority = "Any",
 	},
 
 	Checkpoint = {
@@ -889,6 +1193,8 @@ GameConfig.Archetypes = {
 		RepairCostPerHealth = { Wood = 0.4, Stone = 0.4 },
 		-- Shattered, not gone: the player can still fight and rebuild.
 		DestroyBehaviour = "Shatter",
+		Faction = "Player",
+		TargetTag = "Core",
 	},
 
 	EnemyRaider = {
@@ -903,6 +1209,137 @@ GameConfig.Archetypes = {
 		-- Per level. Gold here lands in the killer's PURSE, which is the only
 		-- thing that fills it.
 		Rewards = { XP = 12, Gold = 8 },
+		Faction = "Hostile",
+		TargetTag = "Unit",
+		AttackId = "RaiderClub",
+		--[[
+			"Any" means nearest, which is what makes a tank plant work: the
+			raider engages whatever it would walk into first rather than
+			picking the squishiest thing on the field.
+		]]
+		TargetPriority = "Any",
+		MoveSpeed = 7,
+	},
+
+	--[[
+		A raider that goes for the economy instead of the front line. Exists to
+		prove the priority is data: nothing in the targeting code mentions
+		Mills, it just reads the tag.
+	]]
+	EnemyLooter = {
+		Id = "EnemyLooter",
+		Name = "Looter",
+		MaxHealth = 90,
+		ArmourClass = "Unarmoured",
+		Armour = 0,
+		RegenPerSecond = 0,
+		Repairable = false,
+		DestroyBehaviour = "Remove",
+		Rewards = { XP = 9, Gold = 12 },
+		Faction = "Hostile",
+		TargetTag = "Unit",
+		AttackId = "RaiderClub",
+		TargetPriority = "Resource",
+		MoveSpeed = 9,
+	},
+
+	--[[
+		The practice range's target.
+
+		NEUTRAL, so a tower built nearby ignores it - a range you cannot stand
+		a tower next to is not much of a range.
+
+		AND NO REWARDS, which is a bug fix rather than a balance choice. The
+		range used to use EnemyRaider, whose kill rewards paid out to whoever
+		landed the blow; with a six second respawn that was an endless source
+		of purse gold and XP.
+	]]
+	PracticeDummy = {
+		Id = "PracticeDummy",
+		Name = "Practice Dummy",
+		MaxHealth = 120,
+		ArmourClass = "Light",
+		Armour = 1,
+		RegenPerSecond = 0,
+		Repairable = false,
+		DestroyBehaviour = "Remove",
+		Faction = "Neutral",
+		TargetTag = "Unit",
+	},
+
+	--------------------------------------------------------------------------
+	-- Combat plants
+	--
+	-- A combat plant is an archetype plus an attack profile, not a new
+	-- system: DamageableService already gives it health, armour and death,
+	-- and AttackService already makes things shoot. These are the proof that
+	-- the layers underneath are actually reusable.
+	--------------------------------------------------------------------------
+
+	EmberBloom = {
+		Id = "EmberBloom",
+		Name = "Ember Bloom",
+		MaxHealth = 140,
+		ArmourClass = "Crop",
+		Armour = 0,
+		-- Combat plants mend themselves slowly, like crops. They are plants.
+		RegenPerSecond = 0.5,
+		Repairable = false,
+		DestroyBehaviour = "Remove",
+		Faction = "Player",
+		TargetTag = "Defence",
+		AttackId = "EmberBurst",
+		TargetPriority = "Any",
+	},
+
+	FrostLily = {
+		Id = "FrostLily",
+		Name = "Frost Lily",
+		MaxHealth = 120,
+		ArmourClass = "Crop",
+		Armour = 0,
+		RegenPerSecond = 0.5,
+		Repairable = false,
+		DestroyBehaviour = "Remove",
+		Faction = "Player",
+		TargetTag = "Defence",
+		AttackId = "FrostTouch",
+		TargetPriority = "Any",
+	},
+
+	VenomCap = {
+		Id = "VenomCap",
+		Name = "Venom Cap",
+		MaxHealth = 130,
+		ArmourClass = "Crop",
+		Armour = 0,
+		RegenPerSecond = 0.5,
+		Repairable = false,
+		DestroyBehaviour = "Remove",
+		Faction = "Player",
+		TargetTag = "Defence",
+		AttackId = "VenomSpit",
+		TargetPriority = "Any",
+	},
+
+	--[[
+		The tank. No attack at all - its entire job is to be the nearest thing
+		a raider wants to hit, and to take a long time about dying.
+
+		Heavy armour class, so a raider's Siege club is poor against it, and
+		far more health than anything else that grows.
+	]]
+	Bulwark = {
+		Id = "Bulwark",
+		Name = "Bulwark Gourd",
+		MaxHealth = 900,
+		ArmourClass = "Heavy",
+		Armour = 4,
+		RegenPerSecond = 1.5,
+		Repairable = false,
+		DestroyBehaviour = "Remove",
+		Faction = "Player",
+		TargetTag = "Defence",
 	},
 } :: { [string]: ArchetypeDefinition }
 
@@ -1172,6 +1609,39 @@ GameConfig.Structures = {
 	},
 } :: { [string]: StructureDefinition }
 
+--[[
+	Raids.
+
+	SUMMONED, NOT TIMED. Nothing spawns on a clock: a raid happens when the
+	player sounds the Raid Horn. Pacing, escalation and the cost of losing
+	belong to the Checkpoint and defeat loop, and a timer that attacks a player
+	mid-build before any of that exists would be a worse game rather than an
+	earlier one. It also means defences can be tested on demand instead of by
+	waiting.
+]]
+GameConfig.Raids = {
+	--[[
+		One wave's composition. Raiders go for whatever blocks their path;
+		Looters ignore defences and head for the Mills and Farms, which is
+		what makes a base need depth rather than just a wall.
+	]]
+	Wave = {
+		{ ArchetypeId = "EnemyRaider", Count = 5 },
+		{ ArchetypeId = "EnemyLooter", Count = 2 },
+	},
+
+	-- How far out they appear, measured from the middle of the base. Well
+	-- beyond a tower's 60 stud reach, so a wave is seen coming.
+	SpawnDistance = 110,
+
+	--[[
+		How often raiders are walked. Distance is speed times ELAPSED time,
+		not times this interval, so changing it alters smoothness and nothing
+		about how fast a horde crosses the field.
+	]]
+	MoveTickInterval = 0.25,
+}
+
 GameConfig.Placement = {
 	--[[
 		The tile the world is built on, in studs.
@@ -1370,6 +1840,7 @@ GameConfig.FarmAttributes = {
 -- A single flat folder now: one attribute per item id, no category subfolders.
 GameConfig.InventoryFolderName = "Inventory"
 GameConfig.StructuresFolderName = "Structures"
+GameConfig.RaidersFolderName = "Raiders"
 
 GameConfig.StructureAttributes = {
 	OwnerUserId = "OwnerUserId",
@@ -1632,7 +2103,6 @@ end
 for seedId, plantable in GameConfig.Plantables do
 	assert(plantable.SeedId == seedId, `plantable {seedId} has a mismatched SeedId field`)
 	assert(plantable.GrowTime > 0, `plantable {seedId} must have a positive GrowTime`)
-	assert(plantable.YieldAmount > 0, `plantable {seedId} must yield a positive amount`)
 	assert(
 		GameConfig.PlantSizes[plantable.PlantSize] ~= nil,
 		`plantable {seedId} has unknown PlantSize {tostring(plantable.PlantSize)}`
@@ -1642,12 +2112,78 @@ for seedId, plantable in GameConfig.Plantables do
 	assert(seedItem ~= nil, `plantable {seedId} has no matching item in the directory`)
 	assert(seedItem.Category == "Seeds", `plantable {seedId} must reference an item in the Seeds category`)
 
-	local yieldItem = GameConfig.Items[plantable.Yields]
-	assert(yieldItem ~= nil, `plantable {seedId} yields unknown item {plantable.Yields}`)
+	local archetypeId = GameConfig.GetPlantArchetypeId(seedId)
 	assert(
-		GameConfig.IsSellable(yieldItem),
-		`plantable {seedId} yields {plantable.Yields}, which has no SellPrice - the crop would be worthless`
+		GameConfig.Archetypes[archetypeId] ~= nil,
+		`plantable {seedId} grows into unknown archetype {tostring(archetypeId)}`
 	)
+
+	if plantable.Harvestable == false then
+		--[[
+			A kept plant - a defence - must have no yield at all. Leaving a
+			Yields on one would be silently dead config: the harvest path can
+			never run for it, so the yield would read as working and never
+			pay out.
+		]]
+		assert(plantable.Yields == nil, `kept plantable {seedId} must not declare a Yields`)
+		assert(plantable.YieldAmount == nil, `kept plantable {seedId} must not declare a YieldAmount`)
+
+		--[[
+			And it has to actually do something, or it is a square the player
+			spent on nothing. A defence either attacks or soaks damage.
+		]]
+		local archetype = GameConfig.Archetypes[archetypeId]
+		assert(
+			archetype.AttackId ~= nil or archetype.MaxHealth >= 500,
+			`kept plantable {seedId} neither attacks nor has the health to tank, so it does nothing`
+		)
+	else
+		assert(plantable.YieldAmount > 0, `plantable {seedId} must yield a positive amount`)
+
+		local yieldItem = GameConfig.Items[plantable.Yields]
+		assert(yieldItem ~= nil, `plantable {seedId} yields unknown item {tostring(plantable.Yields)}`)
+		assert(
+			GameConfig.IsSellable(yieldItem),
+			`plantable {seedId} yields {plantable.Yields}, which has no SellPrice - the crop would be worthless`
+		)
+	end
+end
+
+for id, attack in GameConfig.Attacks do
+	assert(attack.Id == id, `attack {id} has a mismatched Id field`)
+	assert(attack.Range > 0, `attack {id} must have a positive Range`)
+	assert(attack.Damage > 0, `attack {id} must deal damage`)
+	assert(attack.Cooldown > 0, `attack {id} must have a positive Cooldown, or it would fire every tick`)
+	assert(
+		table.find(GameConfig.Combat.DamageTypes, attack.DamageType) ~= nil,
+		`attack {id} names unknown damage type {tostring(attack.DamageType)}`
+	)
+
+	if attack.StatusEffect then
+		assert(
+			GameConfig.StatusEffects[attack.StatusEffect] ~= nil,
+			`attack {id} applies unknown status effect {attack.StatusEffect}`
+		)
+	end
+
+	if attack.SplashRadius then
+		assert(attack.SplashRadius > 0, `attack {id} has a non-positive SplashRadius`)
+		assert(
+			attack.SplashMinFraction ~= nil
+				and attack.SplashMinFraction > 0
+				and attack.SplashMinFraction <= 1,
+			`attack {id} needs a SplashMinFraction in (0, 1] so its blast rim is not a no-op`
+		)
+
+		--[[
+			A blast wider than the attack can reach would hit things the
+			attacker cannot see, which reads as being shot from nowhere.
+		]]
+		assert(
+			attack.SplashRadius <= attack.Range,
+			`attack {id} splashes further ({attack.SplashRadius}) than it reaches ({attack.Range})`
+		)
+	end
 end
 
 for id, structure in GameConfig.Structures do
@@ -1693,6 +2229,35 @@ for id, archetype in GameConfig.Archetypes do
 		archetype.DestroyBehaviour == "Remove" or archetype.DestroyBehaviour == "Shatter",
 		`archetype {id} has unknown DestroyBehaviour {tostring(archetype.DestroyBehaviour)}`
 	)
+
+	assert(
+		GameConfig.Factions[archetype.Faction] ~= nil,
+		`archetype {id} has unknown Faction {tostring(archetype.Faction)}`
+	)
+	assert(
+		table.find(GameConfig.TargetTags, archetype.TargetTag) ~= nil,
+		`archetype {id} has unknown TargetTag {tostring(archetype.TargetTag)}`
+	)
+
+	if archetype.AttackId then
+		assert(
+			GameConfig.Attacks[archetype.AttackId] ~= nil,
+			`archetype {id} fires unknown attack {archetype.AttackId}`
+		)
+
+		--[[
+			An attacker with no priority would fall through the selector and
+			pick nothing, so it would stand there holding a loaded weapon.
+		]]
+		assert(
+			table.find(GameConfig.TargetPriorities, archetype.TargetPriority) ~= nil,
+			`attacking archetype {id} has unknown TargetPriority {tostring(archetype.TargetPriority)}`
+		)
+	end
+
+	if archetype.MoveSpeed then
+		assert(archetype.MoveSpeed >= 0, `archetype {id} cannot have a negative MoveSpeed`)
+	end
 
 	if archetype.Repairable then
 		assert(archetype.RepairCostPerHealth ~= nil, `repairable archetype {id} needs RepairCostPerHealth`)
@@ -1784,6 +2349,49 @@ do
 	assert(
 		rules.MinimumSpeedMultiplier > 0 and rules.MinimumSpeedMultiplier <= 1,
 		"StatusEffectRules.MinimumSpeedMultiplier must be in (0, 1]"
+	)
+end
+
+do
+	local total = 0
+
+	for _, entry in GameConfig.Raids.Wave do
+		local archetype = GameConfig.Archetypes[entry.ArchetypeId]
+
+		assert(archetype ~= nil, `raid wave names unknown archetype {tostring(entry.ArchetypeId)}`)
+		assert(
+			archetype.Faction == GameConfig.Factions.Hostile,
+			`raid wave includes {entry.ArchetypeId}, which is not Hostile - it would attack nothing`
+		)
+
+		--[[
+			A raider that cannot move never arrives, and one that cannot
+			attack arrives and stands there. Either way the wave is a no-op
+			that looks like a bug in targeting.
+		]]
+		assert((archetype.MoveSpeed or 0) > 0, `raid wave includes {entry.ArchetypeId}, which cannot move`)
+		assert(archetype.AttackId ~= nil, `raid wave includes {entry.ArchetypeId}, which cannot attack`)
+
+		assert(entry.Count > 0, `raid wave entry {entry.ArchetypeId} must bring at least one`)
+		total += entry.Count
+	end
+
+	assert(total > 0, "the raid wave is empty")
+
+	--[[
+		Raiders must appear beyond the reach of anything that shoots, or a wave
+		would spawn already under fire and the player would never see it coming.
+	]]
+	local longestRange = 0
+
+	for _, attack in GameConfig.Attacks do
+		longestRange = math.max(longestRange, attack.Range)
+	end
+
+	assert(
+		GameConfig.Raids.SpawnDistance > longestRange,
+		`raiders spawn {GameConfig.Raids.SpawnDistance} studs out, inside the longest `
+			.. `attack range ({longestRange}) - a wave would arrive already under fire`
 	)
 end
 
@@ -1887,6 +2495,8 @@ table.freeze(GameConfig.Interaction)
 table.freeze(GameConfig.TransactionActions)
 table.freeze(GameConfig.StatusEffectRules)
 table.freeze(GameConfig.PlantSizes)
+table.freeze(GameConfig.Factions)
+table.freeze(GameConfig.Raids)
 
 return GameConfig
 

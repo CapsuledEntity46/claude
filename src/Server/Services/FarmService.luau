@@ -60,6 +60,7 @@ local Growth = require(Shared.Growth)
 local Remotes = require(Shared.Remotes)
 local Signal = require(Shared.Signal)
 
+local AttackService = require(script.Parent.Parent.Combat.AttackService)
 local DamageableService = require(script.Parent.Parent.Combat.DamageableService)
 local PlacementService = require(script.Parent.Parent.World.PlacementService)
 local PlayerDataService = require(script.Parent.PlayerDataService)
@@ -111,6 +112,8 @@ FarmService.PlantFailed = Signal.new()
 FarmService.GrowthBoosted = Signal.new()
 --- (player, instanceId, seedId)
 FarmService.CropDestroyed = Signal.new()
+--- (player, instanceId, seedId) - a kept plant was cleared by its owner
+FarmService.Uprooted = Signal.new()
 
 --------------------------------------------------------------------------------
 -- Helpers
@@ -218,6 +221,16 @@ function FarmService:_renderCrop(farm, seedId: string, stage: string, count: num
 		if plant then
 			plant.Name = `Plant{index}`
 			plant.Parent = container
+
+			--[[
+				The container needs a PrimaryPart, and this is the only place
+				it can get one. Without it the crop has no position - so the
+				client draws no health bar over it, and an attacking plant has
+				nowhere to shoot from.
+			]]
+			if not container.PrimaryPart then
+				container.PrimaryPart = plant.PrimaryPart
+			end
 		end
 	end
 
@@ -236,15 +249,38 @@ function FarmService:_projectCrop(player: Player, farm, entry, now: number)
 
 	local container = self:_renderCrop(farm, entry.SeedId, stage, plantCount(entry))
 
-	-- The crop is its own damageable entity: it regenerates, unlike the farm
-	-- it sits on, which must be repaired with resources.
+	--[[
+		The crop is its own damageable entity: it regenerates, unlike the farm
+		it sits on, which must be repaired with resources.
+
+		The ARCHETYPE comes from the plantable. Food crops share "Crop"; a
+		combat plant names its own, which is where it gets its real health,
+		its armour class and its attack. That one indirection is the whole
+		mechanism - a combat plant is an archetype plus an attack profile, not
+		a new system.
+	]]
 	if container and not farm.CropEntityId then
 		farm.CropEntityId = DamageableService:Register({
-			ArchetypeId = "Crop",
+			ArchetypeId = GameConfig.GetPlantArchetypeId(entry.SeedId),
 			Model = container,
 			OwnerUserId = player.UserId,
 			State = if entry.CropHealth then { Health = entry.CropHealth, DamagedAt = entry.CropDamagedAt } else nil,
 		})
+
+		if farm.CropEntityId then
+			-- Declines for anything without an attack, so food crops take
+			-- this path too and nothing has to ask what kind of plant it is.
+			AttackService:Register(farm.CropEntityId)
+		end
+	end
+
+	--[[
+		A plant only fights once it has finished growing. Suspended rather
+		than unregistered, so maturing is a flag flip instead of a
+		re-derivation - and so no second code path can register it twice.
+	]]
+	if farm.CropEntityId then
+		AttackService:SetSuspended(farm.CropEntityId, not Growth.IsMature(stage))
 	end
 
 	self:_refreshPrompt(player, farm)
@@ -252,6 +288,7 @@ end
 
 function FarmService:_projectFallow(player: Player, farm)
 	if farm.CropEntityId then
+		AttackService:Unregister(farm.CropEntityId)
 		DamageableService:Unregister(farm.CropEntityId)
 		farm.CropEntityId = nil
 	end
@@ -294,6 +331,22 @@ function FarmService:_refreshPrompt(player: Player, farm)
 	end
 
 	local plantable = GameConfig.GetPlantable(seedId)
+
+	--[[
+		A kept plant is named after ITSELF, not after a yield it does not
+		have, and offers Uproot rather than Harvest - so the prompt never
+		invites the player to destroy a defence by calling it a harvest.
+	]]
+	if not GameConfig.IsHarvestable(seedId) then
+		local archetype = GameConfig.GetArchetype(GameConfig.GetPlantArchetypeId(seedId))
+		local grown = Growth.IsMature(farm.Model:GetAttribute(FARM_ATTR.Stage))
+
+		prompt.Enabled = grown
+		prompt.ActionText = if grown then "Uproot" else "Growing"
+		prompt.ObjectText = if archetype then archetype.Name else seedId
+		return
+	end
+
 	local yieldItem = if plantable then GameConfig.GetItem(plantable.Yields) else nil
 	local baseName = if yieldItem then yieldItem.Name else seedId
 	local displayName = `{baseName} x{plantCount(entry) * (if plantable then plantable.YieldAmount else 1)}`
@@ -428,6 +481,19 @@ function FarmService:TryPlant(player: Player, instanceId: string): boolean
 
 	PlayerDataService:IncrementStat(player, "TotalPlanted", count)
 
+	--[[
+		A KEPT plant is paid its XP now, because it will never be harvested
+		and harvest is where every other plant's XP comes from.
+
+		Paying on maturity instead would be the obvious choice and is a trap:
+		maturity is derived from a timestamp, so it is reached again every
+		time the plant is re-projected - on a rejoin, on a stage refresh - and
+		each one would pay out. Planting happens exactly once.
+	]]
+	if not GameConfig.IsHarvestable(seedId) then
+		PlayerDataService:AddXP(player, plantable.XPReward * count)
+	end
+
 	self:_projectCrop(player, farm, entry, now)
 	self.Planted:Fire(player, instanceId, seedId, count)
 
@@ -448,6 +514,16 @@ function FarmService:TryHarvest(player: Player, instanceId: string): boolean
 		-- The seed left the config; free the farm rather than trapping it.
 		entry.SeedId = ""
 		self:_projectFallow(player, farm)
+		return false
+	end
+
+	--[[
+		A combat plant is kept, not picked. Uprooting is the way to get the
+		square back, and it is a separate call so that a mis-aimed harvest can
+		never destroy a defence the player spent two hundred gold on.
+	]]
+	if not GameConfig.IsHarvestable(entry.SeedId) then
+		self.PlantFailed:Fire(player, instanceId, "NotHarvestable")
 		return false
 	end
 
@@ -483,6 +559,42 @@ function FarmService:TryHarvest(player: Player, instanceId: string): boolean
 	return true
 end
 
+--[[
+	Clears a square of a plant that is kept rather than picked.
+
+	Returns NOTHING - no seed, no crop, no refund - for the same reason
+	demolishing a structure does: a refund below cost is defensible but "below
+	cost" is a balance decision, and a refund at cost makes the square a free
+	store of value. Planting a defence is a commitment.
+]]
+function FarmService:TryUproot(player: Player, instanceId: string): boolean
+	local entry = self:_getEntry(player, instanceId)
+	local farm = self:GetFarm(player, instanceId)
+
+	if not entry or not farm or not entry.SeedId or entry.SeedId == "" then
+		return false
+	end
+
+	-- Food crops are harvested, and harvesting pays. Routing one through here
+	-- would silently throw away a ripe square.
+	if GameConfig.IsHarvestable(entry.SeedId) then
+		return false
+	end
+
+	local seedId = entry.SeedId
+
+	entry.SeedId = ""
+	entry.PlantedAt = nil
+	entry.PlantCount = nil
+	entry.CropHealth = nil
+	entry.CropDamagedAt = nil
+
+	self:_projectFallow(player, farm)
+	self.Uprooted:Fire(player, instanceId, seedId)
+
+	return true
+end
+
 --- Single entry point for a farm prompt. Validates first, acts second.
 function FarmService:_onPromptTriggered(player: Player, farm)
 	local owner = farm.Model:GetAttribute(GameConfig.StructureAttributes.OwnerUserId)
@@ -506,7 +618,11 @@ function FarmService:_onPromptTriggered(player: Player, farm)
 	end
 
 	if entry.SeedId and entry.SeedId ~= "" then
-		self:TryHarvest(player, farm.InstanceId)
+		if GameConfig.IsHarvestable(entry.SeedId) then
+			self:TryHarvest(player, farm.InstanceId)
+		else
+			self:TryUproot(player, farm.InstanceId)
+		end
 	else
 		self:TryPlant(player, farm.InstanceId)
 	end
@@ -705,9 +821,13 @@ function FarmService:_tick()
 				local stage = Growth.GetStage(entry.SeedId, entry.PlantedAt, now)
 
 				if stage ~= farm.Model:GetAttribute(FARM_ATTR.Stage) then
-					farm.Model:SetAttribute(FARM_ATTR.Stage, stage)
-					self:_renderCrop(farm, entry.SeedId, stage, plantCount(entry))
-					self:_refreshPrompt(player, farm)
+					--[[
+						The full projection rather than just a re-render: a
+						plant reaching maturity has to stop being suspended,
+						and that lives in _projectCrop. Re-rendering alone
+						would leave a grown combat plant that never fires.
+					]]
+					self:_projectCrop(player, farm, entry, now)
 				end
 			end
 		end

@@ -12,7 +12,8 @@
 	REPLICATION MODEL
 	-----------------
 	Scalars replicate as attributes on the Player instance:
-		Cash, Level, XP, XPToNextLevel, DataLoaded
+		Food, Wood, Gold, Stone, InventoryGold, Age, AgeName,
+		Level, XP, XPToNextLevel, DataLoaded
 
 	Inventory replicates as attributes on one flat folder, because attributes
 	cannot hold tables:
@@ -32,8 +33,8 @@
 		local PlayerDataService = require(...)
 		PlayerDataService:Start()
 
-		if PlayerDataService:TrySpendCash(player, seed.SeedPrice) then
-			PlayerDataService:AddItem(player, "Seeds", seed.Id, 1)
+		if PlayerDataService:TrySpendGold(player, seed.SeedPrice) then
+			PlayerDataService:AddItem(player, seed.Id, 1)
 		end
 ]]
 
@@ -57,7 +58,7 @@ local KICK_LOCK_LOST = "Your data is active on another server. Please rejoin."
 local PlayerDataService = {}
 
 -- Checked against GameConfig.FrameworkVersion by Server.FrameworkGuard.
-PlayerDataService.FrameworkVersion = 6
+PlayerDataService.FrameworkVersion = 7
 
 PlayerDataService._started = false
 PlayerDataService._profiles = {} :: { [Player]: any }
@@ -69,7 +70,9 @@ PlayerDataService._store = nil
 
 PlayerDataService.ProfileLoaded = Signal.new() -- (player, data)
 PlayerDataService.ProfileReleased = Signal.new() -- (player)
-PlayerDataService.CashChanged = Signal.new() -- (player, newCash, delta)
+PlayerDataService.ResourceChanged = Signal.new() -- (player, resourceId, newAmount, delta)
+PlayerDataService.InventoryGoldChanged = Signal.new() -- (player, newAmount, delta)
+PlayerDataService.AgeChanged = Signal.new() -- (player, newAge, previousAge)
 PlayerDataService.RevengeTokensChanged = Signal.new() -- (player, newTotal, delta)
 PlayerDataService.XPChanged = Signal.new() -- (player, newXP, delta)
 PlayerDataService.LevelChanged = Signal.new() -- (player, newLevel, previousLevel)
@@ -110,9 +113,9 @@ local function buildReplicationContainers(player: Player)
 	local leaderstats = Instance.new("Folder")
 	leaderstats.Name = "leaderstats"
 
-	local cashValue = Instance.new("IntValue")
-	cashValue.Name = "Cash"
-	cashValue.Parent = leaderstats
+	local goldValue = Instance.new("IntValue")
+	goldValue.Name = "Gold"
+	goldValue.Parent = leaderstats
 
 	local levelValue = Instance.new("IntValue")
 	levelValue.Name = "Level"
@@ -128,7 +131,18 @@ end
 
 --- Pushes every scalar from the profile onto the player's attributes.
 local function syncStats(player: Player, data: { [string]: any })
-	player:SetAttribute(ATTR.Cash, data.Cash)
+	-- One attribute per resource, named from the directory, so adding a
+	-- resource needs no change here.
+	for resourceId in GameConfig.Resources do
+		player:SetAttribute(resourceId, data.Resources[resourceId] or 0)
+	end
+
+	player:SetAttribute(ATTR.InventoryGold, data.InventoryGold)
+	player:SetAttribute(ATTR.Age, data.Age)
+
+	local age = GameConfig.GetAge(data.Age)
+	player:SetAttribute(ATTR.AgeName, if age then age.Name else "Unknown")
+
 	player:SetAttribute(ATTR.Level, data.Level)
 	player:SetAttribute(ATTR.XP, data.XP)
 	player:SetAttribute(ATTR.RevengeTokens, data.RevengeTokens)
@@ -139,11 +153,11 @@ local function syncStats(player: Player, data: { [string]: any })
 
 	local leaderstats = player:FindFirstChild("leaderstats")
 	if leaderstats then
-		local cashValue = leaderstats:FindFirstChild("Cash")
+		local goldValue = leaderstats:FindFirstChild("Gold")
 		local levelValue = leaderstats:FindFirstChild("Level")
 
-		if cashValue then
-			cashValue.Value = data.Cash
+		if goldValue then
+			goldValue.Value = data.Resources[GameConfig.PrimaryResource] or 0
 		end
 		if levelValue then
 			levelValue.Value = data.Level
@@ -225,7 +239,7 @@ function PlayerDataService:_onPlayerAdded(player: Player)
 
 	-- Granted once per profile, before the first replication pass.
 	if DataSchema.GrantStarterKit(data) then
-		print(`[PlayerDataService] Granted starter kit to {player.Name}`)
+		print(`[PlayerDataService] Granted starter kit and resources to {player.Name}`)
 	end
 
 	syncStats(player, data)
@@ -312,17 +326,151 @@ function PlayerDataService:GetDataSnapshot(player: Player): { [string]: any }?
 end
 
 --------------------------------------------------------------------------------
--- Public API: currency
+-- Public API: treasury resources
 --------------------------------------------------------------------------------
 
-function PlayerDataService:GetCash(player: Player): number
+--[[
+	The civilisation treasury. Food, Wood, Gold and Stone behave identically, so
+	every function takes a resource id and adding a fifth resource needs no code
+	here.
+
+	`Gold` in this section always means BASE gold. The personal purse is the
+	section below, and nothing here can reach it.
+]]
+function PlayerDataService:GetResource(player: Player, resourceId: unknown): number
 	local data = self:GetData(player)
-	return if data then data.Cash else 0
+
+	if not data or type(resourceId) ~= "string" then
+		return 0
+	end
+
+	return data.Resources[resourceId] or 0
 end
 
---- Credits cash. `amount` must be a positive integer; use TrySpendCash to debit.
---- Returns the new balance, or nil when the call was rejected.
-function PlayerDataService:AddCash(player: Player, amount: number): number?
+--- Credits the treasury. Returns the new balance, or nil when rejected.
+function PlayerDataService:AddResource(player: Player, resourceId: unknown, amount: number): number?
+	local data = self:GetData(player)
+	if not data then
+		return nil
+	end
+
+	local resource = GameConfig.GetResource(resourceId)
+	if not resource then
+		warn(`[PlayerDataService] AddResource rejected unknown resource: {tostring(resourceId)}`)
+		return nil
+	end
+
+	local credit = toPositiveInteger(amount)
+	if not credit then
+		warn(`[PlayerDataService] AddResource rejected invalid amount for {player.Name}: {tostring(amount)}`)
+		return nil
+	end
+
+	local previous = data.Resources[resource.Id] or 0
+	data.Resources[resource.Id] = math.min(previous + credit, GameConfig.Economy.MaxResource)
+
+	local gained = data.Resources[resource.Id] - previous
+
+	if resource.Id == GameConfig.PrimaryResource then
+		data.Stats.TotalGoldEarned += gained
+	end
+
+	syncStats(player, data)
+	self.ResourceChanged:Fire(player, resource.Id, data.Resources[resource.Id], gained)
+
+	return data.Resources[resource.Id]
+end
+
+--- Atomically debits one resource. Returns true only if the player could
+--- afford it; on false, nothing changed.
+function PlayerDataService:TrySpendResource(player: Player, resourceId: unknown, amount: number): boolean
+	return self:TrySpendResources(player, { [tostring(resourceId)] = amount })
+end
+
+--[[
+	Atomically debits SEVERAL resources - the normal case for construction and
+	aging up, which cost a mix.
+
+	All-or-nothing on purpose: a partial deduction would leave a player charged
+	for a building they did not get. Every cost is validated before anything is
+	written.
+]]
+function PlayerDataService:TrySpendResources(player: Player, costs: { [string]: number }): boolean
+	local data = self:GetData(player)
+	if not data then
+		return false
+	end
+
+	if type(costs) ~= "table" then
+		return false
+	end
+
+	local validated = {}
+
+	for resourceId, amount in costs do
+		local resource = GameConfig.GetResource(resourceId)
+		if not resource then
+			return false
+		end
+
+		local cost = toPositiveInteger(amount)
+		if not cost then
+			return false
+		end
+
+		if (data.Resources[resource.Id] or 0) < cost then
+			return false
+		end
+
+		validated[resource.Id] = cost
+	end
+
+	if next(validated) == nil then
+		return false
+	end
+
+	for resourceId, cost in validated do
+		data.Resources[resourceId] -= cost
+		self.ResourceChanged:Fire(player, resourceId, data.Resources[resourceId], -cost)
+	end
+
+	syncStats(player, data)
+	return true
+end
+
+--- Convenience accessors for the primary currency, which the market uses.
+function PlayerDataService:GetGold(player: Player): number
+	return self:GetResource(player, GameConfig.PrimaryResource)
+end
+
+function PlayerDataService:AddGold(player: Player, amount: number): number?
+	return self:AddResource(player, GameConfig.PrimaryResource, amount)
+end
+
+function PlayerDataService:TrySpendGold(player: Player, amount: number): boolean
+	return self:TrySpendResource(player, GameConfig.PrimaryResource, amount)
+end
+
+--------------------------------------------------------------------------------
+-- Public API: personal purse
+--------------------------------------------------------------------------------
+
+--[[
+	The player's own gold, carried on their person.
+
+	DIRECTIONAL RULES, enforced by which functions exist:
+	  * Credited only by kills and loot. The market never calls AddInventoryGold.
+	  * Spent on personal equipment, or willingly on construction.
+	  * There is NO function moving treasury gold into the purse. That omission
+	    is the rule - if one is ever added, the economy breaks.
+]]
+function PlayerDataService:GetInventoryGold(player: Player): number
+	local data = self:GetData(player)
+	return if data then data.InventoryGold else 0
+end
+
+--- Credits the purse. Reserved for combat drops and loot.
+function PlayerDataService:AddInventoryGold(player: Player, amount: number): number?
 	local data = self:GetData(player)
 	if not data then
 		return nil
@@ -330,23 +478,21 @@ function PlayerDataService:AddCash(player: Player, amount: number): number?
 
 	local credit = toPositiveInteger(amount)
 	if not credit then
-		warn(`[PlayerDataService] AddCash rejected invalid amount for {player.Name}: {tostring(amount)}`)
+		warn(`[PlayerDataService] AddInventoryGold rejected invalid amount for {player.Name}: {tostring(amount)}`)
 		return nil
 	end
 
-	local previous = data.Cash
-	data.Cash = math.min(previous + credit, GameConfig.Economy.MaxCash)
-	data.Stats.TotalCashEarned += data.Cash - previous
+	data.InventoryGold = math.min(data.InventoryGold + credit, GameConfig.Economy.MaxInventoryGold)
 
 	syncStats(player, data)
-	self.CashChanged:Fire(player, data.Cash, data.Cash - previous)
+	self.InventoryGoldChanged:Fire(player, data.InventoryGold, credit)
 
-	return data.Cash
+	return data.InventoryGold
 end
 
---- Atomically debits cash. Returns true only if the player could afford it;
---- on false, nothing changed. This is the only sanctioned way to spend.
-function PlayerDataService:TrySpendCash(player: Player, amount: number): boolean
+--- Atomically debits the purse. Used for equipment, and for construction when
+--- the player has opted in.
+function PlayerDataService:TrySpendInventoryGold(player: Player, amount: number): boolean
 	local data = self:GetData(player)
 	if not data then
 		return false
@@ -354,20 +500,120 @@ function PlayerDataService:TrySpendCash(player: Player, amount: number): boolean
 
 	local cost = toPositiveInteger(amount)
 	if not cost then
-		warn(`[PlayerDataService] TrySpendCash rejected invalid amount for {player.Name}: {tostring(amount)}`)
 		return false
 	end
 
-	if data.Cash < cost then
+	if data.InventoryGold < cost then
 		return false
 	end
 
-	data.Cash -= cost
+	data.InventoryGold -= cost
 
 	syncStats(player, data)
-	self.CashChanged:Fire(player, data.Cash, -cost)
+	self.InventoryGoldChanged:Fire(player, data.InventoryGold, -cost)
 
 	return true
+end
+
+--- Whether construction may fall back to the personal purse without asking.
+function PlayerDataService:GetAutoUsePersonalGold(player: Player): boolean
+	local data = self:GetData(player)
+	return if data then data.AutoUsePersonalGold == true else false
+end
+
+function PlayerDataService:SetAutoUsePersonalGold(player: Player, enabled: boolean)
+	local data = self:GetData(player)
+	if data then
+		data.AutoUsePersonalGold = enabled == true
+	end
+end
+
+--[[
+	Pays a construction cost. Returns (paid, source) where source is
+	"Treasury", "Purse" or nil.
+
+	The treasury is tried first and in full. Only if it cannot cover the cost is
+	the purse considered, and only when the player has opted in via
+	`allowPurse` or the persisted preference. Costs are never split across both:
+	a half-and-half payment would make refunds ambiguous.
+]]
+function PlayerDataService:TryPayConstruction(
+	player: Player,
+	costs: { [string]: number },
+	allowPurse: boolean?
+): (boolean, string?)
+	if self:TrySpendResources(player, costs) then
+		return true, "Treasury"
+	end
+
+	local permitted = allowPurse == true or self:GetAutoUsePersonalGold(player)
+	if not permitted then
+		return false, nil
+	end
+
+	-- The purse holds gold only, so it can only cover a gold-only cost.
+	local goldOwed = 0
+
+	for resourceId, amount in costs do
+		if resourceId ~= GameConfig.PrimaryResource then
+			return false, nil
+		end
+
+		goldOwed += toPositiveInteger(amount) or 0
+	end
+
+	if goldOwed < 1 then
+		return false, nil
+	end
+
+	if self:TrySpendInventoryGold(player, goldOwed) then
+		return true, "Purse"
+	end
+
+	return false, nil
+end
+
+--------------------------------------------------------------------------------
+-- Public API: ages
+--------------------------------------------------------------------------------
+
+function PlayerDataService:GetAge(player: Player): number
+	local data = self:GetData(player)
+	return if data then data.Age else 1
+end
+
+--[[
+	Advances to the next age, paying its cost from the treasury.
+
+	Deliberately refuses the purse: aging up is a civilisation act, so it is
+	funded by the civilisation. Returns (advanced, reason).
+]]
+function PlayerDataService:TryAdvanceAge(player: Player): (boolean, string?)
+	local data = self:GetData(player)
+	if not data then
+		return false, "NoData"
+	end
+
+	if data.Age >= GameConfig.MaxAge then
+		return false, "MaxAge"
+	end
+
+	local cost = GameConfig.GetAdvanceCost(data.Age)
+	if not cost then
+		return false, "MaxAge"
+	end
+
+	if not self:TrySpendResources(player, cost) then
+		return false, "NotEnoughResources"
+	end
+
+	local previous = data.Age
+	data.Age += 1
+
+	syncStats(player, data)
+	self.AgeChanged:Fire(player, data.Age, previous)
+
+	return true, nil
 end
 
 --------------------------------------------------------------------------------

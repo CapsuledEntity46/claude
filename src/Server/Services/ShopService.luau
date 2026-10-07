@@ -2,7 +2,7 @@
 --[[
 	ShopService
 	-----------
-	Closes the economy loop: Cash -> items -> Cash.
+	Closes the economy loop: Gold -> items -> Gold, all through the treasury.
 
 	Every transaction goes through ONE entry point:
 
@@ -26,17 +26,20 @@
 	   cap. That bounds the arithmetic as much as the economy: unbounded amounts
 	   push intermediate products past the range where doubles represent
 	   integers exactly.
-	4. Selling respects the Cash ceiling precisely rather than letting AddCash
-	   clamp. Clamping would consume goods for less than they are worth, which
-	   looks exactly like theft to the player.
+	4. Selling respects the treasury ceiling precisely rather than letting
+	   AddResource clamp. Clamping would consume goods for less than they are
+	   worth, which looks exactly like theft to the player.
+	5. Market income goes to the BASE TREASURY, never the player's purse. That
+	   is the rule from docs/ROADMAP.md: harvesting and selling can never fill
+	   the personal purse, which is loot-only.
 	5. Handlers return a result table, never an error. An erroring
 	   OnServerInvoke surfaces on the client as a thrown error and advertises an
 	   unhandled path.
 
 	Failure reasons are stable codes for the UI to map to copy:
 	  NoData, InvalidAction, InvalidItem, InvalidAmount, NotPurchasable,
-	  NotSellable, LevelTooLow, NotEnoughCash, NotEnoughItems, StackFull,
-	  CashCapped, NothingToSell, RateLimited, InternalError
+	  NotSellable, LevelTooLow, NotEnoughGold, NotEnoughItems, StackFull,
+	  TreasuryFull, NothingToSell, RateLimited, InternalError
 ]]
 
 local Players = game:GetService("Players")
@@ -56,7 +59,7 @@ local ACTIONS = GameConfig.TransactionActions
 local ShopService = {}
 
 -- Checked against GameConfig.FrameworkVersion by Server.FrameworkGuard.
-ShopService.FrameworkVersion = 6
+ShopService.FrameworkVersion = 7
 
 ShopService._started = false
 ShopService._limiter = nil
@@ -131,8 +134,8 @@ function ShopService:_buy(player: Player, item, amount: unknown)
 
 	local totalCost = item.BuyPrice * quantity
 
-	if not PlayerDataService:TrySpendCash(player, totalCost) then
-		return failure("NotEnoughCash")
+	if not PlayerDataService:TrySpendGold(player, totalCost) then
+		return failure("NotEnoughGold")
 	end
 
 	local newHeld = PlayerDataService:AddItem(player, item.Id, quantity)
@@ -140,7 +143,7 @@ function ShopService:_buy(player: Player, item, amount: unknown)
 	if not newHeld then
 		-- Unreachable given the capacity check above. If it ever fires, give
 		-- the money back rather than quietly keeping it.
-		PlayerDataService:AddCash(player, totalCost)
+		PlayerDataService:AddGold(player, totalCost)
 		warn(`[ShopService] Refunded {totalCost} to {player.Name}: AddItem failed after payment`)
 		return failure("StackFull")
 	end
@@ -154,7 +157,7 @@ function ShopService:_buy(player: Player, item, amount: unknown)
 		Amount = quantity,
 		Spent = totalCost,
 		Held = newHeld,
-		Cash = PlayerDataService:GetCash(player),
+		Gold = PlayerDataService:GetGold(player),
 	})
 end
 
@@ -177,13 +180,13 @@ function ShopService:_sell(player: Player, item, amount: unknown)
 		return failure("NotEnoughItems")
 	end
 
-	-- Sell only as much as the Cash ceiling can actually pay for. Letting
-	-- AddCash clamp instead would take the goods and silently underpay.
-	local headroom = GameConfig.Economy.MaxCash - PlayerDataService:GetCash(player)
+	-- Sell only as much as the treasury ceiling can actually pay for. Letting
+	-- AddResource clamp instead would take the goods and silently underpay.
+	local headroom = GameConfig.Economy.MaxResource - PlayerDataService:GetGold(player)
 	local affordable = math.floor(headroom / item.SellPrice)
 
 	if affordable < 1 then
-		return failure("CashCapped")
+		return failure("TreasuryFull")
 	end
 
 	quantity = math.min(quantity, affordable)
@@ -193,7 +196,7 @@ function ShopService:_sell(player: Player, item, amount: unknown)
 		return failure("NotEnoughItems")
 	end
 
-	if not PlayerDataService:AddCash(player, totalEarned) then
+	if not PlayerDataService:AddGold(player, totalEarned) then
 		-- Put the goods back; never destroy something we failed to pay for.
 		PlayerDataService:AddItem(player, item.Id, quantity)
 		warn(`[ShopService] Returned {quantity}x {item.Id} to {player.Name}: payout failed`)
@@ -209,7 +212,7 @@ function ShopService:_sell(player: Player, item, amount: unknown)
 		Amount = quantity,
 		Earned = totalEarned,
 		Held = PlayerDataService:GetItemCount(player, item.Id),
-		Cash = PlayerDataService:GetCash(player),
+		Gold = PlayerDataService:GetGold(player),
 	})
 end
 
@@ -250,7 +253,7 @@ end
 
 	Kept separate from ProcessTransaction because it is an aggregate operation,
 	not a single-item transaction. Iteration is sorted by item id because Luau
-	dictionary order is unspecified - without it, a player at the Cash ceiling
+	dictionary order is unspecified - without it, a player at the treasury ceiling
 	would have an arbitrary subset of their goods sold, differing between calls.
 ]]
 function ShopService:SellAll(player: Player)
@@ -288,7 +291,7 @@ function ShopService:SellAll(player: Player)
 	end
 
 	if totalSold < 1 then
-		-- Surface the real blocker (CashCapped) rather than a generic empty
+		-- Surface the real blocker (TreasuryFull) rather than a generic empty
 		-- result, so the UI can explain why nothing sold.
 		return failure(lastReason or "NothingToSell")
 	end
@@ -297,7 +300,7 @@ function ShopService:SellAll(player: Player)
 		Amount = totalSold,
 		Earned = totalEarned,
 		Sold = breakdown,
-		Cash = PlayerDataService:GetCash(player),
+		Gold = PlayerDataService:GetGold(player),
 	})
 end
 

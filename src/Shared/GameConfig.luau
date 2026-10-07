@@ -42,7 +42,7 @@ export type ItemDefinition = {
 	Category: ItemCategory,
 	-- nil means the shop will not buy/sell it. Both may be nil (for example a
 	-- Robux-only consumable, which lives in the directory for stacking and UI
-	-- purposes but is not tradeable for Cash).
+	-- purposes but is not tradeable for Gold).
 	BuyPrice: number?,
 	SellPrice: number?,
 	MaxStack: number,
@@ -71,7 +71,7 @@ local GameConfig = {}
 	tree fails with a message naming the stale module instead of a nil-index
 	deep inside unrelated code.
 ]]
-GameConfig.FrameworkVersion = 6
+GameConfig.FrameworkVersion = 7
 
 --------------------------------------------------------------------------------
 -- Persistence
@@ -80,7 +80,7 @@ GameConfig.FrameworkVersion = 6
 GameConfig.Data = {
 	-- Bumped to 2 when the inventory was flattened from category buckets to a
 	-- single item-id map. See DataSchema.Migrations.
-	SchemaVersion = 2,
+	SchemaVersion = 3,
 
 	-- Changing the store name starts every player from scratch. Treat it as a
 	-- deliberate wipe, not a routine edit.
@@ -96,17 +96,123 @@ GameConfig.Data = {
 --------------------------------------------------------------------------------
 
 GameConfig.Economy = {
-	StartingCash = 150,
 	-- Hard ceiling keeps a single bad multiplier from pushing a value past the
 	-- range where doubles stop representing integers exactly.
-	MaxCash = 1_000_000_000,
+	MaxResource = 1_000_000_000,
+	MaxInventoryGold = 1_000_000_000,
 
 	StartingRevengeTokens = 2,
 	MaxRevengeTokens = 9_999,
 
-	-- Plots bought with Robux, on top of those earned by levelling.
+	-- Plots granted on top of those earned by levelling. No longer purchasable;
+	-- kept so quests or admin tools can still award one.
 	MaxBonusPlotSlots = 4,
 }
+
+--------------------------------------------------------------------------------
+-- Resources (the civilisation treasury)
+--------------------------------------------------------------------------------
+
+export type ResourceDefinition = {
+	Id: string,
+	Name: string,
+	Color: Color3,
+	SortOrder: number,
+}
+
+--[[
+	The four gathered resources, spent continuously on construction, training
+	and research. These are CURRENCIES, not inventory items: they have their own
+	balances and HUD readouts rather than living in the item directory.
+
+	`Gold` here is the BASE treasury. The player's personal purse is a separate
+	balance (`InventoryGold`) with deliberately asymmetric flows - see
+	docs/ROADMAP.md. Market sales credit the treasury; loot credits the purse;
+	nothing moves from treasury to purse.
+]]
+GameConfig.Resources = {
+	Food = { Id = "Food", Name = "Food", Color = Color3.fromRGB(196, 92, 72), SortOrder = 10 },
+	Wood = { Id = "Wood", Name = "Wood", Color = Color3.fromRGB(142, 98, 56), SortOrder = 20 },
+	Gold = { Id = "Gold", Name = "Gold", Color = Color3.fromRGB(240, 199, 62), SortOrder = 30 },
+	Stone = { Id = "Stone", Name = "Stone", Color = Color3.fromRGB(150, 152, 158), SortOrder = 40 },
+} :: { [string]: ResourceDefinition }
+
+-- The primary currency, used by the market.
+GameConfig.PrimaryResource = "Gold"
+
+--- Granted once, on a profile's first load. Deliberately NOT in the DataSchema
+--- template, for the same reason the starter items are not: Reconcile would
+--- re-grant anything spent to zero.
+GameConfig.StartingResources = {
+	Food = 200,
+	Wood = 200,
+	Gold = 150,
+	Stone = 100,
+}
+
+function GameConfig.GetResource(resourceId: unknown): ResourceDefinition?
+	if type(resourceId) ~= "string" then
+		return nil
+	end
+
+	return GameConfig.Resources[resourceId]
+end
+
+--- Resource ids in display order. Stable, so HUD layout never shuffles.
+function GameConfig.GetResourceIds(): { string }
+	local ids = {}
+
+	for id in GameConfig.Resources do
+		table.insert(ids, id)
+	end
+
+	table.sort(ids, function(a, b)
+		return GameConfig.Resources[a].SortOrder < GameConfig.Resources[b].SortOrder
+	end)
+
+	return ids
+end
+
+--------------------------------------------------------------------------------
+-- Ages (civilisation progression)
+--------------------------------------------------------------------------------
+
+export type AgeDefinition = {
+	Index: number,
+	Name: string,
+	AdvanceCost: { [string]: number },
+}
+
+--[[
+	Age gates CIVILISATION capability - what can be built, trained and
+	researched. Player `Level` gates PERSONAL capability - gear, spells, stats.
+	Keeping those separate is what stops the MMO half and the RTS half fighting
+	over the same number.
+
+	Advancing costs resources, never XP.
+]]
+GameConfig.Ages = {
+	{ Index = 1, Name = "Dark Age", AdvanceCost = {} },
+	{ Index = 2, Name = "Feudal Age", AdvanceCost = { Food = 500 } },
+	{ Index = 3, Name = "Castle Age", AdvanceCost = { Food = 800, Gold = 200 } },
+	{ Index = 4, Name = "Imperial Age", AdvanceCost = { Food = 1_000, Gold = 800 } },
+} :: { AgeDefinition }
+
+GameConfig.MaxAge = #GameConfig.Ages
+
+function GameConfig.GetAge(index: unknown): AgeDefinition?
+	if type(index) ~= "number" then
+		return nil
+	end
+
+	return GameConfig.Ages[index]
+end
+
+--- Cost to advance FROM `index` to `index + 1`, or nil at the final age.
+function GameConfig.GetAdvanceCost(index: number): { [string]: number }?
+	local next = GameConfig.Ages[index + 1]
+	return if next then next.AdvanceCost else nil
+end
 
 --[[
 	Items granted once, on a profile's first ever load.
@@ -325,7 +431,7 @@ GameConfig.Items = {
 	},
 
 	--------------------------------------------------------------------------
-	-- Boosts: Robux-only, so neither buyable nor sellable for Cash
+	-- Boosts: Robux-only, so neither buyable nor sellable for Gold
 	--------------------------------------------------------------------------
 	GrowthBoost = {
 		Id = "GrowthBoost",
@@ -574,7 +680,11 @@ GameConfig.TransactionActions = { Buy = "Buy", Sell = "Sell" }
 
 -- Centralised so server writers and client readers can never drift apart.
 GameConfig.Attributes = {
-	Cash = "Cash",
+	-- Base treasury, one attribute per resource id (Food/Wood/Gold/Stone).
+	-- Written from GameConfig.Resources, so a new resource needs no code here.
+	InventoryGold = "InventoryGold",
+	Age = "Age",
+	AgeName = "AgeName",
 	Level = "Level",
 	XP = "XP",
 	XPToNextLevel = "XPToNextLevel",
@@ -622,6 +732,7 @@ export type ProductDefinition = {
 	ProductId: number, -- 0 = unconfigured, never resolves
 	DisplayName: string,
 	Description: string, -- shown in the store panel
+	Resource: string?, -- for Kind == "Resource"
 	Amount: number,
 	SortOrder: number, -- store display order
 	Name: string?, -- table key, filled in by GetStoreProducts
@@ -636,26 +747,55 @@ GameConfig.Monetization = {
 		(Monetization -> Developer Products). An id of 0 never resolves, and
 		MarketplaceService warns at startup listing which are unconfigured.
 
-		Several products may share a Kind - CashPackSmall and CashPackLarge both
-		use the "Cash" handler and differ only in Amount. Adding a bigger pack
-		is a config edit with no new code.
+		Several products may share a Kind - every resource pack uses the one
+		"Resource" handler and differs only in Resource and Amount. Adding a
+		bigger pack is a config edit with no new code.
 	]]
 	Products = {
-		CashPackSmall = {
-			Kind = "Cash",
+		GoldPackSmall = {
+			Kind = "Resource",
+			Resource = "Gold",
 			ProductId = 0,
-			DisplayName = "Pouch of Coins",
-			Description = "2,500 Cash to spend in the shop.",
+			DisplayName = "Pouch of Gold",
+			Description = "2,500 Gold for the treasury.",
 			Amount = 2_500,
 			SortOrder = 10,
 		},
-		CashPackLarge = {
-			Kind = "Cash",
+		GoldPackLarge = {
+			Kind = "Resource",
+			Resource = "Gold",
 			ProductId = 0,
-			DisplayName = "Chest of Coins",
-			Description = "15,000 Cash to spend in the shop.",
+			DisplayName = "Chest of Gold",
+			Description = "15,000 Gold for the treasury.",
 			Amount = 15_000,
 			SortOrder = 20,
+		},
+		FoodPack = {
+			Kind = "Resource",
+			Resource = "Food",
+			ProductId = 0,
+			DisplayName = "Granary Delivery",
+			Description = "3,000 Food for training and aging up.",
+			Amount = 3_000,
+			SortOrder = 22,
+		},
+		WoodPack = {
+			Kind = "Resource",
+			Resource = "Wood",
+			ProductId = 0,
+			DisplayName = "Timber Shipment",
+			Description = "3,000 Wood for construction.",
+			Amount = 3_000,
+			SortOrder = 24,
+		},
+		StonePack = {
+			Kind = "Resource",
+			Resource = "Stone",
+			ProductId = 0,
+			DisplayName = "Quarry Shipment",
+			Description = "2,000 Stone for walls and towers.",
+			Amount = 2_000,
+			SortOrder = 26,
 		},
 		GrowthBoost = {
 			Kind = "GrowthBoost",
@@ -672,14 +812,6 @@ GameConfig.Monetization = {
 			Description = "Ten instant finishes, kept until you need them.",
 			Amount = 10,
 			SortOrder = 40,
-		},
-		PlotUnlock = {
-			Kind = "PlotUnlock",
-			ProductId = 0,
-			DisplayName = "Extra Garden Plot",
-			Description = "Permanently unlocks one more plot, ignoring its level requirement.",
-			Amount = 1,
-			SortOrder = 50,
 		},
 		RevengeToken = {
 			Kind = "RevengeToken",
@@ -700,6 +832,13 @@ GameConfig.Monetization = {
 for name, product in GameConfig.Monetization.Products do
 	assert(product.Amount > 0, `product {name} must grant a positive amount`)
 	assert(product.Description ~= nil and product.Description ~= "", `product {name} needs a Description`)
+
+	if product.Kind == "Resource" then
+		assert(
+			GameConfig.Resources[product.Resource] ~= nil,
+			`product {name} grants unknown resource {tostring(product.Resource)}`
+		)
+	end
 end
 
 --- Products for the store panel, in display order. Stamps each with its table
@@ -816,6 +955,29 @@ for seedId, plantable in GameConfig.Plantables do
 		`plantable {seedId} yields {plantable.Yields}, which has no SellPrice - the crop would be worthless`
 	)
 end
+
+for index, age in GameConfig.Ages do
+	assert(age.Index == index, `age {index} has a mismatched Index field`)
+
+	for resourceId in age.AdvanceCost do
+		assert(GameConfig.Resources[resourceId] ~= nil, `age {age.Name} costs unknown resource {resourceId}`)
+	end
+end
+
+for resourceId, amount in GameConfig.StartingResources do
+	assert(GameConfig.Resources[resourceId] ~= nil, `StartingResources references unknown resource {resourceId}`)
+	assert(amount >= 0, `StartingResources entry {resourceId} must not be negative`)
+end
+
+for resourceId in GameConfig.Resources do
+	-- Resource ids double as attribute names on the player.
+	assert(resourceId:match("^[%a_][%w_]*$") ~= nil, `resource id {resourceId} is not a legal attribute name`)
+end
+
+assert(
+	GameConfig.Resources[GameConfig.PrimaryResource] ~= nil,
+	"GameConfig.PrimaryResource must name a real resource"
+)
 
 for itemId, amount in GameConfig.StarterKit do
 	assert(GameConfig.Items[itemId] ~= nil, `StarterKit references unknown item {itemId}`)

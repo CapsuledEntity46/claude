@@ -2,12 +2,14 @@
 --[[
 	HudClient
 	---------
-	The always-on HUD: Cash, Level, an XP bar, Revenge Tokens, plus an Inventory
-	panel and a Robux Store panel.
+	The always-on HUD: the four resources, the personal purse, Age, Level, an XP
+	bar and Revenge Tokens, plus Inventory and Robux Store panels.
 
 	Everything on screen is read from REPLICATED STATE, never computed locally:
 
-	  Cash / Level / XP / XPToNextLevel / RevengeTokens -> Player attributes
+	  Food / Wood / Gold / Stone                 -> Player attributes
+	  InventoryGold / Age / AgeName              -> Player attributes
+	  Level / XP / XPToNextLevel / RevengeTokens -> Player attributes
 	  Inventory                                         -> Player.Inventory attributes
 	  Item names, prices, categories                    -> Shared.GameConfig
 	  Store products                                    -> Shared.GameConfig
@@ -27,7 +29,7 @@ local Shared = ReplicatedStorage:WaitForChild("Shared")
 local GameConfig = require(Shared.GameConfig)
 local Remotes = require(Shared.Remotes)
 
-local EXPECTED_FRAMEWORK = 6
+local EXPECTED_FRAMEWORK = 7
 
 local player = Players.LocalPlayer
 local ATTR = GameConfig.Attributes
@@ -47,7 +49,7 @@ local COLORS = {
 	Text = Color3.fromRGB(236, 238, 245),
 	Muted = Color3.fromRGB(150, 156, 172),
 	Accent = Color3.fromRGB(96, 142, 226),
-	Cash = Color3.fromRGB(240, 199, 62),
+	Purse = Color3.fromRGB(240, 199, 62),
 	XP = Color3.fromRGB(126, 196, 112),
 	Token = Color3.fromRGB(198, 108, 196),
 	Buy = Color3.fromRGB(58, 142, 86),
@@ -175,31 +177,51 @@ screen.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 local strip = Instance.new("Frame")
 strip.Name = "Stats"
 strip.Position = UDim2.fromOffset(12, 12)
-strip.Size = UDim2.fromOffset(230, 96)
+strip.Size = UDim2.fromOffset(238, 164)
 strip.BackgroundColor3 = COLORS.Panel
 strip.BackgroundTransparency = 0.15
 strip.BorderSizePixel = 0
 strip.Parent = screen
 corner(strip, 8)
 
-local cashLabel = label({
-	Position = UDim2.fromOffset(12, 8),
-	Size = UDim2.fromOffset(206, 20),
-	Font = Enum.Font.GothamBold,
-	TextSize = 16,
-	TextColor3 = COLORS.Cash,
+--[[
+	One row per resource, generated from GameConfig.Resources in its declared
+	order. Adding a fifth resource needs no change here.
+]]
+local resourceLabels = {}
+
+for index, resourceId in GameConfig.GetResourceIds() do
+	local definition = GameConfig.Resources[resourceId]
+
+	local row = label({
+		Position = UDim2.fromOffset(12, -6 + index * 20),
+		Size = UDim2.fromOffset(206, 18),
+		Font = Enum.Font.GothamBold,
+		TextSize = 14,
+		TextColor3 = definition.Color,
+	})
+	row.Parent = strip
+
+	resourceLabels[resourceId] = row
+end
+
+local purseLabel = label({
+	Position = UDim2.fromOffset(12, 94),
+	Size = UDim2.fromOffset(206, 18),
+	TextSize = 13,
+	TextColor3 = COLORS.Purse,
 })
-cashLabel.Parent = strip
+purseLabel.Parent = strip
 
 local levelLabel = label({
-	Position = UDim2.fromOffset(12, 32),
+	Position = UDim2.fromOffset(12, 114),
 	Size = UDim2.fromOffset(120, 18),
 	TextSize = 13,
 })
 levelLabel.Parent = strip
 
 local tokenLabel = label({
-	Position = UDim2.fromOffset(132, 32),
+	Position = UDim2.fromOffset(132, 114),
 	Size = UDim2.fromOffset(90, 18),
 	TextSize = 13,
 	TextXAlignment = Enum.TextXAlignment.Right,
@@ -209,7 +231,7 @@ tokenLabel.Parent = strip
 
 -- XP bar
 local xpTrack = Instance.new("Frame")
-xpTrack.Position = UDim2.fromOffset(12, 56)
+xpTrack.Position = UDim2.fromOffset(12, 136)
 xpTrack.Size = UDim2.fromOffset(206, 10)
 xpTrack.BackgroundColor3 = COLORS.Disabled
 xpTrack.BorderSizePixel = 0
@@ -224,7 +246,7 @@ xpFill.Parent = xpTrack
 corner(xpFill, 5)
 
 local xpLabel = label({
-	Position = UDim2.fromOffset(12, 70),
+	Position = UDim2.fromOffset(12, 148),
 	Size = UDim2.fromOffset(206, 16),
 	TextSize = 11,
 	TextColor3 = COLORS.Muted,
@@ -274,13 +296,19 @@ screen.Parent = player:WaitForChild("PlayerGui")
 --------------------------------------------------------------------------------
 
 local function refreshStats()
-	local cash = player:GetAttribute(ATTR.Cash) or 0
+	for resourceId, control in resourceLabels do
+		local definition = GameConfig.Resources[resourceId]
+		control.Text = `{definition.Name}  {comma(player:GetAttribute(resourceId) or 0)}`
+	end
+
+	local ageName = player:GetAttribute(ATTR.AgeName) or "Dark Age"
+	purseLabel.Text = `Purse {comma(player:GetAttribute(ATTR.InventoryGold) or 0)}   •   {ageName}`
+
 	local level = player:GetAttribute(ATTR.Level) or 1
 	local xp = player:GetAttribute(ATTR.XP) or 0
 	local needed = player:GetAttribute(ATTR.XPToNextLevel) or -1
 	local tokens = player:GetAttribute(ATTR.RevengeTokens) or 0
 
-	cashLabel.Text = `$ {comma(cash)}`
 	levelLabel.Text = `Level {level}`
 	tokenLabel.Text = `{tokens} revenge`
 
@@ -527,7 +555,13 @@ storeButton.MouseButton1Click:Connect(function()
 	refreshStore()
 end)
 
-for _, attribute in { ATTR.Cash, ATTR.Level, ATTR.XP, ATTR.XPToNextLevel, ATTR.RevengeTokens } do
+local watched = { ATTR.Level, ATTR.XP, ATTR.XPToNextLevel, ATTR.RevengeTokens, ATTR.InventoryGold, ATTR.AgeName }
+
+for resourceId in GameConfig.Resources do
+	table.insert(watched, resourceId)
+end
+
+for _, attribute in watched do
 	player:GetAttributeChangedSignal(attribute):Connect(refreshStats)
 end
 

@@ -10,6 +10,9 @@
 --- Flat inventory: item id -> amount, for every category.
 export type Inventory = { [string]: number }
 
+--- The civilisation treasury: resource id -> amount (Food/Wood/Gold/Stone).
+export type Resources = { [string]: number }
+
 export type PlotEntry = {
 	SeedId: string,
 	PlantedAt: number,
@@ -18,7 +21,7 @@ export type PlotEntry = {
 export type PlayerStats = {
 	TotalHarvested: number,
 	TotalPlanted: number,
-	TotalCashEarned: number,
+	TotalGoldEarned: number,
 	JoinCount: number,
 	PlayTime: number,
 	LastSeen: number,
@@ -30,12 +33,27 @@ export type PlayerStats = {
 
 export type PlayerData = {
 	SchemaVersion: number,
-	Cash: number,
+
+	-- Civilisation
+	Resources: Resources,
+	Age: number,
+
+	--[[
+		The player's personal purse, deliberately separate from Resources.Gold.
+		Filled only by kills and loot; never by market income. No code path
+		moves value from the treasury into it.
+	]]
+	InventoryGold: number,
+	AutoUsePersonalGold: boolean,
+
+	-- Character
 	Level: number,
 	XP: number,
 	RevengeTokens: number,
+
 	Inventory: Inventory,
 	StarterKitGranted: boolean,
+	BonusPlotSlots: number,
 	Plots: { [string]: PlotEntry },
 	PurchaseHistory: { string },
 	Stats: PlayerStats,
@@ -57,7 +75,7 @@ export type TransactionResult = {
 	Spent: number?,
 	Earned: number?,
 	Held: number?,
-	Cash: number?,
+	Gold: number?,
 }
 
 return {}

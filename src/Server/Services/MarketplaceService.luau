@@ -61,7 +61,7 @@ local NOT_PROCESSED = Enum.ProductPurchaseDecision.NotProcessedYet
 local MarketplaceService = {}
 
 -- Checked against GameConfig.FrameworkVersion by Server.FrameworkGuard.
-MarketplaceService.FrameworkVersion = 6
+MarketplaceService.FrameworkVersion = 7
 
 MarketplaceService._started = false
 MarketplaceService._handlers = {}
@@ -115,47 +115,29 @@ function MarketplaceService._grantGrowthBoost(player: Player, product): boolean
 end
 
 --[[
-	Resource pack: credits Cash directly.
+	Resource pack: credits the treasury.
 
-	AddCash clamps at MaxCash, so a player already at the ceiling would pay and
-	receive nothing. Refuse instead and leave the receipt pending - they keep
-	the Robux and can buy it once they have spent some.
+	AddResource clamps at MaxResource, so a player already at the ceiling would
+	pay and receive nothing. Refuse instead and leave the receipt pending - they
+	keep the Robux and can buy it once they have spent some.
+
+	Packs land in the TREASURY, never the purse. Robux must not become a route
+	around the rule that the purse is filled only by kills and loot.
 ]]
-function MarketplaceService._grantCash(player: Player, product): boolean
-	if PlayerDataService:GetCash(player) >= GameConfig.Economy.MaxCash then
-		warn(`[MarketplaceService] {player.Name} is at the Cash ceiling; refusing {product.DisplayName}`)
+function MarketplaceService._grantResource(player: Player, product): boolean
+	local resource = GameConfig.GetResource(product.Resource)
+
+	if not resource then
+		warn(`[MarketplaceService] {product.DisplayName} names unknown resource {tostring(product.Resource)}`)
 		return false
 	end
 
-	return PlayerDataService:AddCash(player, product.Amount) ~= nil
-end
-
---[[
-	Permanent progression: one more usable garden plot, ignoring its level gate.
-
-	Capped at MaxBonusPlotSlots. At the cap the grant is refused rather than
-	silently absorbed, so a player is never charged for nothing.
-]]
-function MarketplaceService._grantPlotUnlock(player: Player, product): boolean
-	local data = PlayerDataService:GetData(player)
-	if not data then
+	if PlayerDataService:GetResource(player, resource.Id) >= GameConfig.Economy.MaxResource then
+		warn(`[MarketplaceService] {player.Name} is at the {resource.Id} ceiling; refusing {product.DisplayName}`)
 		return false
 	end
 
-	local maximum = GameConfig.Economy.MaxBonusPlotSlots
-	local current = data.BonusPlotSlots or 0
-
-	if current >= maximum then
-		warn(`[MarketplaceService] {player.Name} already owns every bonus plot slot; refusing grant`)
-		return false
-	end
-
-	data.BonusPlotSlots = math.min(current + product.Amount, maximum)
-
-	-- Re-evaluate the garden so the new plot becomes usable immediately.
-	PlotService:RefreshPlots(player)
-
-	return true
+	return PlayerDataService:AddResource(player, resource.Id, product.Amount) ~= nil
 end
 
 --------------------------------------------------------------------------------
@@ -293,8 +275,7 @@ function MarketplaceService:Start()
 
 	self:RegisterHandler("RevengeToken", MarketplaceService._grantRevengeToken)
 	self:RegisterHandler("GrowthBoost", MarketplaceService._grantGrowthBoost)
-	self:RegisterHandler("Cash", MarketplaceService._grantCash)
-	self:RegisterHandler("PlotUnlock", MarketplaceService._grantPlotUnlock)
+	self:RegisterHandler("Resource", MarketplaceService._grantResource)
 
 	--[[
 		The client requests a purchase dialog BY PRODUCT NAME, never by id, so

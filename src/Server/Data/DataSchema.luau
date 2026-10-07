@@ -55,7 +55,29 @@ end
 DataSchema.Template = {
 	SchemaVersion = DataSchema.Version,
 
-	Cash = GameConfig.Economy.StartingCash,
+	--[[
+		The civilisation treasury: resource id -> amount, for Food/Wood/Gold/Stone.
+
+		Left EMPTY here on purpose. Reconcile backfills template keys on every
+		load, so a starting balance in the template would be re-granted to any
+		player who spent a resource to zero. Starting amounts come from
+		GameConfig.StartingResources, granted once behind StarterKitGranted.
+	]]
+	Resources = {},
+
+	--[[
+		The player's personal purse, kept entirely separate from the treasury.
+
+		Earned only from kills and loot; spent only on personal equipment, or
+		willingly on construction. NOTHING in this codebase moves value from
+		Resources.Gold into InventoryGold - the absence of that path is the rule.
+	]]
+	InventoryGold = 0,
+
+	-- Civilisation progression. Gates what can be built and researched, and is
+	-- bought with resources, never XP.
+	Age = 1,
+
 	Level = 1,
 	XP = 0,
 	RevengeTokens = GameConfig.Economy.StartingRevengeTokens,
@@ -95,10 +117,14 @@ DataSchema.Template = {
 	-- PurchaseIds already granted, oldest first: the receipt idempotency ledger.
 	PurchaseHistory = {},
 
+	-- Player preference: pay for construction from the personal purse without
+	-- being asked each time, once the treasury runs short.
+	AutoUsePersonalGold = false,
+
 	Stats = {
 		TotalHarvested = 0,
 		TotalPlanted = 0,
-		TotalCashEarned = 0,
+		TotalGoldEarned = 0,
 		JoinCount = 0,
 		PlayTime = 0,
 		LastSeen = 0,
@@ -128,6 +154,32 @@ local V1_SEED_RENAMES = {
 }
 
 DataSchema.Migrations = {
+	--[[
+		v2 -> v3: a single `Cash` balance becomes the four-resource treasury.
+
+		Cash was earned by selling produce, which is exactly what Base Gold is,
+		so it converts straight across. The personal purse starts empty: it can
+		only ever be filled by kills and loot, so seeding it from Cash would
+		break the rule that market income cannot reach it.
+	]]
+	[2] = function(data)
+		local carried = tonumber(data.Cash) or 0
+
+		if type(data.Resources) ~= "table" then
+			data.Resources = {}
+		end
+
+		data.Resources.Gold = (tonumber(data.Resources.Gold) or 0) + carried
+		data.Cash = nil
+
+		data.InventoryGold = tonumber(data.InventoryGold) or 0
+		data.Age = tonumber(data.Age) or 1
+
+		if type(data.Stats) == "table" then
+			data.Stats.TotalGoldEarned = tonumber(data.Stats.TotalCashEarned) or 0
+			data.Stats.TotalCashEarned = nil
+		end
+	end,
 	--[[
 		v1 -> v2: flatten the bucketed inventory into a single item-id map.
 
@@ -234,7 +286,6 @@ function DataSchema.Normalize(data: { [string]: any }): { [string]: any }
 
 	-- Defensive type coercion. Protects against hand-edited saves and against
 	-- bugs in older game versions that wrote the wrong type.
-	data.Cash = math.clamp(math.floor(toFiniteNumber(data.Cash) or 0), 0, GameConfig.Economy.MaxCash)
 	data.Level = math.clamp(math.floor(toFiniteNumber(data.Level) or 1), 1, GameConfig.Progression.MaxLevel)
 	data.XP = math.max(math.floor(toFiniteNumber(data.XP) or 0), 0)
 	data.RevengeTokens = math.clamp(
@@ -243,6 +294,35 @@ function DataSchema.Normalize(data: { [string]: any }): { [string]: any }
 		GameConfig.Economy.MaxRevengeTokens
 	)
 	data.StarterKitGranted = data.StarterKitGranted == true
+	data.AutoUsePersonalGold = data.AutoUsePersonalGold == true
+	data.InventoryGold = math.clamp(
+		math.floor(toFiniteNumber(data.InventoryGold) or 0),
+		0,
+		GameConfig.Economy.MaxInventoryGold
+	)
+	data.Age = math.clamp(math.floor(toFiniteNumber(data.Age) or 1), 1, GameConfig.MaxAge)
+
+	--------------------------------------------------------------------------
+	-- Treasury
+	--------------------------------------------------------------------------
+
+	if type(data.Resources) ~= "table" then
+		data.Resources = {}
+	end
+
+	-- Every resource always has an explicit balance, so a key is never absent
+	-- and Reconcile can never re-grant a starting amount.
+	for resourceId in GameConfig.Resources do
+		data.Resources[resourceId] =
+			math.clamp(math.floor(toFiniteNumber(data.Resources[resourceId]) or 0), 0, GameConfig.Economy.MaxResource)
+	end
+
+	-- Drop balances for resources that no longer exist.
+	for resourceId in data.Resources do
+		if GameConfig.GetResource(resourceId) == nil then
+			data.Resources[resourceId] = nil
+		end
+	end
 	data.BonusPlotSlots = math.clamp(
 		math.floor(toFiniteNumber(data.BonusPlotSlots) or 0),
 		0,
@@ -338,7 +418,8 @@ end
 --------------------------------------------------------------------------------
 
 --[[
-	Grants GameConfig.StarterKit exactly once per profile and marks it granted.
+	Grants GameConfig.StarterKit and GameConfig.StartingResources exactly once
+	per profile, and marks it granted.
 	Returns true if anything was granted.
 
 	Writes straight into the data table rather than going through
@@ -351,6 +432,15 @@ function DataSchema.GrantStarterKit(data: { [string]: any }): boolean
 	end
 
 	data.StarterKitGranted = true
+
+	for resourceId, amount in GameConfig.StartingResources do
+		if GameConfig.GetResource(resourceId) then
+			data.Resources[resourceId] = math.min(
+				(data.Resources[resourceId] or 0) + amount,
+				GameConfig.Economy.MaxResource
+			)
+		end
+	end
 
 	for itemId, amount in GameConfig.StarterKit do
 		local item = GameConfig.GetItem(itemId)

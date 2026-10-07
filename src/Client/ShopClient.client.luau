@@ -34,7 +34,7 @@ local Remotes = require(Shared.Remotes)
 local player = Players.LocalPlayer
 local ATTR = GameConfig.Attributes
 
-local EXPECTED_FRAMEWORK = 6
+local EXPECTED_FRAMEWORK = 7
 
 --[[
 	Startup is diagnosed, not asserted.
@@ -195,8 +195,8 @@ local function buildGui()
 	})
 	title.Parent = header
 
-	local cashLabel = label({
-		Name = "Cash",
+	local goldLabel = label({
+		Name = "Gold",
 		AnchorPoint = Vector2.new(1, 0),
 		Position = UDim2.new(1, -56, 0, 0),
 		Size = UDim2.fromOffset(180, 48),
@@ -204,7 +204,7 @@ local function buildGui()
 		Font = Enum.Font.GothamBold,
 		TextSize = 16,
 	})
-	cashLabel.Parent = header
+	goldLabel.Parent = header
 
 	local close = button({
 		Name = "Close",
@@ -298,7 +298,7 @@ local function buildGui()
 	gui = {
 		Screen = screen,
 		Backdrop = backdrop,
-		Cash = cashLabel,
+		Gold = goldLabel,
 		Close = close,
 		TabBar = tabBar,
 		List = list,
@@ -524,8 +524,8 @@ function renderCategory()
 	end
 end
 
-local function refreshCash()
-	gui.Cash.Text = `Cash: {player:GetAttribute(ATTR.Cash) or 0}`
+local function refreshGold()
+	gui.Gold.Text = `Gold: {player:GetAttribute(GameConfig.PrimaryResource) or 0}`
 end
 
 --------------------------------------------------------------------------------
@@ -572,7 +572,7 @@ local function setOpen(open: boolean)
 	gui.Screen.Enabled = open
 
 	if open then
-		refreshCash()
+		refreshGold()
 		renderCategory()
 	else
 		setStatus("")
@@ -644,8 +644,8 @@ end)
 
 -- Live updates: the panel re-renders from replicated state, never from a
 -- locally predicted outcome.
-player:GetAttributeChangedSignal(ATTR.Cash):Connect(function()
-	refreshCash()
+player:GetAttributeChangedSignal(GameConfig.PrimaryResource):Connect(function()
+	refreshGold()
 
 	if gui.Screen.Enabled then
 		renderCategory()
@@ -664,5 +664,5 @@ getInventoryFolder().AttributeChanged:Connect(function()
 	end
 end)
 
-refreshCash()
+refreshGold()
 connectPrompt()

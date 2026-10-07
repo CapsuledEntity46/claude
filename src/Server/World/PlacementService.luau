@@ -57,7 +57,7 @@ local StructureBuilder = require(script.Parent.StructureBuilder)
 
 local PlacementService = {}
 
-PlacementService.FrameworkVersion = 9
+PlacementService.FrameworkVersion = 10
 
 PlacementService._started = false
 PlacementService._placed = {} :: { [Player]: any }
@@ -68,6 +68,15 @@ PlacementService._folder = nil
 PlacementService.Placed = Signal.new()
 --- (player, instanceId, structureId)
 PlacementService.Demolished = Signal.new()
+--[[
+	Fires for BOTH a fresh placement and a rebuild on rejoin, which is what
+	systems attaching behaviour to a structure need - a farm restored from
+	saved data must get its prompt exactly like a new one.
+]]
+--- (player, instanceId, entry, model, entityId)
+PlacementService.Spawned = Signal.new()
+--- (player, instanceId)
+PlacementService.Despawned = Signal.new()
 
 --------------------------------------------------------------------------------
 -- Helpers
@@ -333,6 +342,8 @@ function PlacementService:_spawn(player: Player, instanceId: string, entry: { [s
 		Model = model,
 		EntityId = entityId,
 	}
+
+	self.Spawned:Fire(player, instanceId, entry, model, entityId)
 end
 
 --[[
@@ -381,6 +392,9 @@ function PlacementService:_despawn(player: Player, instanceId: string)
 	if placed.EntityId then
 		DamageableService:Unregister(placed.EntityId)
 	end
+
+	-- Announced before the model goes away, so listeners can still read it.
+	self.Despawned:Fire(player, instanceId)
 
 	if placed.Model then
 		placed.Model:Destroy()

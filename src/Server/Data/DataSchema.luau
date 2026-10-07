@@ -97,41 +97,6 @@ DataSchema.Template = {
 	-- Set the first time a profile loads, so the starter kit is granted once.
 	StarterKitGranted = false,
 
-	--[[
-		Garden plots bought with Robux, on top of those earned by levelling.
-		Purely additive, so Reconcile backfills it for existing players and no
-		schema migration is required - unlike the inventory flattening in v2.
-	]]
-	BonusPlotSlots = 0,
-
-	--[[
-		Planted crops, keyed by STRINGIFIED plot index:
-			Plots = { ["1"] = { SeedId = "CarrotSeed", PlantedAt = 1700000000,
-		                    Health = 100, DamagedAt = 1700000000 } }
-
-		String keys are deliberate. DataStores serialise through JSON, which
-		does not round-trip sparse integer keys. Growth is derived from
-		PlantedAt, so crops keep growing while offline.
-	]]
-	Plots = {},
-
-	--[[
-		Placed structures, keyed by STRINGIFIED instance id:
-			Structures = { ["1"] = { StructureId = "Mill", X = 20, Z = -10,
-			                         Health = 1200, DamagedAt = 1700000000 } }
-
-		String keys for the same reason as Plots: DataStores serialise through
-		JSON, which does not round-trip sparse integer keys.
-
-		Purely additive, so Reconcile backfills it and no migration is needed.
-		This is the collection that will eventually subsume Plots, once farms
-		become placed structures.
-	]]
-	Structures = {},
-
-	-- Monotonic, so an instance id is never reused even after a demolish.
-	NextStructureId = 0,
-
 	-- PurchaseIds already granted, oldest first: the receipt idempotency ledger.
 	PurchaseHistory = {},
 
@@ -172,6 +137,35 @@ local V1_SEED_RENAMES = {
 }
 
 DataSchema.Migrations = {
+	--[[
+		v3 -> v4: the fixed six-plot garden is retired. Farms are now placed
+		structures, so `Plots` has nowhere to map onto.
+
+		Anything growing is refunded as its SEED rather than silently deleted.
+		The crop in the ground is lost - there is no farm to move it to - but
+		the player is not out of pocket, and a refund is far easier to explain
+		than a disappearance.
+
+		`BonusPlotSlots` goes with the plots it used to unlock.
+	]]
+	[3] = function(data)
+		if type(data.Inventory) ~= "table" then
+			data.Inventory = {}
+		end
+
+		if type(data.Plots) == "table" then
+			for _, entry in data.Plots do
+				local seedId = if type(entry) == "table" then entry.SeedId else nil
+
+				if type(seedId) == "string" then
+					data.Inventory[seedId] = (tonumber(data.Inventory[seedId]) or 0) + 1
+				end
+			end
+		end
+
+		data.Plots = nil
+		data.BonusPlotSlots = nil
+	end,
 	--[[
 		v2 -> v3: a single `Cash` balance becomes the four-resource treasury.
 
@@ -341,11 +335,6 @@ function DataSchema.Normalize(data: { [string]: any }): { [string]: any }
 			data.Resources[resourceId] = nil
 		end
 	end
-	data.BonusPlotSlots = math.clamp(
-		math.floor(toFiniteNumber(data.BonusPlotSlots) or 0),
-		0,
-		GameConfig.Economy.MaxBonusPlotSlots
-	)
 	data.SchemaVersion = DataSchema.Version
 
 	--------------------------------------------------------------------------
@@ -397,6 +386,11 @@ function DataSchema.Normalize(data: { [string]: any }): { [string]: any }
 	-- Structures
 	--------------------------------------------------------------------------
 
+	-- Shared by the structure and crop timestamp clamps below. A future
+	-- timestamp would stall growth and healing forever, which is both a
+	-- clock-skew symptom and an obvious tamper target.
+	local now = os.time()
+
 	if type(data.Structures) ~= "table" then
 		data.Structures = {}
 	end
@@ -441,59 +435,40 @@ function DataSchema.Normalize(data: { [string]: any }): { [string]: any }
 			entry.DamagedAt = math.min(math.floor(toFiniteNumber(entry.DamagedAt) or now), now)
 		end
 
-        highestId = math.max(highestId, numericKey)
+		--[[
+			A Farm carries its crop on the same record as the structure, so
+			demolishing a farm takes the crop with it. A parallel table keyed by
+			farm id would let a crop outlive the farm it grew on.
+		]]
+		if structure.HoldsCrop then
+			local plantedAt = toFiniteNumber(entry.PlantedAt)
+
+			if type(entry.SeedId) ~= "string" or GameConfig.GetPlantable(entry.SeedId) == nil or plantedAt == nil then
+				entry.SeedId = ""
+				entry.PlantedAt = nil
+				entry.CropHealth = nil
+				entry.CropDamagedAt = nil
+			else
+				entry.PlantedAt = math.min(math.floor(plantedAt), now)
+
+				local cropMax = GameConfig.Archetypes.Crop.MaxHealth
+				local cropHealth = toFiniteNumber(entry.CropHealth)
+
+				if cropHealth == nil then
+					entry.CropHealth = nil
+					entry.CropDamagedAt = nil
+				else
+					entry.CropHealth = math.clamp(math.floor(cropHealth), 0, cropMax)
+					entry.CropDamagedAt = math.min(math.floor(toFiniteNumber(entry.CropDamagedAt) or now), now)
+				end
+			end
+		end
+
+		highestId = math.max(highestId, numericKey)
 	end
 
 	-- Never hand out an id that is already in use, even if the counter was lost.
 	data.NextStructureId = math.max(data.NextStructureId, highestId)
-
-	--------------------------------------------------------------------------
-	-- Plots
-	--------------------------------------------------------------------------
-
-	if type(data.Plots) ~= "table" then
-		data.Plots = {}
-	end
-
-	local now = os.time()
-	local plotCount = GameConfig.Garden.PlotsPerGarden
-
-	for key, entry in data.Plots do
-		local index = toFiniteNumber(key)
-		local plantedAt = if type(entry) == "table" then toFiniteNumber(entry.PlantedAt) else nil
-
-		-- Drop anything that would not map onto a real plot, or that names a
-		-- seed which no longer exists in GameConfig.
-		local isUsable = type(key) == "string"
-			and index ~= nil
-			and index == math.floor(index)
-			and index >= 1
-			and index <= plotCount
-			and plantedAt ~= nil
-			and GameConfig.GetPlantable(entry.SeedId) ~= nil
-
-		if not isUsable then
-			data.Plots[key] = nil
-			continue
-		end
-
-		-- A PlantedAt in the future would stall growth forever, which is both a
-		-- clock-skew symptom and an obvious tamper target.
-		entry.PlantedAt = math.min(math.floor(plantedAt), now)
-
-		-- Crop health, persisted so damage survives a rejoin. Absent means
-		-- undamaged; the registry fills in full health on load.
-		local cropMax = GameConfig.Archetypes.Crop.MaxHealth
-		local health = toFiniteNumber(entry.Health)
-
-		if health == nil then
-			entry.Health = nil
-			entry.DamagedAt = nil
-		else
-			entry.Health = math.clamp(math.floor(health), 0, cropMax)
-			entry.DamagedAt = math.min(math.floor(toFiniteNumber(entry.DamagedAt) or now), now)
-		end
-	end
 
 	return data
 end

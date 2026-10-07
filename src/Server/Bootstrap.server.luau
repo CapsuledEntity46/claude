@@ -71,7 +71,7 @@ end
 
 local DamageableService = requireServer("Combat.DamageableService")
 local PlayerDataService = requireServer("Services.PlayerDataService")
-local PlotService = requireServer("Services.PlotService")
+local FarmService = requireServer("Services.FarmService")
 local ShopService = requireServer("Services.ShopService")
 local MarketplaceService = requireServer("Services.MarketplaceService")
 local PlacementService = requireServer("World.PlacementService")
@@ -119,7 +119,7 @@ if guardModule then
 	require(guardModule).Assert(GameConfig.FrameworkVersion, {
 		DamageableService = DamageableService,
 		PlayerDataService = PlayerDataService,
-		PlotService = PlotService,
+		FarmService = FarmService,
 		PlacementService = PlacementService,
 		ShopService = ShopService,
 		MarketplaceService = MarketplaceService,
@@ -137,7 +137,7 @@ end
 
 PlayerDataService:Start()
 DamageableService:Start()
-PlotService:Start()
+FarmService:Start()
 PlacementService:Start()
 ShopService:Start()
 
@@ -152,8 +152,8 @@ PlayerDataService.LevelChanged:Connect(function(player: Player, newLevel: number
 	print(`[Progression] {player.Name}: level {previousLevel} -> {newLevel}`)
 end)
 
-PlotService.Harvested:Connect(function(player: Player, plotIndex: number, itemId: string)
-	print(`[Garden] {player.Name} harvested {itemId} from plot {plotIndex}`)
+FarmService.Harvested:Connect(function(player: Player, instanceId: string, itemId: string, amount: number)
+	print(`[Farm] {player.Name} harvested {amount}x {itemId} from farm {instanceId}`)
 end)
 
 -- << Register additional services here as later steps are added >>

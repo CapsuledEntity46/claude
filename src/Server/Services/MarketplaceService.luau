@@ -53,7 +53,7 @@ local Remotes = require(Shared.Remotes)
 local Signal = require(Shared.Signal)
 
 local PlayerDataService = require(script.Parent.PlayerDataService)
-local PlotService = require(script.Parent.PlotService)
+local FarmService = require(script.Parent.FarmService)
 
 local GRANTED = Enum.ProductPurchaseDecision.PurchaseGranted
 local NOT_PROCESSED = Enum.ProductPurchaseDecision.NotProcessedYet
@@ -61,7 +61,7 @@ local NOT_PROCESSED = Enum.ProductPurchaseDecision.NotProcessedYet
 local MarketplaceService = {}
 
 -- Checked against GameConfig.FrameworkVersion by Server.FrameworkGuard.
-MarketplaceService.FrameworkVersion = 9
+MarketplaceService.FrameworkVersion = 10
 
 MarketplaceService._started = false
 MarketplaceService._handlers = {}
@@ -106,7 +106,7 @@ function MarketplaceService._grantGrowthBoost(player: Player, product): boolean
 	-- Best-effort instant gratification. Failure is fine: the player keeps the
 	-- consumable, so the purchase is never lost.
 	for _ = 1, product.Amount do
-		if not PlotService:CompleteGrowth(player, nil) then
+		if not FarmService:CompleteGrowth(player, nil) then
 			break
 		end
 	end

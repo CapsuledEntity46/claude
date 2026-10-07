@@ -71,7 +71,7 @@ local GameConfig = {}
 	tree fails with a message naming the stale module instead of a nil-index
 	deep inside unrelated code.
 ]]
-GameConfig.FrameworkVersion = 9
+GameConfig.FrameworkVersion = 10
 
 --------------------------------------------------------------------------------
 -- Persistence
@@ -80,7 +80,7 @@ GameConfig.FrameworkVersion = 9
 GameConfig.Data = {
 	-- Bumped to 2 when the inventory was flattened from category buckets to a
 	-- single item-id map. See DataSchema.Migrations.
-	SchemaVersion = 3,
+	SchemaVersion = 4,
 
 	-- Changing the store name starts every player from scratch. Treat it as a
 	-- deliberate wipe, not a routine edit.
@@ -103,10 +103,6 @@ GameConfig.Economy = {
 
 	StartingRevengeTokens = 2,
 	MaxRevengeTokens = 9_999,
-
-	-- Plots granted on top of those earned by levelling. No longer purchasable;
-	-- kept so quests or admin tools can still award one.
-	MaxBonusPlotSlots = 4,
 }
 
 --------------------------------------------------------------------------------
@@ -620,29 +616,26 @@ GameConfig.Growth = {
 }
 
 --------------------------------------------------------------------------------
--- Gardens and plots
+-- Interaction
 --------------------------------------------------------------------------------
 
-GameConfig.Garden = {
-	Origin = Vector3.new(0, 0.5, 0),
-	SlotSpacing = Vector3.new(80, 0, 80),
-	SlotsPerRow = 5,
+--[[
+	Shared rules for every ProximityPrompt in the game.
 
-	PlotsPerGarden = 6,
-	PlotsPerRow = 3,
-
-	SoilSize = Vector3.new(8, 1, 8),
-	SoilSpacing = 10,
-	SoilColor = Color3.fromRGB(94, 66, 45),
-	LockedSoilColor = Color3.fromRGB(72, 72, 72),
-	BaseColor = Color3.fromRGB(106, 142, 74),
-	BasePadding = 6,
-
-	PlotUnlockLevels = { 1, 1, 3, 8, 15, 25 },
-
+	These are the survivors of the retired fixed-garden config. Plots used to
+	own them; now anything interactive does, because farms are placed
+	structures rather than slots in a pre-built garden.
+]]
+GameConfig.Interaction = {
+	-- Prompt reach, and the slack added before the server rejects an
+	-- interaction as out of range. The engine enforces reach on the client,
+	-- which an exploiter controls, so the server re-checks with tolerance for
+	-- latency and movement.
 	MaxActivationDistance = 14,
 	DistanceTolerance = 8,
-	InteractionCooldown = 0.35,
+
+	-- Minimum seconds between accepted interactions from one player.
+	Cooldown = 0.35,
 }
 
 --------------------------------------------------------------------------------
@@ -898,6 +891,9 @@ GameConfig.Structures = {
 		RequiresWithinRadiusOf = "Mill",
 		MaxPerPlayer = 20,
 		SortOrder = 40,
+		-- The only structure that grows something, so FarmService attaches a
+		-- plant/harvest prompt to farms and nothing else.
+		HoldsCrop = true,
 	},
 
 	WatchTower = {
@@ -1003,7 +999,7 @@ GameConfig.Attributes = {
 	DataLoaded = "DataLoaded",
 	SelectedSeed = "SelectedSeed",
 	RevengeTokens = "RevengeTokens",
-	TargetPlot = "TargetPlot",
+	TargetFarm = "TargetFarm", -- instance id a boost purchase applies to
 }
 
 --[[
@@ -1020,20 +1016,22 @@ GameConfig.HealthAttributes = {
 	Shattered = "Shattered",
 }
 
-GameConfig.PlotAttributes = {
-	OwnerUserId = "OwnerUserId",
-	PlotIndex = "PlotIndex",
-	SeedId = "SeedId",
+--[[
+	Published on a Farm structure holding a crop. Clients derive the growth
+	stage and countdown from these, so a farm needs no remote traffic.
+
+	`Locked` and `UnlockLevel` are gone with the fixed garden: a farm exists
+	because the player built it, so there is nothing to unlock.
+]]
+GameConfig.FarmAttributes = {
+	SeedId = "SeedId", -- "" when fallow
 	PlantedAt = "PlantedAt",
 	ReadyAt = "ReadyAt",
 	Stage = "Stage",
-	Locked = "Locked",
-	UnlockLevel = "UnlockLevel",
 }
 
 -- A single flat folder now: one attribute per item id, no category subfolders.
 GameConfig.InventoryFolderName = "Inventory"
-GameConfig.GardensFolderName = "Gardens"
 GameConfig.StructuresFolderName = "Structures"
 
 GameConfig.StructureAttributes = {
@@ -1045,8 +1043,8 @@ GameConfig.StructureAttributes = {
 
 GameConfig.RemoteNames = {
 	SelectSeed = "SelectSeed",
-	SelectPlot = "SelectPlot",
 	UseBoost = "UseBoost",
+	SelectFarm = "SelectFarm",
 
 	-- RemoteFunctions
 	ProcessTransaction = "ProcessTransaction",
@@ -1248,11 +1246,6 @@ end
 -- Config self-checks (fail loudly at require time, not mid-session)
 --------------------------------------------------------------------------------
 
-assert(
-	#GameConfig.Garden.PlotUnlockLevels == GameConfig.Garden.PlotsPerGarden,
-	"GameConfig.Garden.PlotUnlockLevels must have one entry per plot"
-)
-
 do
 	local stages = GameConfig.Growth.Stages
 	assert(#stages > 0, "GameConfig.Growth.Stages must not be empty")
@@ -1382,11 +1375,12 @@ for itemId, amount in GameConfig.StarterKit do
 end
 
 table.freeze(GameConfig.Attributes)
-table.freeze(GameConfig.PlotAttributes)
+table.freeze(GameConfig.FarmAttributes)
 table.freeze(GameConfig.RemoteNames)
 table.freeze(GameConfig.ItemCategories)
 table.freeze(GameConfig.HealthAttributes)
 table.freeze(GameConfig.StructureAttributes)
+table.freeze(GameConfig.Interaction)
 table.freeze(GameConfig.TransactionActions)
 
 return GameConfig

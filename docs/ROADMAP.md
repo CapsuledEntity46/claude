@@ -457,12 +457,62 @@ The player's survival structure, distinct from match victory:
 > player restarts with a working economy instead of a ruin they cannot rebuild
 > from.
 
-> ⚠️ **Revenge as a counter-raid is deferred.** The roadmap said revenge "may
-> target a player or a horde" — attacking someone else's base. Nothing can
-> attack another player's base yet, so the token buys the thing that is
-> actually available: getting back on your feet without paying in resources.
-> When raiding another base exists, a true revenge raid is the natural second
-> use of the same counter.
+### 7c. Revenge as reconquest ⬜
+
+**The agreed replacement for "Fight On".** Today the token simply undoes the
+defeat: the raid is called off and the anchor goes back up. That is a
+*continue*, and it wastes the most dramatic moment the game has.
+
+Instead: **the enemy keeps your base, and you take it back.**
+
+| | Now | Agreed |
+| --- | --- | --- |
+| Raid on defeat | Called off | **Stays.** The horde holds your base |
+| Anchor | Restored free | Stays ruined until you retake the ground |
+| The player | Respawns and carries on | Respawns **with an army**, to fight back |
+| Losing again | — | Another token, or the wipe below |
+
+**The army is sized from the horde that beat you.** A level 5 raid earns a
+level 5 relief force — roughly 2 tanks, 5 melee, 5 archers. The player fights
+alongside it with their own equipment (sword, shield, bow, crossbow, bombs,
+armour, spells).
+
+**Out of tokens, or surrender → a full restart**: default resources, a fresh
+site on the map, nothing carried over but the account.
+
+> ✅ **Raid levels exist** (`GameConfig.GetRaidLevel`, scaled off Age, with
+> `LevelScaling` driving health and damage) and the worst level a player has
+> faced is persisted as `data.LastRaidLevel` — because the army is chosen
+> *after* the horde is gone, so the number has to outlive the raiders.
+
+> **What this needs that does not exist.** In dependency order:
+>
+> 1. **Troops** (7b) — the relief force is player-owned units. The attack,
+>    targeting and spatial layers already serve them; what is missing is
+>    player-unit movement and a housing/roster model.
+> 2. **Occupation as persistent state** — "the enemy holds your base" has to
+>    survive a logout, which means the occupying force is saved, not just the
+>    session's raiders. It also forces answers: do farms keep growing while
+>    occupied? can the player build? That is a real design surface, not a flag.
+> 3. **Player equipment** (9) — the player's own contribution to the fight.
+> 4. **Relocation** — "a fresh site on the map" implies the map has *sites*.
+>    Placement is currently free anywhere inside the world bounds, so there is
+>    no such concept yet.
+
+> ⚠️ **Open questions worth settling before any of it is built.**
+>
+> - **What exactly does the wipe take?** Structures and resources are clear.
+>   Does it also take XP level, the item inventory, unlocked ages? A total
+>   reset makes the game a roguelike; keeping level and items makes it a
+>   setback. These are very different games and the answer changes how harsh
+>   defeat may safely be.
+> - **Is the wipe reachable by accident?** A player who ignores the panel,
+>   or closes the game while defeated, must not wake up wiped. The defeat
+>   state persists, so this needs an explicit rule.
+> - **Can the occupying force be ground down?** If the player chips at it with
+>   combat plants and towers that survived, reconquest may need no army at all.
+>   Either that is a legitimate strategy or the garrison needs to not be
+>   attackable until revenge begins.
 
 > ✅ **Raiders can hurt the player**, which the loop needs or "fall while
 > shattered" is unreachable except by accident. The player is **not** a

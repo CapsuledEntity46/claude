@@ -123,13 +123,36 @@ function DamageableService:Register(descriptor: { [string]: any }): number?
 	local health = if restored then tonumber(restored.Health) else nil
 	local damagedAt = if restored then tonumber(restored.DamagedAt) else nil
 
+	local level = math.max(math.floor(tonumber(descriptor.Level) or 1), 1)
+
+	--[[
+		A levelled entity is tougher and hits harder, and the cleanest way to
+		express that is an archetype with scaled numbers rather than a
+		multiplier threaded through every call site.
+
+		Shallow-copied, so the shared config table is never mutated - two
+		raiders at different levels must not fight over one MaxHealth.
+	]]
+	if level > 1 then
+		local multiplier = GameConfig.GetLevelMultiplier(level)
+		local scaled = {}
+
+		for key, value in archetype do
+			scaled[key] = value
+		end
+
+		scaled.MaxHealth = math.floor(archetype.MaxHealth * multiplier)
+		archetype = scaled
+	end
+
 	local entity = {
 		Id = id,
 		ArchetypeId = archetype.Id,
 		Archetype = archetype,
+		LevelMultiplier = GameConfig.GetLevelMultiplier(level),
 		Model = descriptor.Model,
 		OwnerUserId = tonumber(descriptor.OwnerUserId) or 0,
-		Level = math.max(math.floor(tonumber(descriptor.Level) or 1), 1),
+		Level = level,
 		Shattered = descriptor.Shattered == true,
 		State = {
 			Health = math.clamp(health or archetype.MaxHealth, 0, archetype.MaxHealth),

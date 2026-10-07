@@ -625,6 +625,38 @@ function PlayerDataService:TryAdvanceAge(player: Player): (boolean, string?)
 end
 
 --------------------------------------------------------------------------------
+-- Public API: raids
+--------------------------------------------------------------------------------
+
+--[[
+	The level of the last raid sent at this player.
+
+	Persisted because the revenge army in docs/ROADMAP.md is sized from the
+	horde that beat you - and by the time you choose revenge, that horde has
+	been cleared off the field. A number that only existed while the raiders
+	did could not size anything.
+]]
+function PlayerDataService:GetLastRaidLevel(player: Player): number
+	local data = self:GetData(player)
+	return if data then data.LastRaidLevel or 1 else 1
+end
+
+function PlayerDataService:SetLastRaidLevel(player: Player, level: unknown): boolean
+	local data = self:GetData(player)
+	local value = toPositiveInteger(level)
+
+	if not data or not value then
+		return false
+	end
+
+	-- Only ever rises within a session's run of raids, so choosing revenge
+	-- after clearing an easy wave cannot shrink the army you were promised.
+	data.LastRaidLevel = math.max(data.LastRaidLevel or 1, value)
+
+	return true
+end
+
+--------------------------------------------------------------------------------
 -- Public API: revenge tokens
 --------------------------------------------------------------------------------
 

@@ -83,6 +83,15 @@ DataSchema.Template = {
 	RevengeTokens = GameConfig.Economy.StartingRevengeTokens,
 
 	--[[
+		The level of the worst raid this player has faced. Sizes the revenge
+		army, which is chosen after the raid is over - so the number has to
+		outlive the raiders.
+
+		Additive, so Reconcile backfills it and no migration is needed.
+	]]
+	LastRaidLevel = 1,
+
+	--[[
 		Flat inventory: item id -> amount, for EVERY category.
 
 		Nothing here knows whether an id is a seed, a crop or a side of beef;
@@ -300,6 +309,8 @@ function DataSchema.Normalize(data: { [string]: any }): { [string]: any }
 	-- bugs in older game versions that wrote the wrong type.
 	data.Level = math.clamp(math.floor(toFiniteNumber(data.Level) or 1), 1, GameConfig.Progression.MaxLevel)
 	data.XP = math.max(math.floor(toFiniteNumber(data.XP) or 0), 0)
+	data.LastRaidLevel = math.max(math.floor(toFiniteNumber(data.LastRaidLevel) or 1), 1)
+
 	data.RevengeTokens = math.clamp(
 		math.floor(toFiniteNumber(data.RevengeTokens) or GameConfig.Economy.StartingRevengeTokens),
 		0,

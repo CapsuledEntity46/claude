@@ -62,10 +62,12 @@ local Workspace = game:GetService("Workspace")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Shared = ReplicatedStorage:WaitForChild("Shared")
 local GameConfig = require(Shared.GameConfig)
+local Remotes = require(Shared.Remotes)
 local Signal = require(Shared.Signal)
 local Spatial = require(Shared.Spatial)
 
 local AttackService = require(script.Parent.AttackService)
+local PlayerDataService = require(script.Parent.Parent.Services.PlayerDataService)
 local DamageableService = require(script.Parent.DamageableService)
 local StatusEffectService = require(script.Parent.StatusEffectService)
 
@@ -78,7 +80,7 @@ RaidService._started = false
 RaidService._raiders = {}
 RaidService._folder = nil
 
---- (userId, raiderCount)
+--- (userId, raiderCount, level)
 RaidService.WaveStarted = Signal.new()
 --- (userId) - every raider of that wave is down
 RaidService.WaveCleared = Signal.new()
@@ -398,7 +400,13 @@ end
 	Spawns one raider for `player`, `distance` studs from their base centre at
 	`angle` radians.
 ]]
-function RaidService:SpawnRaider(player: Player, archetypeId: string, angle: number, distance: number): number?
+function RaidService:SpawnRaider(
+	player: Player,
+	archetypeId: string,
+	angle: number,
+	distance: number,
+	level: number?
+): number?
 	local archetype = GameConfig.GetArchetype(archetypeId)
 
 	if not archetype or archetype.Faction ~= GameConfig.Factions.Hostile then
@@ -420,6 +428,7 @@ function RaidService:SpawnRaider(player: Player, archetypeId: string, angle: num
 		Model = model,
 		-- Hostile entities belong to nobody, so killing one always pays.
 		OwnerUserId = 0,
+		Level = level,
 	})
 
 	if not entityId then
@@ -484,6 +493,14 @@ function RaidService:SummonWave(player: Player): { [string]: any }
 		return { Ok = false, Reason = "NothingToRaid" }
 	end
 
+	--[[
+		The wave's level, from how far the settlement has come. Recorded on
+		the player because the revenge army is sized from the horde that beat
+		them, and by then the horde is gone.
+	]]
+	local level = GameConfig.GetRaidLevel(PlayerDataService:GetAge(player))
+	PlayerDataService:SetLastRaidLevel(player, level)
+
 	local spawned = 0
 	local index = 0
 	local total = 0
@@ -498,7 +515,7 @@ function RaidService:SummonWave(player: Player): { [string]: any }
 			-- rather than single file.
 			local angle = (index / math.max(total, 1)) * math.pi * 2
 
-			if self:SpawnRaider(player, entry.ArchetypeId, angle, raid.SpawnDistance) then
+			if self:SpawnRaider(player, entry.ArchetypeId, angle, raid.SpawnDistance, level) then
 				spawned += 1
 			end
 
@@ -510,9 +527,18 @@ function RaidService:SummonWave(player: Player): { [string]: any }
 		return { Ok = false, Reason = "SpawnFailed" }
 	end
 
-	self.WaveStarted:Fire(player.UserId, spawned)
+	--[[
+		Announced with its level, because escalation the player cannot see is
+		indistinguishable from no escalation - a harder wave just feels like
+		bad luck.
+	]]
+	if self._notice then
+		self._notice:FireClient(player, `A raid of {spawned} is coming. Horde level {level}.`)
+	end
 
-	return { Ok = true, Raiders = spawned }
+	self.WaveStarted:Fire(player.UserId, spawned, level)
+
+	return { Ok = true, Raiders = spawned, Level = level }
 end
 
 --------------------------------------------------------------------------------
@@ -545,6 +571,7 @@ function RaidService:Start()
 		folder.Parent = Workspace
 	end
 	self._folder = folder
+	self._notice = Remotes.GetEvent(GameConfig.RemoteNames.Notice)
 
 	DamageableService.Destroyed:Connect(function(entityId: number)
 		self:_forget(entityId)

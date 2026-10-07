@@ -349,9 +349,12 @@ function AttackService:_resolveShot(attacker, entity, attack, target, origin: Ve
 		the same thing for a person as for a wall - the Humanoid is only where
 		the number is stored.
 	]]
+	-- A levelled attacker hits harder, the same multiplier its health used.
+	local power = entity.LevelMultiplier or 1
+
 	local function hitPlayer(candidate, fraction: number): number
 		local dealt = Combat.ComputeDamage(
-			attack.Damage * fraction,
+			attack.Damage * fraction * power,
 			attack.DamageType,
 			GameConfig.PlayerCombat.ArmourClass,
 			GameConfig.PlayerCombat.Armour
@@ -366,7 +369,7 @@ function AttackService:_resolveShot(attacker, entity, attack, target, origin: Ve
 	end
 
 	local function hit(id: number, fraction: number)
-		local amount = attack.Damage * fraction
+		local amount = attack.Damage * fraction * power
 
 		if amount <= 0 then
 			return 0

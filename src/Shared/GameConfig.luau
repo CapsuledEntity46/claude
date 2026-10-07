@@ -1097,6 +1097,25 @@ GameConfig.Attacks = {
 	},
 } :: { [string]: AttackDefinition }
 
+--[[
+	The level of a raid sent at a settlement of `age`.
+
+	Deliberately a function rather than a table: a per-age table would need a
+	new row every time an age is added, and the relationship is linear.
+]]
+function GameConfig.GetRaidLevel(age: number): number
+	local raids = GameConfig.Raids
+	local advanced = math.max((tonumber(age) or 1) - 1, 0)
+
+	return raids.BaseLevel + advanced * raids.LevelPerAge
+end
+
+--- Health and damage multiplier for something at `level`.
+function GameConfig.GetLevelMultiplier(level: number): number
+	local above = math.max((tonumber(level) or 1) - 1, 0)
+	return 1 + above * GameConfig.Raids.LevelScaling
+end
+
 function GameConfig.GetAttack(attackId: unknown): AttackDefinition?
 	if type(attackId) ~= "string" then
 		return nil
@@ -1643,6 +1662,29 @@ GameConfig.Raids = {
 	-- How far out they appear, measured from the middle of the base. Well
 	-- beyond a tower's 60 stud reach, so a wave is seen coming.
 	SpawnDistance = 110,
+
+	--[[
+		A wave's LEVEL, and what it scales.
+
+		Raiders were all level 1, which made every raid identical and made
+		"the level of the horde that attacked you" a thing that did not
+		exist. It has to exist: the revenge army in docs/ROADMAP.md is sized
+		from it.
+
+		Scaled off the player's AGE rather than their XP level. Age is the RTS
+		measure of how far along a settlement is - it gates buildings and
+		costs a fortune - so a player who has advanced has visibly better
+		defences and should face something worth defending against. XP level
+		rises from farming, which should not summon a bigger army.
+
+		Level multiplies health and damage, and it already multiplied kill
+		rewards, so a harder wave pays better without any extra wiring.
+	]]
+	LevelPerAge = 2,
+	BaseLevel = 1,
+
+	--- Health and damage multiplier per level above the first.
+	LevelScaling = 0.35,
 
 	--[[
 		How often raiders are walked. Distance is speed times ELAPSED time,
@@ -2542,6 +2584,24 @@ do
 
 	for _, attack in GameConfig.Attacks do
 		longestRange = math.max(longestRange, attack.Range)
+	end
+
+	assert(GameConfig.Raids.BaseLevel >= 1, "Raids.BaseLevel must be at least 1")
+	assert(GameConfig.Raids.LevelPerAge >= 0, "Raids.LevelPerAge cannot be negative")
+	assert(GameConfig.Raids.LevelScaling > 0, "Raids.LevelScaling must be positive, or levels mean nothing")
+
+	--[[
+		A raid at the final age must be meaningfully harder than the first, or
+		the whole escalation is decoration.
+	]]
+	do
+		local first = GameConfig.GetLevelMultiplier(GameConfig.GetRaidLevel(1))
+		local last = GameConfig.GetLevelMultiplier(GameConfig.GetRaidLevel(GameConfig.MaxAge))
+
+		assert(
+			last >= first * 2,
+			`raids barely escalate: age 1 scales {first} and age {GameConfig.MaxAge} only {last}`
+		)
 	end
 
 	assert(

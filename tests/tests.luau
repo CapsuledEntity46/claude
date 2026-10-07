@@ -4587,6 +4587,104 @@ local function runTests()
 		end
 
 		------------------------------------------------------------------------
+		section("Raids: levels and escalation")
+		------------------------------------------------------------------------
+
+		--[[
+			Raiders were all level 1, which made every raid identical and made
+			"the level of the horde that attacked you" a thing that did not
+			exist. It has to exist, because the revenge army in
+			docs/ROADMAP.md is sized from it.
+
+			Scaled off AGE rather than XP level. Age is the RTS measure of how
+			far a settlement has come - it gates buildings and costs a fortune
+			- whereas XP rises from farming, and growing carrots should not
+			summon a bigger army.
+		]]
+		checkEqual(GameConfig.GetRaidLevel(1), GameConfig.Raids.BaseLevel, "a Stone Age settlement faces the base level")
+		check(
+			GameConfig.GetRaidLevel(2) > GameConfig.GetRaidLevel(1),
+			"advancing an age brings a harder horde"
+		)
+		checkEqual(
+			GameConfig.GetRaidLevel(3) - GameConfig.GetRaidLevel(2),
+			GameConfig.Raids.LevelPerAge,
+			"and each age adds the same step"
+		)
+
+		checkEqual(GameConfig.GetLevelMultiplier(1), 1, "level one is the unscaled baseline")
+		check(GameConfig.GetLevelMultiplier(5) > 1, "and higher levels scale up")
+
+		-- Garbage in does not produce a monster.
+		checkEqual(GameConfig.GetLevelMultiplier(0), 1, "a level below one still reads as the baseline")
+		checkEqual(GameConfig.GetLevelMultiplier(nil), 1, "and so does no level at all")
+
+		--[[
+			The level has to actually DO something, on both sides of the fight:
+			a levelled raider is tougher AND hits harder. Its kill rewards
+			already scaled with level, so a harder wave pays better with no
+			extra wiring.
+		]]
+		do
+			local plain = spawnEntity("EnemyRaider", 0, 900)
+			local plainHealth = DamageableService:GetHealth(plain)
+
+			local model = Instance.new("Model")
+			local body = Instance.new("Part")
+			body.Position = Vector3.new(20, 2, 900)
+			body.Parent = model
+			model.PrimaryPart = body
+			model.Parent = WorkspaceService
+
+			local veteran = DamageableService:Register({
+				ArchetypeId = "EnemyRaider",
+				Model = model,
+				OwnerUserId = 0,
+				Level = 6,
+			})
+
+			check(
+				DamageableService:GetHealth(veteran) > plainHealth,
+				`a level six raider has more health than a level one ({DamageableService:GetHealth(veteran)} vs {plainHealth})`
+			)
+
+			--[[
+				And the shared config table was not mutated to achieve it. Two
+				raiders at different levels must not fight over one MaxHealth,
+				which a naive in-place scale would cause.
+			]]
+			checkEqual(
+				GameConfig.Archetypes.EnemyRaider.MaxHealth,
+				120,
+				"while the archetype in config is left alone"
+			)
+			checkEqual(
+				DamageableService:GetHealth(plain),
+				plainHealth,
+				"so the level one raider is unaffected by its veteran neighbour"
+			)
+
+			-- Harder hitting, measured against a target it can reach.
+			local club = GameConfig.Attacks.RaiderClub
+			local wall = spawnEntity("Checkpoint", 24, 900, 8181)
+
+			AttackService:Register(veteran)
+			local before = DamageableService:GetHealth(wall)
+			advance(club.Cooldown + GameConfig.Combat.AttackTickInterval * 2)
+			local veteranHit = before - DamageableService:GetHealth(wall)
+
+			check(
+				veteranHit > Combat.ComputeDamage(club.Damage, club.DamageType, "Building", 6),
+				`and hits harder than its level one damage would ({veteranHit})`
+			)
+
+			AttackService:Unregister(veteran)
+			for _, id in { plain, veteran, wall } do
+				DamageableService:Unregister(id)
+			end
+		end
+
+		------------------------------------------------------------------------
 		section("Defeat: the anchor shatters rather than vanishing")
 		------------------------------------------------------------------------
 

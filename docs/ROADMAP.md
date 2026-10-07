@@ -40,14 +40,36 @@ Four gathered resources, in the Age of Empires model:
 > ⚠️ **This revises an earlier note in this document.** It previously said
 > resources should be inventory *items*, with `Cash` as the only currency.
 > That is wrong for an RTS: these four are spent continuously on construction
-> and training, which is currency behaviour, not inventory behaviour. They want
-> their own balances with their own HUD readouts, like `Cash` has now.
->
-> Open decision: is the existing `Cash` renamed to **Gold**, or does Cash remain
-> a separate "merchant" currency earned by selling produce? Selling crops for
-> Cash already works, and AoE earns Gold through trade, so folding Cash into
-> Gold is the simpler model.
+> and training, which is currency behaviour, not inventory behaviour.
 
+### Two kinds of gold ✅
+
+Gold is split in two, with **deliberately asymmetric flows**. This is the most
+unusual rule in the economy and the one most likely to be broken by accident.
+
+| | **Base Gold** (treasury) | **Inventory Gold** (purse) |
+| --- | --- | --- |
+| Earned from | Selling harvested goods at the market | Defeating enemies and players, chest loot |
+| Spent on | Building, upgrading, market trade | Equipment, armour, spellbooks, clothing, decorations, items for self or base |
+| Can pay for construction | Yes, always | Yes, but only if the player opts in |
+| Can be withdrawn to the other | **Never** | n/a |
+
+Rules that follow, and must hold in code:
+
+1. Market sales credit **Base Gold only**. Harvesting and selling can never
+   fill the personal purse.
+2. Loot and kills credit **Inventory Gold only**.
+3. **There is no transfer from Base Gold to Inventory Gold.** Not a restricted
+   one — none. The absence of that function *is* the rule.
+4. Construction draws Base Gold first. If short, the player may *willingly*
+   spend from the purse — a per-player persisted preference decides whether to
+   prompt or pay automatically, so repeat builds are one click.
+5. Equipment is bought with **Inventory Gold only**.
+
+⬜ A safe in the main house for storing personal gold (a container with its own
+capacity and vulnerability, rather than a number on the player).
+
+### Ages
 ### Ages
 
 Progression through historical epochs, researched at the Town Center
@@ -65,6 +87,55 @@ unlocks stronger units, better buildings and technology upgrades.
 >
 > Anything currently gated by Level that is really a *civilisation* capability
 > needs to move to Age. The garden plots are exactly that case (below).
+
+### Building upgrades and per-building tech ⬜
+
+Buildings level up Clash-of-Clans style, and **each building hosts its own
+research**, Age of Empires style. Two different mechanics that coexist:
+
+1. **Building level** — upgrading the structure itself (cost, build time,
+   health, capacity).
+2. **Researched technology** — one-off purchases at a building that
+   permanently buff everything of a type, globally and retroactively.
+
+Worked examples of the research half:
+
+**Mill** (AoE2 — farm yield)
+
+| Tech | Age | Cost | Effect |
+| ---- | --- | ---- | ------ |
+| Horse Collar | Feudal | 75 Food, 75 Wood | +75 food per farm |
+| Heavy Plow | Castle | 125 Food, 125 Wood | +125 food per farm, +1 carry |
+| Crop Rotation | Imperial | 250 Food, 250 Wood | +175 food per farm |
+
+**Mill** (AoE4 — gather rate)
+
+| Tech | Age | Cost | Effect |
+| ---- | --- | ---- | ------ |
+| Horticulture | Feudal | 50 Food, 125 Gold | +15% farm gather rate |
+| Agricultural Fertilization | Castle | 100 Food, 250 Gold | +15% |
+| Soluble Fertilizer | Imperial | 300 Food, 700 Gold | +15% |
+
+**Barracks** — both unit-line transformations (Militia → Man-at-Arms → Long
+Swordsman → Two-Handed → Champion; Spearman → Pikeman → Halberdier) and global
+infantry buffs (Supplies: −15 food cost; Gambesons: +1 pierce armour; Squires:
++10% infantry speed; Arson: +2 damage to buildings).
+
+> **Architectural notes.**
+>
+> - A researched tech **retroactively affects units already on the field**, so
+>   unit stats must be *computed* from base stats plus owned techs, never
+>   stamped onto a unit at spawn. Same discipline as deriving growth from
+>   timestamps rather than accumulating it.
+> - Techs are a **set of owned ids per player** (`data.Technologies`), and
+>   building levels a map of `structureId -> level`. Both are additive schema
+>   fields.
+> - Effects must be **data, not code**: a tech declares `{ Stat = "GatherRate",
+>   Mode = "Multiply", Value = 1.15 }` so adding one is a config edit. A tech
+>   that needs new code is a tech that will not scale to a full tree.
+> - Tech availability depends on **Age AND building level AND prerequisite
+>   techs** — the same dependency check as the build tree, so both should share
+>   one resolver.
 
 ### Tech tree and build dependencies
 
@@ -233,10 +304,11 @@ revenge continues.
 
 - ✅ Receipt processing with a durable idempotency ledger and save-before-grant
 - ✅ Cash packs, Instant Grow (×1 and ×10), Revenge Tokens
-- ⚠️ **Extra Garden Plot** unlocks a plot past its *level* requirement. If plots
-  become Mill-radius structures, a "plot slot" stops being a meaningful unit.
-  The likely replacement is a population/building-cap increase, or resource
-  packs for Wood/Stone. Worth deciding before setting its real ProductId.
+- ✅ **Extra Garden Plot removed**, replaced by Food/Wood/Stone resource packs.
+  A "plot slot" stops being a meaningful unit once plots are radius-placed
+  structures, and changing what a *live* product grants is far worse than
+  changing it before launch. `BonusPlotSlots` remains in the schema and is still
+  honoured, so it can be granted as a quest or admin reward.
 - ⬜ Real Developer Product IDs (all placeholders are `0`)
 - ⬜ Cosmetics, battle pass
 

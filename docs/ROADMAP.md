@@ -190,9 +190,11 @@ Two distinct requirement types, and the game needs both:
 Currently six fixed plots per garden, unlocked by player Level, with
 timestamp-driven growth and harvest.
 
-> ⚠️ **Provisional.** The RTS model is different in kind: farms are *built* by
-> the player or villagers, require a **Mill** as prerequisite, and are placed
-> within the Mill's radius. They are not fixed slots handed out by player level.
+> ⚠️ **Provisional — replacement decided.** The AoE model is confirmed: farms
+> are *built* by the player or villagers, require a **Mill** as prerequisite,
+> and are placed within the Mill's radius. They are not fixed slots handed out
+> by player level. The fixed garden is scaffolding until the placement service
+> lands.
 >
 > What survives the rewrite: the growth model (timestamps, three visual stages,
 > offline growth), `CropFactory`, the item directory and the harvest→sell loop.
@@ -285,11 +287,42 @@ and build orders; assign villagers to tasks and to drop-off buildings.
 > system that requires revisiting it. Orders must be validated server-side —
 > selection is a client convenience, never an authority.
 
-### 9. Player combat and traversal ⬜
+### 9. Player combat, equipment and traversal ⬜
 
 MMORPG HUD with selectable spells and an action bar. Swords, spears, maces,
 bows, crossbows, shields, grenades, flintlocks, spells. Horses, hang gliders,
 climbing.
+
+**Character sheet** — reference is the Titan Quest style panel:
+
+- A **paper-doll** centre panel rendering the equipped character
+- **Equipment slots** around it: main hand, off hand / shield, head, torso,
+  gloves, boots, amulet, two rings — mirrored left and right of the doll
+- **Primary / Secondary** stat tabs. Secondary holds resistances (physical,
+  cold, poison, lightning, and a generic one), health and energy regeneration,
+  offensive and defensive ability, cast speed, run speed
+- **Lifetime record** lines: greatest monster killed, monsters killed, greatest
+  damage dealt, elapsed time, total deaths
+- **Carried gold** shown on the panel — this is the *purse*, not the treasury
+- A **multi-tab inventory grid** at the bottom, several bags of slots
+
+> **Architectural notes.**
+>
+> - Resistances, regeneration, offensive/defensive ability, cast and run speed
+>   are all **derived stats**: base + equipment + buffs + researched tech. They
+>   must be computed on read, never stored, for the same reason growth is
+>   derived from timestamps. Storing them means every stat source has to
+>   remember to recompute, and one that forgets desynchronises silently.
+> - The lifetime record lines are counters and belong in `data.Stats`, which
+>   already exists and already persists.
+> - A **grid** inventory is a different model from the current flat
+>   `itemId -> amount` map: grids need per-slot positions and stack splitting.
+>   That is an additive change (`data.InventorySlots`) but it is a real
+>   redesign, not a UI skin over the current map. Worth deciding whether the
+>   grid is cosmetic (auto-arranged from the flat map) or authoritative
+>   (player-arranged, persisted) before building it.
+> - The purse shown here is `InventoryGold`, which already exists and is already
+>   loot-only.
 
 ### 10. Trade and logistics ⬜
 

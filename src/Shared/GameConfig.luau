@@ -681,7 +681,7 @@ export type ArchetypeDefinition = {
 	changes.
 ]]
 GameConfig.Combat = {
-	DamageTypes = { "Melee", "Pierce", "Siege", "Magic" },
+	DamageTypes = { "Melee", "Pierce", "Siege", "Magic", "Fire", "Ice", "Poison" },
 	ArmourClasses = { "Unarmoured", "Light", "Heavy", "Building", "Crop" },
 
 	-- Even a perfectly countered hit lands something. A truly immune target
@@ -693,6 +693,22 @@ GameConfig.Combat = {
 		Pierce = { Unarmoured = 1.25, Light = 1.00, Heavy = 0.40, Building = 0.25, Crop = 0.75 },
 		Siege = { Unarmoured = 0.50, Light = 0.50, Heavy = 0.50, Building = 2.50, Crop = 1.50 },
 		Magic = { Unarmoured = 1.00, Light = 1.10, Heavy = 1.10, Building = 0.75, Crop = 1.00 },
+
+		--[[
+			The three elemental types exist to carry status effects, so their
+			rows are shaped around what the effect is for rather than around
+			raw output.
+
+			Fire spreads: good against packed light troops, devastating to
+			crops and thatch, poor against stone.
+			Ice barely hurts anything - its payload is the Chill slow, and if
+			it also hit hard it would have no weakness.
+			Poison ignores the *idea* of armour, so Heavy is not discounted,
+			but it is meaningless against masonry and only withers a crop.
+		]]
+		Fire = { Unarmoured = 1.20, Light = 1.30, Heavy = 0.70, Building = 0.60, Crop = 2.00 },
+		Ice = { Unarmoured = 0.60, Light = 0.60, Heavy = 0.60, Building = 0.25, Crop = 0.50 },
+		Poison = { Unarmoured = 1.40, Light = 1.20, Heavy = 1.00, Building = 0.10, Crop = 0.50 },
 	},
 }
 
@@ -806,6 +822,153 @@ function GameConfig.GetArchetype(archetypeId: unknown): ArchetypeDefinition?
 end
 
 --------------------------------------------------------------------------------
+-- Status effects
+--------------------------------------------------------------------------------
+
+export type StatusEffectDefinition = {
+	Id: string,
+	Name: string,
+	Description: string,
+	Kind: string, -- "DamageOverTime" | "HealOverTime" | "Debuff"
+	DamageType: string?, -- which counter-table row the per-second damage uses
+	PerSecond: number, -- damage for DoT, healing for HoT, 0 for a pure debuff
+	Duration: number, -- seconds from the most recent application
+	MaxStacks: number,
+	SpeedMultiplier: number, -- compounds per stack; 1 = no movement effect
+	Colour: Color3, -- for the client's effect pips
+}
+
+--[[
+	Burn, Chill, Poison and Regeneration, declared as data.
+
+	WHY THERE IS A TICK AT ALL
+	--------------------------
+	Everything else in this project derives state from timestamps and never
+	ticks: crop growth, health regeneration, lock expiry. Damage over time
+	cannot be purely derived, because the DEATH has to happen whether or not
+	anyone is looking. A burning raider that only dies when something queries
+	its health is not burning, it is Schrödinger's raider.
+
+	So status effects do tick - but the tick only provides liveness. The AMOUNT
+	is still computed from elapsed time:
+
+		damage = PerSecond * Stacks * (now - LastTickAt)
+
+	never `PerSecond * TickInterval`. The difference matters the moment a tick
+	is late: a lag spike, a long frame, or a loop that was never scheduled.
+	With elapsed time the total dealt over a five second Burn is five seconds'
+	worth regardless of how many ticks actually ran; with `PerSecond *
+	TickInterval` a server that stutters heals your enemies for free.
+
+	STACKING
+	--------
+	Re-applying an effect refreshes its expiry and adds a stack up to
+	MaxStacks. Damage scales linearly with stacks; SpeedMultiplier compounds,
+	so two Chills are 0.65 * 0.65 rather than 0.30.
+
+	NOT PERSISTED
+	-------------
+	Status effects are session state and are deliberately absent from the data
+	schema. Logging out while poisoned cures the poison - which is a mild
+	exploit, but the alternative is logging in to find you drowned in a loading
+	screen, and that is worse. Revisit if effect durations ever grow past a
+	minute.
+]]
+GameConfig.StatusEffects = {
+	Burn = {
+		Id = "Burn",
+		Name = "Burning",
+		Description = "Fierce damage that ends quickly. Ruinous to crops and thatch.",
+		Kind = "DamageOverTime",
+		DamageType = "Fire",
+		PerSecond = 6,
+		Duration = 5,
+		MaxStacks = 3,
+		SpeedMultiplier = 1,
+		Colour = Color3.fromRGB(236, 112, 48),
+	},
+
+	Poison = {
+		Id = "Poison",
+		Name = "Poisoned",
+		Description = "Weak but long, and armour is no defence against it.",
+		Kind = "DamageOverTime",
+		DamageType = "Poison",
+		PerSecond = 3,
+		Duration = 12,
+		MaxStacks = 5,
+		SpeedMultiplier = 1,
+		Colour = Color3.fromRGB(126, 196, 76),
+	},
+
+	Chill = {
+		Id = "Chill",
+		Name = "Chilled",
+		Description = "Barely harms, but slows the target to a crawl.",
+		Kind = "Debuff",
+		DamageType = "Ice",
+		PerSecond = 0,
+		Duration = 4,
+		MaxStacks = 2,
+		SpeedMultiplier = 0.65,
+		Colour = Color3.fromRGB(120, 196, 236),
+	},
+
+	Regeneration = {
+		Id = "Regeneration",
+		Name = "Regenerating",
+		Description = "Mends steadily. Will not revive something already destroyed.",
+		Kind = "HealOverTime",
+		PerSecond = 4,
+		Duration = 8,
+		MaxStacks = 1,
+		SpeedMultiplier = 1,
+		Colour = Color3.fromRGB(132, 222, 158),
+	},
+}
+
+GameConfig.StatusEffectRules = {
+	--[[
+		How often the accrual loop runs. This sets the GRANULARITY of damage,
+		not its rate - see the note above. Raising it costs accuracy of the
+		moment of death and nothing else.
+
+		Timestamps come from os.time(), which is whole seconds, matching the
+		clock health and growth already use. Mixing in a higher-resolution
+		clock would make `now - DamagedAt` compare two different timebases.
+	]]
+	TickInterval = 0.5,
+
+	--[[
+		A slow floor, for the same reason damage has a floor: a target reduced
+		to zero speed is stun-locked, and a stun-lock with no counterplay is
+		the movement equivalent of invulnerability.
+	]]
+	MinimumSpeedMultiplier = 0.25,
+
+	--[[
+		Damage over time skips FLAT armour, though it still goes through the
+		counter table.
+
+		Armour is subtracted after the multiplier, which makes it worth far
+		more against many small hits than one big one. Damage over time is the
+		limit case of "many small hits", so charging armour per tick would
+		reduce every effect to the MinimumDamage floor and make armoured
+		targets immune to fire by accident. The counter-table row is where an
+		archetype's resistance to an element belongs.
+	]]
+	IgnoreFlatArmour = true,
+}
+
+function GameConfig.GetStatusEffect(effectId: unknown): StatusEffectDefinition?
+	if type(effectId) ~= "string" then
+		return nil
+	end
+
+	return GameConfig.StatusEffects[effectId]
+end
+
+--------------------------------------------------------------------------------
 -- Structures (the build tree)
 --------------------------------------------------------------------------------
 
@@ -845,7 +1008,7 @@ GameConfig.Structures = {
 	TownCenter = {
 		Id = "TownCenter",
 		Name = "Town Center",
-		Description = "The heart of your settlement. Projects influence for everything else.",
+		Description = "The heart of your settlement, and the root of the build tree.",
 		ArchetypeId = "TownCenter",
 		RequiredAge = 1,
 		Prerequisites = {},
@@ -1372,6 +1535,76 @@ for _, damageType in GameConfig.Combat.DamageTypes do
 	end
 end
 
+for id, effect in GameConfig.StatusEffects do
+	assert(effect.Id == id, `status effect {id} has a mismatched Id field`)
+
+	-- Effect ids become attribute names on the model, so the client can read
+	-- them without a parser.
+	assert(id:match("^[%a_][%w_]*$") ~= nil, `status effect id {id} is not a legal attribute name`)
+
+	assert(
+		effect.Kind == "DamageOverTime" or effect.Kind == "HealOverTime" or effect.Kind == "Debuff",
+		`status effect {id} has unknown Kind {tostring(effect.Kind)}`
+	)
+
+	-- A zero or negative duration would expire in the same instant it was
+	-- applied, which reads as "the effect does nothing" and is impossible to
+	-- debug from the symptom.
+	assert(effect.Duration > 0, `status effect {id} must last longer than zero seconds`)
+	assert(effect.MaxStacks >= 1, `status effect {id} must allow at least one stack`)
+	assert(effect.PerSecond >= 0, `status effect {id} must not have a negative rate`)
+
+	if effect.Kind == "DamageOverTime" then
+		assert(effect.PerSecond > 0, `damage-over-time effect {id} deals no damage`)
+		assert(
+			effect.DamageType ~= nil and table.find(GameConfig.Combat.DamageTypes, effect.DamageType) ~= nil,
+			`status effect {id} names unknown damage type {tostring(effect.DamageType)}`
+		)
+	end
+
+	if effect.Kind == "HealOverTime" then
+		assert(effect.PerSecond > 0, `heal-over-time effect {id} heals nothing`)
+	end
+
+	assert(
+		effect.SpeedMultiplier > 0 and effect.SpeedMultiplier <= 1,
+		`status effect {id} must have a SpeedMultiplier in (0, 1]`
+	)
+
+	--[[
+		A pure debuff that neither damages nor slows is inert, and the only way
+		to notice is that the effect visibly does nothing in play.
+	]]
+	if effect.Kind == "Debuff" then
+		assert(
+			effect.SpeedMultiplier < 1,
+			`debuff {id} neither damages nor slows, so it has no effect at all`
+		)
+	end
+end
+
+do
+	local rules = GameConfig.StatusEffectRules
+
+	assert(rules.TickInterval > 0, "StatusEffectRules.TickInterval must be positive")
+
+	-- Two ticks per second of the shortest effect, so the moment of death is
+	-- never more than a visible fraction late.
+	local shortest = math.huge
+	for _, effect in GameConfig.StatusEffects do
+		shortest = math.min(shortest, effect.Duration)
+	end
+	assert(
+		rules.TickInterval <= shortest / 2,
+		`StatusEffectRules.TickInterval ({rules.TickInterval}) is too coarse for the shortest effect ({shortest}s)`
+	)
+
+	assert(
+		rules.MinimumSpeedMultiplier > 0 and rules.MinimumSpeedMultiplier <= 1,
+		"StatusEffectRules.MinimumSpeedMultiplier must be in (0, 1]"
+	)
+end
+
 for index, age in GameConfig.Ages do
 	assert(age.Index == index, `age {index} has a mismatched Index field`)
 
@@ -1455,5 +1688,7 @@ table.freeze(GameConfig.HealthAttributes)
 table.freeze(GameConfig.StructureAttributes)
 table.freeze(GameConfig.Interaction)
 table.freeze(GameConfig.TransactionActions)
+table.freeze(GameConfig.StatusEffectRules)
 
 return GameConfig
+

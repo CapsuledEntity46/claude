@@ -70,6 +70,7 @@ if not GameConfig then
 end
 
 local DamageableService = requireServer("Combat.DamageableService")
+local StatusEffectService = requireServer("Combat.StatusEffectService")
 local PlayerDataService = requireServer("Services.PlayerDataService")
 local FarmService = requireServer("Services.FarmService")
 local ShopService = requireServer("Services.ShopService")
@@ -118,6 +119,7 @@ local guardModule = resolve(serverRoot, "FrameworkGuard")
 if guardModule then
 	require(guardModule).Assert(GameConfig.FrameworkVersion, {
 		DamageableService = DamageableService,
+		StatusEffectService = StatusEffectService,
 		PlayerDataService = PlayerDataService,
 		FarmService = FarmService,
 		PlacementService = PlacementService,
@@ -137,6 +139,10 @@ end
 
 PlayerDataService:Start()
 DamageableService:Start()
+
+-- After the registry it hooks, so no Destroyed signal fires before it listens.
+StatusEffectService:Start()
+
 FarmService:Start()
 PlacementService:Start()
 ShopService:Start()

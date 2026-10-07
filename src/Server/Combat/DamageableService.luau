@@ -212,12 +212,18 @@ end
 	`attacker` may be a Player, a non-player identifier, or nil. It is used only
 	for reward attribution and for the Destroyed signal; this function does not
 	ask whether the attacker was *allowed* to attack. Callers own that.
+
+	`options.IgnoreArmour` skips the flat armour subtraction while keeping the
+	counter table. Damage over time needs it: armour is subtracted per hit, so
+	charging it on every tick of a burn would floor each tick at MinimumDamage
+	and make armoured targets accidentally fireproof.
 ]]
 function DamageableService:ApplyDamage(
 	entityId: number,
 	amount: number,
 	damageType: string,
-	attacker: any?
+	attacker: any?,
+	options: { [string]: any }?
 ): { [string]: any }
 	local entity = self._entities[entityId]
 
@@ -239,7 +245,8 @@ function DamageableService:ApplyDamage(
 		return { Ok = false, Reason = "AlreadyDestroyed" }
 	end
 
-	local dealt = Combat.ComputeDamage(amount, damageType, archetype.ArmourClass, archetype.Armour)
+	local armour = if options and options.IgnoreArmour then 0 else archetype.Armour
+	local dealt = Combat.ComputeDamage(amount, damageType, archetype.ArmourClass, armour)
 
 	if dealt <= 0 then
 		return { Ok = false, Reason = "NoDamage" }
@@ -300,6 +307,63 @@ function DamageableService:_payRewards(entity, attacker: any?)
 	if rewards.Gold > 0 then
 		PlayerDataService:AddInventoryGold(attacker, rewards.Gold)
 	end
+end
+
+--[[
+	Restores health for free.
+
+	This is the healing counterpart to ApplyDamage, for effects and abilities
+	that mend without a resource bill - Repair is the one that charges, and the
+	two must not be conflated or a heal-over-time would quietly spend the
+	player's wood.
+
+	WILL NOT REVIVE. An entity at zero health, or a shattered one, is refused.
+	Combat.DeriveHealth takes the same line about regeneration: coming back
+	from destroyed is a gameplay decision with consequences (rewards already
+	paid out, the Destroyed signal already fired), not something arithmetic
+	should be able to do by accident.
+]]
+function DamageableService:Heal(entityId: number, amount: number): { [string]: any }
+	local entity = self._entities[entityId]
+
+	if not entity then
+		return { Ok = false, Reason = "UnknownEntity" }
+	end
+
+	if entity.Shattered then
+		return { Ok = false, Reason = "AlreadyDestroyed" }
+	end
+
+	local requested = tonumber(amount)
+
+	-- NaN and infinity would both survive into the stored baseline and poison
+	-- every later comparison against it.
+	if requested == nil or requested ~= requested or requested == math.huge or requested <= 0 then
+		return { Ok = false, Reason = "NoHealing" }
+	end
+
+	local archetype = entity.Archetype
+	local now = os.time()
+	local current = Combat.GetHealth(entity.State, archetype, now)
+
+	if current <= 0 then
+		return { Ok = false, Reason = "AlreadyDestroyed" }
+	end
+
+	local restored = math.min(requested, archetype.MaxHealth - current)
+
+	if restored <= 0 then
+		return { Ok = false, Reason = "AlreadyFull" }
+	end
+
+	-- Rebased exactly as damage rebases, so natural regeneration continues
+	-- from this moment rather than replaying from the old baseline.
+	entity.State.Health = current + restored
+	entity.State.DamagedAt = now
+
+	commit(self, entity)
+
+	return { Ok = true, Restored = restored, Health = entity.State.Health }
 end
 
 --------------------------------------------------------------------------------

@@ -71,7 +71,7 @@ local GameConfig = {}
 	tree fails with a message naming the stale module instead of a nil-index
 	deep inside unrelated code.
 ]]
-GameConfig.FrameworkVersion = 10
+GameConfig.FrameworkVersion = 11
 
 --------------------------------------------------------------------------------
 -- Persistence
@@ -139,11 +139,25 @@ GameConfig.PrimaryResource = "Gold"
 --- Granted once, on a profile's first load. Deliberately NOT in the DataSchema
 --- template, for the same reason the starter items are not: Reconcile would
 --- re-grant anything spent to zero.
+--[[
+	Sized so a fresh player can actually reach their FIRST farm, which is what
+	opens the income loop:
+
+		Town Center 300 Wood + 100 Stone
+		Mill        100 Wood
+		Farm         60 Wood
+		           = 460 Wood + 100 Stone
+
+	Anything less is a cold-start wall: construction costs Wood and Stone,
+	while the only income before a farm exists is Gold, so a player short on
+	Wood had no way to earn more. Market trading below is the sustained answer;
+	this is the bootstrap.
+]]
 GameConfig.StartingResources = {
 	Food = 200,
-	Wood = 200,
-	Gold = 150,
-	Stone = 100,
+	Wood = 500,
+	Gold = 200,
+	Stone = 150,
 }
 
 function GameConfig.GetResource(resourceId: unknown): ResourceDefinition?
@@ -969,6 +983,26 @@ GameConfig.Shop = {
 	RequestsPerSecond = 8,
 	BurstSize = 12,
 
+	--[[
+		Market resource trading, Age of Empires style: Gold converts to the
+		construction resources and back.
+
+		Without this the economy is a dead end. Selling produce earns Gold, but
+		building costs Wood and Stone and aging up costs Food, and none of those
+		had any income source at all.
+
+		BuyRate is deliberately higher than SellRate, so round-tripping a
+		resource LOSES value and trading can never become an arbitrage loop.
+		Gold is excluded - it cannot be traded for itself.
+	]]
+	ResourceTrade = {
+		-- Gold paid per unit bought from the market.
+		BuyRate = { Food = 2, Wood = 2, Stone = 3 },
+		-- Gold received per unit sold to the market.
+		SellRate = { Food = 1, Wood = 1, Stone = 1 },
+		MaxTradeAmount = 10_000,
+	},
+
 	-- Physical storefront
 	NpcName = "ShopNPC",
 	NpcTitle = "General Store",
@@ -1049,6 +1083,7 @@ GameConfig.RemoteNames = {
 	-- RemoteFunctions
 	ProcessTransaction = "ProcessTransaction",
 	SellAll = "SellAll",
+	TradeResource = "TradeResource",
 	PlaceStructure = "PlaceStructure",
 	DemolishStructure = "DemolishStructure",
 
@@ -1368,6 +1403,53 @@ assert(
 	GameConfig.Resources[GameConfig.PrimaryResource] ~= nil,
 	"GameConfig.PrimaryResource must name a real resource"
 )
+
+do
+	local trade = GameConfig.Shop.ResourceTrade
+
+	for resourceId, buyRate in trade.BuyRate do
+		assert(GameConfig.Resources[resourceId] ~= nil, `trade BuyRate names unknown resource {resourceId}`)
+		assert(
+			resourceId ~= GameConfig.PrimaryResource,
+			`{resourceId} is the primary currency and cannot be traded for itself`
+		)
+
+		local sellRate = trade.SellRate[resourceId]
+		assert(sellRate ~= nil, `trade BuyRate for {resourceId} has no matching SellRate`)
+
+		-- If selling paid as much as buying cost, a player could round-trip a
+		-- resource forever at no loss, and with rounding could gain.
+		assert(
+			buyRate > sellRate,
+			`trade rates for {resourceId} must lose value on a round trip (buy {buyRate} > sell {sellRate})`
+		)
+	end
+
+	for resourceId in trade.SellRate do
+		assert(trade.BuyRate[resourceId] ~= nil, `trade SellRate for {resourceId} has no matching BuyRate`)
+	end
+
+	--[[
+		The cold-start guarantee: a fresh player's starting resources must cover
+		their first farm. Asserted at require time so a cost or starting-amount
+		edit cannot quietly reintroduce the softlock.
+	]]
+	local firstFarmCost = {}
+
+	for _, structureId in { "TownCenter", "Mill", "Farm" } do
+		for resourceId, amount in GameConfig.Structures[structureId].Cost do
+			firstFarmCost[resourceId] = (firstFarmCost[resourceId] or 0) + amount
+		end
+	end
+
+	for resourceId, needed in firstFarmCost do
+		local starting = GameConfig.StartingResources[resourceId] or 0
+		assert(
+			starting >= needed,
+			`a fresh player cannot reach their first farm: needs {needed} {resourceId}, starts with {starting}`
+		)
+	end
+end
 
 for itemId, amount in GameConfig.StarterKit do
 	assert(GameConfig.Items[itemId] ~= nil, `StarterKit references unknown item {itemId}`)

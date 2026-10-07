@@ -34,7 +34,7 @@ local Remotes = require(Shared.Remotes)
 local player = Players.LocalPlayer
 local ATTR = GameConfig.Attributes
 
-local EXPECTED_FRAMEWORK = 10
+local EXPECTED_FRAMEWORK = 11
 
 --[[
 	Startup is diagnosed, not asserted.
@@ -65,10 +65,11 @@ end
 
 local function acquireRemotes()
 	return Remotes.GetFunction(GameConfig.RemoteNames.ProcessTransaction),
-		Remotes.GetFunction(GameConfig.RemoteNames.SellAll)
+		Remotes.GetFunction(GameConfig.RemoteNames.SellAll),
+		Remotes.GetFunction(GameConfig.RemoteNames.TradeResource)
 end
 
-local acquired, processTransaction, sellAllRemote = pcall(acquireRemotes)
+local acquired, processTransaction, sellAllRemote, tradeRemote = pcall(acquireRemotes)
 
 if not acquired then
 	warn(
@@ -312,6 +313,10 @@ end
 -- State
 --------------------------------------------------------------------------------
 
+-- A pseudo-category: resources are currencies, not items, so they trade
+-- through a different remote and get their own tab.
+local TRADE_TAB = "Trade"
+
 local activeCategory = GameConfig.ItemCategories[1]
 local activeAmount = AMOUNT_OPTIONS[1]
 local busy = false
@@ -351,6 +356,7 @@ end
 --------------------------------------------------------------------------------
 
 local renderCategory
+local tradeSubmit
 
 --[[
 	Sends a transaction and reports the outcome.
@@ -387,6 +393,37 @@ local function submit(actionType: string, itemId: string, amount: number)
 		end
 	else
 		setStatus(result.Reason or "Transaction failed.", true)
+	end
+
+	renderCategory()
+end
+
+--- Sends a resource trade and reports the outcome.
+function tradeSubmit(actionType: string, resourceId: string, amount: number)
+	if busy then
+		return
+	end
+	busy = true
+
+	local ok, result = pcall(function()
+		return tradeRemote:InvokeServer(actionType, resourceId, amount)
+	end)
+
+	busy = false
+
+	if not ok or type(result) ~= "table" then
+		setStatus("The market is unavailable right now.", true)
+		return
+	end
+
+	if result.Ok then
+		if actionType == GameConfig.TransactionActions.Buy then
+			setStatus(`Bought {result.Amount} {result.ResourceId} for {result.Spent} Gold.`)
+		else
+			setStatus(`Sold {result.Amount} {result.ResourceId} for {result.Earned} Gold.`)
+		end
+	else
+		setStatus(result.Reason or "Trade refused.", true)
 	end
 
 	renderCategory()
@@ -432,6 +469,10 @@ local function buildRow(item, level: number, order: number): Frame
 	end
 	if item.SellPrice then
 		table.insert(detailParts, `Sell {item.SellPrice}`)
+	else
+		-- Seeds are deliberately not sellable, to stop buy-back arbitrage.
+		-- Saying so is better than an unexplained missing button.
+		table.insert(detailParts, "cannot be sold")
 	end
 	if locked then
 		table.insert(detailParts, `Needs level {requiredLevel}`)
@@ -450,20 +491,26 @@ local function buildRow(item, level: number, order: number): Frame
 	-- BuyPrice or SellPrice simply renders no button.
 	local offset = -10
 
-	if GameConfig.IsSellable(item) then
+	--[[
+		A Sell button is only shown when the player actually holds some. Showing
+		an enabled button on a row reading "Owned: 0" invites a click that can
+		only ever fail with NotEnoughItems, which reads as a broken shop rather
+		than an empty inventory.
+	]]
+	if GameConfig.IsSellable(item) and held > 0 then
 		local sell = button({
 			Name = "Sell",
 			AnchorPoint = Vector2.new(1, 0.5),
 			Position = UDim2.new(1, offset, 0.5, 0),
 			Size = UDim2.fromOffset(74, 30),
-			BackgroundColor3 = if held > 0 then COLORS.Sell else COLORS.Disabled,
-			Text = `Sell {activeAmount}`,
+			BackgroundColor3 = COLORS.Sell,
+			Text = `Sell {math.min(activeAmount, held)}`,
 		})
 		sell.Parent = row
 		offset -= 80
 
 		sell.MouseButton1Click:Connect(function()
-			submit(GameConfig.TransactionActions.Sell, item.Id, activeAmount)
+			submit(GameConfig.TransactionActions.Sell, item.Id, math.min(activeAmount, held))
 		end)
 	end
 
@@ -491,11 +538,105 @@ local function buildRow(item, level: number, order: number): Frame
 	return row
 end
 
+--- One row per tradeable resource: buy with Gold, or sell back for less.
+local function buildTradeRow(resource, order: number): Frame
+	local trade = GameConfig.Shop.ResourceTrade
+	local held = player:GetAttribute(resource.Id) or 0
+
+	local row = Instance.new("Frame")
+	row.Name = resource.Id
+	row.Size = UDim2.new(1, -6, 0, 44)
+	row.BackgroundColor3 = COLORS.Row
+	row.BorderSizePixel = 0
+	row.LayoutOrder = order
+	corner(row, 6)
+
+	local swatch = Instance.new("Frame")
+	swatch.AnchorPoint = Vector2.new(0, 0.5)
+	swatch.Position = UDim2.fromOffset(10, 22)
+	swatch.Size = UDim2.fromOffset(18, 18)
+	swatch.BackgroundColor3 = resource.Color
+	swatch.BorderSizePixel = 0
+	swatch.Parent = row
+	corner(swatch, 4)
+
+	local name = label({
+		Position = UDim2.fromOffset(38, 4),
+		Size = UDim2.fromOffset(190, 20),
+		Text = resource.Name,
+		Font = Enum.Font.GothamMedium,
+	})
+	name.Parent = row
+
+	local detail = label({
+		Position = UDim2.fromOffset(38, 22),
+		Size = UDim2.fromOffset(300, 18),
+		Text = `Held: {held}   •   Buy {trade.BuyRate[resource.Id]}g   •   Sell {trade.SellRate[resource.Id]}g`,
+		TextColor3 = COLORS.Muted,
+		TextSize = 12,
+	})
+	detail.Parent = row
+
+	local offset = -10
+
+	if held > 0 then
+		local sell = button({
+			AnchorPoint = Vector2.new(1, 0.5),
+			Position = UDim2.new(1, offset, 0.5, 0),
+			Size = UDim2.fromOffset(74, 30),
+			BackgroundColor3 = COLORS.Sell,
+			Text = `Sell {math.min(activeAmount, held)}`,
+		})
+		sell.Parent = row
+		offset -= 80
+
+		sell.MouseButton1Click:Connect(function()
+			tradeSubmit(GameConfig.TransactionActions.Sell, resource.Id, math.min(activeAmount, held))
+		end)
+	end
+
+	local buy = button({
+		AnchorPoint = Vector2.new(1, 0.5),
+		Position = UDim2.new(1, offset, 0.5, 0),
+		Size = UDim2.fromOffset(74, 30),
+		BackgroundColor3 = COLORS.Buy,
+		Text = `Buy {activeAmount}`,
+	})
+	buy.Parent = row
+
+	buy.MouseButton1Click:Connect(function()
+		tradeSubmit(GameConfig.TransactionActions.Buy, resource.Id, activeAmount)
+	end)
+
+	return row
+end
+
 function renderCategory()
 	for _, child in gui.List:GetChildren() do
 		if child:IsA("Frame") then
 			child:Destroy()
 		end
+	end
+
+	if activeCategory == TRADE_TAB then
+		local order = 0
+
+		for _, resourceId in GameConfig.GetResourceIds() do
+			if GameConfig.Shop.ResourceTrade.BuyRate[resourceId] then
+				order += 1
+				buildTradeRow(GameConfig.Resources[resourceId], order).Parent = gui.List
+			end
+		end
+
+		for category, control in tabButtons do
+			control.BackgroundColor3 = if category == activeCategory then COLORS.Accent else COLORS.Disabled
+		end
+
+		for amount, control in amountButtons do
+			control.BackgroundColor3 = if amount == activeAmount then COLORS.Accent else COLORS.Disabled
+		end
+
+		return
 	end
 
 	local level = player:GetAttribute(ATTR.Level) or 1
@@ -533,10 +674,13 @@ end
 --------------------------------------------------------------------------------
 
 local function buildTabs()
-	for _, category in GameConfig.ItemCategories do
+	local tabs = table.clone(GameConfig.ItemCategories)
+	table.insert(tabs, TRADE_TAB)
+
+	for _, category in tabs do
 		local control = button({
 			Name = category,
-			Size = UDim2.fromOffset(112, 26),
+			Size = UDim2.fromOffset(94, 26),
 			BackgroundColor3 = COLORS.Disabled,
 			Text = category,
 			TextSize = 12,
@@ -644,6 +788,16 @@ end)
 
 -- Live updates: the panel re-renders from replicated state, never from a
 -- locally predicted outcome.
+for _, resourceId in GameConfig.GetResourceIds() do
+	if resourceId ~= GameConfig.PrimaryResource then
+		player:GetAttributeChangedSignal(resourceId):Connect(function()
+			if gui.Screen.Enabled then
+				renderCategory()
+			end
+		end)
+	end
+end
+
 player:GetAttributeChangedSignal(GameConfig.PrimaryResource):Connect(function()
 	refreshGold()
 

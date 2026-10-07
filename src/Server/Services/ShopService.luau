@@ -59,7 +59,7 @@ local ACTIONS = GameConfig.TransactionActions
 local ShopService = {}
 
 -- Checked against GameConfig.FrameworkVersion by Server.FrameworkGuard.
-ShopService.FrameworkVersion = 10
+ShopService.FrameworkVersion = 11
 
 ShopService._started = false
 ShopService._limiter = nil
@@ -68,6 +68,8 @@ ShopService._limiter = nil
 ShopService.ItemBought = Signal.new()
 --- (player, itemId, amount, totalEarned)
 ShopService.ItemSold = Signal.new()
+--- (player, action, resourceId, amount, goldDelta)
+ShopService.ResourceTraded = Signal.new()
 
 --------------------------------------------------------------------------------
 -- Helpers
@@ -212,6 +214,106 @@ function ShopService:_sell(player: Player, item, amount: unknown)
 		Amount = quantity,
 		Earned = totalEarned,
 		Held = PlayerDataService:GetItemCount(player, item.Id),
+		Gold = PlayerDataService:GetGold(player),
+	})
+end
+
+--------------------------------------------------------------------------------
+-- Resource trading
+--------------------------------------------------------------------------------
+
+--[[
+	Trades Gold for a construction resource, or back again.
+
+	This is what keeps the economy from being a dead end. Produce sells for
+	Gold, but building costs Wood and Stone and aging up costs Food - none of
+	which had any other income source. Without trading, a player short on Wood
+	is permanently stuck.
+
+	Rates are asymmetric by config assertion (buy > sell), so round-tripping a
+	resource always loses value and trading cannot become an arbitrage loop.
+	Gold cannot be traded for itself.
+
+	Both directions are atomic: the cost is taken through TrySpendResources and
+	only then is the other side credited, so a failed trade moves nothing.
+
+	Extra failure reasons: InvalidResource, NotTradeable, ResourceFull,
+	NotEnoughGold.
+]]
+function ShopService:TradeResource(player: Player, actionType: unknown, resourceId: unknown, amount: unknown)
+	local data = PlayerDataService:GetData(player)
+	if not data then
+		return failure("NoData")
+	end
+
+	if actionType ~= ACTIONS.Buy and actionType ~= ACTIONS.Sell then
+		return failure("InvalidAction")
+	end
+
+	local resource = GameConfig.GetResource(resourceId)
+	if not resource then
+		return failure("InvalidResource")
+	end
+
+	local trade = GameConfig.Shop.ResourceTrade
+	local rate = if actionType == ACTIONS.Buy then trade.BuyRate[resource.Id] else trade.SellRate[resource.Id]
+
+	-- Gold has no rate, which is how it is excluded from trading itself.
+	if not rate then
+		return failure("NotTradeable")
+	end
+
+	local quantity = sanitizeAmount(amount, trade.MaxTradeAmount)
+	if not quantity then
+		return failure("InvalidAmount")
+	end
+
+	local gold = GameConfig.PrimaryResource
+	local goldAmount = rate * quantity
+
+	if actionType == ACTIONS.Buy then
+		-- Refuse rather than clamp: clamping would take the Gold and deliver
+		-- less than was paid for.
+		local headroom = GameConfig.Economy.MaxResource - PlayerDataService:GetResource(player, resource.Id)
+
+		if headroom < quantity then
+			return failure("ResourceFull")
+		end
+
+		if not PlayerDataService:TrySpendResources(player, { [gold] = goldAmount }) then
+			return failure("NotEnoughGold", { Cost = goldAmount })
+		end
+
+		PlayerDataService:AddResource(player, resource.Id, quantity)
+		self.ResourceTraded:Fire(player, ACTIONS.Buy, resource.Id, quantity, -goldAmount)
+
+		return success({
+			Action = ACTIONS.Buy,
+			ResourceId = resource.Id,
+			Amount = quantity,
+			Spent = goldAmount,
+			Held = PlayerDataService:GetResource(player, resource.Id),
+			Gold = PlayerDataService:GetGold(player),
+		})
+	end
+
+	if GameConfig.Economy.MaxResource - PlayerDataService:GetGold(player) < goldAmount then
+		return failure("TreasuryFull")
+	end
+
+	if not PlayerDataService:TrySpendResources(player, { [resource.Id] = quantity }) then
+		return failure("NotEnoughResources")
+	end
+
+	PlayerDataService:AddResource(player, gold, goldAmount)
+	self.ResourceTraded:Fire(player, ACTIONS.Sell, resource.Id, quantity, goldAmount)
+
+	return success({
+		Action = ACTIONS.Sell,
+		ResourceId = resource.Id,
+		Amount = quantity,
+		Earned = goldAmount,
+		Held = PlayerDataService:GetResource(player, resource.Id),
 		Gold = PlayerDataService:GetGold(player),
 	})
 end
@@ -363,6 +465,18 @@ function ShopService:Start()
 
 	local processTransaction = Remotes.GetFunction(GameConfig.RemoteNames.ProcessTransaction)
 	local sellAll = Remotes.GetFunction(GameConfig.RemoteNames.SellAll)
+	local tradeResource = Remotes.GetFunction(GameConfig.RemoteNames.TradeResource)
+
+	tradeResource.OnServerInvoke = function(
+		player: Player,
+		actionType: unknown,
+		resourceId: unknown,
+		amount: unknown
+	)
+		return self:_handle(player, function()
+			return self:TradeResource(player, actionType, resourceId, amount)
+		end)
+	end
 
 	processTransaction.OnServerInvoke = function(
 		player: Player,

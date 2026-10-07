@@ -57,7 +57,7 @@ local CROP_CONTAINER = "Crop"
 
 local FarmService = {}
 
-FarmService.FrameworkVersion = 10
+FarmService.FrameworkVersion = 11
 
 FarmService._started = false
 FarmService._farms = {} :: { [Player]: any }

@@ -234,7 +234,7 @@ Still to add: watering, fertiliser and compost to accelerate growth; crop health
 that regenerates slowly and faster when tended; companion creatures and flying
 robots that tend crops automatically.
 
-### 2b. Combat plants ⬜
+### 2b. Combat plants ✅
 
 A gardening *and defence* simulator: alongside food crops, plants that fight.
 
@@ -287,16 +287,34 @@ Damage flavours: **fire**, **ice**, **poison**, **splash**.
 >   fireproof by accident. And effects are **session state**, deliberately not
 >   persisted: logging out cures poison, which is a mild exploit, but the
 >   alternative is logging in to find you drowned in a loading screen.
-> - **Splash damage** is a radius query. The placement radius has been removed,
->   so this is now the first real need for a spatial helper — worth extracting
->   one rather than writing the distance loop per ability.
-> - **"Tanks protect plants behind" is an enemy-targeting rule, not a plant
->   property.** In a lane game it falls out of the geometry; in 3D it has to be
->   explicit — enemies must prefer the nearest blocking entity over whatever is
->   closest in a straight line. That belongs in enemy target selection, and is
->   the one piece here with no existing foundation.
-> - Attack cadence should be **derived**: store `LastAttackAt` and compare
->   against a config cooldown, rather than running a timer per plant.
+> - ✅ **Spatial helper** extracted as `Shared.Spatial`: ground-plane distance,
+>   nearest, within-radius, splash falloff and blocking. Ties break by list
+>   position, because two equidistant targets would otherwise swap every tick
+>   and an attacker would stutter between them instead of killing either.
+> - ✅ **"Tanks protect plants behind"** is implemented as
+>   `Spatial.FindBlocking`: a raider picks an objective by priority, then
+>   fights whatever stands in the corridor between it and that objective.
+>
+>   Building it taught one thing the note above missed. For an **"Any"**
+>   raider the rule is free — the nearest target *is* the thing in the way, so
+>   nearest-first gives tanking for nothing. The blocking step only earns its
+>   keep for a **priority** raider: a Looter's objective is a Mill deep in the
+>   base, and without it the Looter walks straight past the Bulwark. That is
+>   the case worth testing, and the first version of the test did not cover it.
+> - ✅ **Attack cadence is derived** from `LastAttackAt`, and the rule is the
+>   OPPOSITE of status effects. A burn accrues a quantity, so a late tick must
+>   bill the time it missed. An attack is a discrete event, so a late tick must
+>   **not** fire the shots it missed — a stalled tower fires once and resumes,
+>   because banking arrows turns a lag spike into a volley. An attacker with
+>   nothing in range also does not spend its cooldown, so it fires the instant
+>   something walks in.
+>
+>   This forced a **second clock**, and the rule is now written down:
+>   `os.time()` for anything persisted or replicated (it is unix time, so the
+>   client and the next session agree what it means), `time()` for cadence that
+>   never leaves the server. `os.time()` is whole seconds, so a 1.2 second
+>   cooldown would round to 2 and become indistinguishable from a 2 second one
+>   — every attack profile would collapse into the same rate.
 
 ### 3. Animal husbandry 🟡
 
@@ -330,8 +348,16 @@ foundations, snapping and stability.
 
 ### 6. Defences, sieges and combat counters ⬜
 
-- Watch towers and automatic turrets, freely placeable
-- Enemy hordes that path to the base and attack buildings, crops and the player
+- ✅ Watch towers shoot: `Server.Combat.AttackService` is one registry and one
+  loop for every attacker. An attacker is an entity whose archetype names an
+  `AttackId`, so the tower gained its behaviour with no tower-specific code.
+- 🟡 Enemy hordes: raiders spawn, walk to the base and attack it
+  (`Server.Combat.RaidService`). **Waves are summoned with a Raid Horn, not
+  timed** — pacing and the cost of losing belong to the defeat loop below, and a
+  timer attacking players mid-build before any of that exists would be a worse
+  game rather than an earlier one. Movement is straight-line with no
+  pathfinding, so walls are hit rather than navigated; pathfinding belongs with
+  the defeat loop, where walls become a real decision.
 - Building health; buildings do **not** self-repair — the player or assigned
   villagers spend resources, with a **Repair All** button
 - Enemies drop XP orbs and gold scaled to their level
@@ -414,11 +440,16 @@ Troops act autonomously once deployed. Clash of Clans distinguishes:
 
 > **Architectural notes.**
 >
-> - Target priority is **data on the archetype**, not a branch in the AI:
->   `TargetPriority = "Any" | "Defence" | "Resource"`. The selector reads it.
-> - "Nearest building" needs the same spatial query as placement proximity and
->   splash damage. That is now three callers, so the shared spatial helper is
->   worth extracting before troops, not after.
+> - ✅ Target priority is **data on the archetype**, not a branch in the AI:
+>   `TargetPriority = "Any" | "Defence" | "Resource"`, matched against each
+>   target's `TargetTag`. Nothing in the selector knows what a Mill is. A
+>   priority that finds nothing falls back to anything, so a Resource-specific
+>   unit in a base with no Mills fights rather than standing idle.
+> - ✅ The shared spatial helper was extracted with combat plants, so troops
+>   inherit it. Factions came with it: `Player` and `Hostile` fight, `Neutral`
+>   fights nobody. Player-versus-player is deliberately absent — when it
+>   arrives it needs a raid or truce *relationship*, not a fourth faction,
+>   because "are these two at war" is a fact about the pair.
 > - **Housing space, troop stats and unlock tier are config**; only the
 >   behaviours (summon, heal, elemental hit) are code, and each should be a
 >   small named behaviour an archetype references.
@@ -508,6 +539,7 @@ Each step should be shippable and testable on its own.
 | **Shared damageable system** | Blocks buildings, sieges, repair and combat at once |
 | **Placement service** (prerequisites, free placement, overlap only) | The foundation for farms, drop-off points, defences and base building |
 | **Rework farming onto placement** | Farms become Mill-dependent structures; retires the fixed plot map |
+| **Combat plants, attacks and raiders** ✅ | Towers and plants shoot, raiders walk in and pick targets; the spatial helper three systems wanted |
 | **Build UX: sticky placement** ✅ | Hold a building and place a row of them; one shared buildability rule for the server and the menu |
 | **Grid snapping + plant density** ✅ | Farms tile like AoE's, and a square holds a stack so food stops eating the whole base |
 | **Status effects** ✅ | Burn/Chill/Poison; the layer combat plants, troops and towers all need before any of them can be interesting |

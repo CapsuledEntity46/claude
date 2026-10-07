@@ -131,7 +131,10 @@ end
 	A candidate blocks when it is both:
 
 	  * AHEAD - its projection onto the line toward the objective is positive
-	    and no further than the objective itself, and
+	    and STRICTLY nearer than the objective itself. Something standing at
+	    the objective's own distance is beside it, not in front of it, and
+	    treating it as a blocker means two things in the same place fight over
+	    which one is "in the way" by iteration order, and
 	  * IN THE CORRIDOR - its perpendicular offset from that line is within
 	    `corridorWidth`.
 
@@ -177,7 +180,7 @@ function Spatial.FindBlocking(
 			local sideZ = offsetZ - dirZ * along
 			local sideways = math.sqrt(sideX * sideX + sideZ * sideZ)
 
-			if along >= 0 and along <= objectiveDistance and sideways <= corridorWidth then
+			if along >= 0 and along < objectiveDistance and sideways <= corridorWidth then
 				if along < bestDistance then
 					best = candidate
 					bestDistance = along

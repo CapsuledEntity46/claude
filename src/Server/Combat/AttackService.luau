@@ -193,6 +193,41 @@ function AttackService.GetPosition(entity): Vector3?
 end
 
 --[[
+	A player's character as a candidate, or nil if they have no body.
+
+	THE PLAYER IS NOT A DAMAGEABLE ENTITY. Their health belongs to their
+	Humanoid, because the engine already owns it - respawning, falling damage
+	and the health bar over their head all go through it, and a second
+	authority for one number shows up as health flickering between two values.
+
+	So a player is a candidate with a Humanoid instead of an EntityId, and the
+	one place that difference matters is where damage is applied. The counter
+	table still prices the hit, using GameConfig.PlayerCombat.
+]]
+function AttackService.GetPlayerCandidate(player: Player)
+	local character = player.Character
+
+	if not character or not character.Parent then
+		return nil
+	end
+
+	local root = character.PrimaryPart
+	local humanoid = character:FindFirstChildOfClass("Humanoid")
+
+	if not root or not humanoid or humanoid.Health <= 0 then
+		return nil
+	end
+
+	return {
+		Humanoid = humanoid,
+		UserId = player.UserId,
+		Position = root.Position,
+		Radius = GameConfig.PlayerCombat.BodyRadius,
+		Tag = GameConfig.PlayerCombat.TargetTag,
+	}
+end
+
+--[[
 	Everything `attacker` could legally shoot, as Spatial candidates.
 
 	Built fresh each time rather than cached. The registry is small (tens of
@@ -229,6 +264,22 @@ function AttackService:GetCandidates(attacker)
 						})
 					end
 				end
+			end
+		end
+	end
+
+	--[[
+		Players are added last, so a tie between a player and a building
+		resolves to the building - Spatial breaks ties by list position.
+		Raiders preferring masonry over people is the kinder default, and it
+		keeps a raid readable as an attack on the base.
+	]]
+	if myFaction == GameConfig.Factions.Hostile then
+		for _, player in Players:GetPlayers() do
+			local candidate = AttackService.GetPlayerCandidate(player)
+
+			if candidate then
+				table.insert(candidates, candidate)
 			end
 		end
 	end
@@ -283,12 +334,35 @@ end
 	the farm it is defending, because friendly fire is a feature nobody asked
 	for and a very confusing bug to be on the receiving end of.
 ]]
-function AttackService:_resolveShot(attacker, entity, attack, targetId: number, origin: Vector3)
+function AttackService:_resolveShot(attacker, entity, attack, target, origin: Vector3)
 	local owner = nil
 
 	-- Attribution: a player-owned attacker's kills pay that player.
 	if entity.OwnerUserId and entity.OwnerUserId ~= 0 then
 		owner = Players:GetPlayerByUserId(entity.OwnerUserId)
+	end
+
+	--[[
+		A player, hit. The one place the two kinds of target differ.
+
+		Damage still goes through the counter table, so armour classes mean
+		the same thing for a person as for a wall - the Humanoid is only where
+		the number is stored.
+	]]
+	local function hitPlayer(candidate, fraction: number): number
+		local dealt = Combat.ComputeDamage(
+			attack.Damage * fraction,
+			attack.DamageType,
+			GameConfig.PlayerCombat.ArmourClass,
+			GameConfig.PlayerCombat.Armour
+		)
+
+		if dealt <= 0 or candidate.Humanoid.Health <= 0 then
+			return 0
+		end
+
+		candidate.Humanoid:TakeDamage(dealt)
+		return dealt
 	end
 
 	local function hit(id: number, fraction: number)
@@ -312,10 +386,16 @@ function AttackService:_resolveShot(attacker, entity, attack, targetId: number, 
 		return if result.Ok then result.Dealt else 0
 	end
 
-	local dealt = hit(targetId, 1)
+	local dealt = 0
+
+	if target.Humanoid then
+		dealt = hitPlayer(target, 1)
+	else
+		dealt = hit(target.EntityId, 1)
+	end
 
 	if attack.SplashRadius then
-		local epicentre = AttackService.GetPosition(DamageableService:Get(targetId) or {})
+		local epicentre = target.Position
 
 		--[[
 			Centred on the TARGET, not the attacker: a blast arrives where the
@@ -324,7 +404,11 @@ function AttackService:_resolveShot(attacker, entity, attack, targetId: number, 
 		]]
 		if epicentre then
 			for _, candidate in self:GetCandidates(attacker) do
-				if candidate.EntityId ~= targetId then
+				local isPrimary = if target.Humanoid
+					then candidate.Humanoid == target.Humanoid
+					else candidate.EntityId == target.EntityId
+
+				if not isPrimary then
 					local distance = Spatial.GroundDistance(epicentre, candidate.Position)
 
 					if distance <= attack.SplashRadius then
@@ -333,7 +417,12 @@ function AttackService:_resolveShot(attacker, entity, attack, targetId: number, 
 							attack.SplashRadius,
 							attack.SplashMinFraction or 1
 						)
-						dealt += hit(candidate.EntityId, fraction)
+
+						if candidate.Humanoid then
+							dealt += hitPlayer(candidate, fraction)
+						else
+							dealt += hit(candidate.EntityId, fraction)
+						end
 					end
 				end
 			end
@@ -397,8 +486,8 @@ function AttackService:Step()
 							model with it - and a tracer to nowhere is worse
 							than no tracer.
 						]]
-						local impact = AttackService.GetPosition(DamageableService:Get(target.EntityId) or {})
-						local dealt = self:_resolveShot(attacker, entity, attack, target.EntityId, origin)
+						local impact = target.Position
+						local dealt = self:_resolveShot(attacker, entity, attack, target, origin)
 
 						self.Fired:Fire(entityId, target.EntityId, attack, dealt, origin, impact)
 					end

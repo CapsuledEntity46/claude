@@ -183,6 +183,15 @@ function InstanceMethods.WaitForChild(self, name)
 	return child
 end
 
+function InstanceMethods.FindFirstChildOfClass(self, className)
+	for _, child in rawget(self, "_children") do
+		if rawget(child, "ClassName") == className then
+			return child
+		end
+	end
+	return nil
+end
+
 function InstanceMethods.GetChildren(self)
 	local list = {}
 	for _, child in rawget(self, "_children") do
@@ -218,6 +227,7 @@ end
 --- Crude class test. Enough for the checks the game code makes.
 local CLASS_PARENTS = {
 	Part = { "BasePart", "Instance" },
+	Humanoid = { "Instance" },
 	Model = { "PVInstance", "Instance" },
 	Player = { "Instance" },
 	Folder = { "Instance" },
@@ -374,6 +384,30 @@ function Instance.new(className)
 	elseif className == "Part" then
 		rawset(self, "Size", Vector3.new(4, 1, 2))
 		rawset(self, "Position", Vector3.new(0, 0, 0))
+	elseif className == "Humanoid" then
+		rawset(self, "Health", 100)
+		rawset(self, "MaxHealth", 100)
+		rawset(self, "Died", makeRbxSignal())
+
+		--[[
+			TakeDamage, as the engine behaves: clamped at zero, and firing
+			Died exactly once on the transition. Combat code relies on both -
+			a second Died would resolve a defeat twice.
+		]]
+		rawset(self, "TakeDamage", function(selfRef, amount)
+			local current = rawget(selfRef, "Health")
+
+			if current <= 0 then
+				return
+			end
+
+			local remaining = math.max(current - (tonumber(amount) or 0), 0)
+			rawset(selfRef, "Health", remaining)
+
+			if remaining <= 0 then
+				rawget(selfRef, "Died"):Fire()
+			end
+		end)
 	end
 
 	return self
@@ -778,6 +812,7 @@ StatusEffectServiceModule =
 	moduleScript("StatusEffectService", "src/Server/Combat/StatusEffectService.luau", CombatFolder)
 AttackServiceModule = moduleScript("AttackService", "src/Server/Combat/AttackService.luau", CombatFolder)
 RaidServiceModule = moduleScript("RaidService", "src/Server/Combat/RaidService.luau", CombatFolder)
+DefeatServiceModule = moduleScript("DefeatService", "src/Server/Combat/DefeatService.luau", CombatFolder)
 
 local moduleCache = {}
 

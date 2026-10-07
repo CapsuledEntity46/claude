@@ -1650,6 +1650,64 @@ GameConfig.Raids = {
 	EngageFraction = 0.85,
 }
 
+--[[
+	The player in combat.
+
+	NOT an archetype, deliberately. Everything in GameConfig.Archetypes is
+	registered with DamageableService, which owns its health - and a player's
+	health is owned by their Humanoid. Two authorities for one number is the
+	kind of bug that shows up as health flickering between two values.
+
+	So the engine keeps the player's health, and this supplies only what the
+	counter table needs to price a hit against them. A raider's Siege club is
+	poor against a person, which is why a raid is survivable in the open and
+	ruinous to a base.
+]]
+GameConfig.PlayerCombat = {
+	ArmourClass = "Light",
+	Armour = 0,
+	TargetTag = "Unit",
+	-- Half a character's width, for surface-distance reach.
+	BodyRadius = 2,
+}
+
+--[[
+	Defeat.
+
+	A Checkpoint SHATTERS rather than vanishing: losing it is a setback, not
+	the end. The player keeps fighting, and may rebuild the wreck once the
+	area is clear. Falling while it lies in ruins is the only thing that ends
+	a run, and even that offers a way back.
+
+	The two ways back cost different things on purpose, so the choice is real:
+	a Revenge Token, or a cut of the stores. A player with tokens spends one;
+	a player without pays in resources and feels the raid.
+]]
+GameConfig.Defeat = {
+	--[[
+		Hostiles within this of the wreck block the rebuild prompt.
+
+		"Survive and secure the area" from docs/ROADMAP.md: rebuilding under
+		fire would make the shattered state meaningless, because the player
+		would simply tank the raid and tap the prompt.
+	]]
+	SecureRadius = 55,
+
+	--[[
+		Fraction of each TREASURY resource the raiders carry off on a
+		surrender.
+
+		The personal purse is untouched, and that is the same rule as
+		everywhere else: the purse is filled by kills and loot alone and
+		nothing reaches into it. A defeat costs you the settlement's stores,
+		not what you are carrying.
+	]]
+	SurrenderLoss = 0.25,
+
+	-- Tokens one "fight on" costs.
+	FightOnTokenCost = 1,
+}
+
 GameConfig.Placement = {
 	--[[
 		The tile the world is built on, in studs.
@@ -1810,6 +1868,13 @@ GameConfig.Attributes = {
 	DataLoaded = "DataLoaded",
 	SelectedSeed = "SelectedSeed",
 	RevengeTokens = "RevengeTokens",
+
+	--[[
+		True while the player is down and has not chosen how to come back.
+		Replicated rather than announced, so the panel is correct for a client
+		that joins, rejoins or reconnects mid-defeat.
+	]]
+	Defeated = "Defeated",
 	TargetFarm = "TargetFarm", -- instance id a boost purchase applies to
 }
 
@@ -1869,6 +1934,13 @@ GameConfig.StructureCountsFolderName = "StructureCounts"
 
 GameConfig.RemoteNames = {
 	SelectSeed = "SelectSeed",
+
+	--[[
+		How a defeated player answers. A function, not an event: spending a
+		Revenge Token can fail (none left) and the player has to be told,
+		rather than left looking at a panel that did nothing.
+	]]
+	ResolveDefeat = "ResolveDefeat",
 	UseBoost = "UseBoost",
 	SelectFarm = "SelectFarm",
 
@@ -2422,6 +2494,47 @@ do
 	)
 end
 
+do
+	local defeat = GameConfig.Defeat
+
+	assert(defeat.SecureRadius > 0, "Defeat.SecureRadius must be positive")
+
+	--[[
+		A loss of zero makes surrender free, and the choice between it and a
+		Revenge Token stops being a choice. A loss of one empties the
+		treasury, which is the kind of punishment players quit over.
+	]]
+	assert(
+		defeat.SurrenderLoss > 0 and defeat.SurrenderLoss < 1,
+		"Defeat.SurrenderLoss must be in (0, 1): at 0 surrender is free, at 1 it is total"
+	)
+
+	assert(defeat.FightOnTokenCost >= 1, "fighting on must cost at least one token")
+
+	assert(
+		table.find(GameConfig.Combat.ArmourClasses, GameConfig.PlayerCombat.ArmourClass) ~= nil,
+		`PlayerCombat has unknown armour class {tostring(GameConfig.PlayerCombat.ArmourClass)}`
+	)
+	assert(
+		table.find(GameConfig.TargetTags, GameConfig.PlayerCombat.TargetTag) ~= nil,
+		`PlayerCombat has unknown TargetTag {tostring(GameConfig.PlayerCombat.TargetTag)}`
+	)
+
+	--[[
+		Something must shatter, or there is no shattered state to be caught in
+		and the whole defeat loop is unreachable.
+	]]
+	local shatters = false
+
+	for _, archetype in GameConfig.Archetypes do
+		if archetype.DestroyBehaviour == "Shatter" then
+			shatters = true
+		end
+	end
+
+	assert(shatters, "no archetype shatters, so a player can never be caught without an anchor")
+end
+
 for index, age in GameConfig.Ages do
 	assert(age.Index == index, `age {index} has a mismatched Index field`)
 
@@ -2524,6 +2637,8 @@ table.freeze(GameConfig.StatusEffectRules)
 table.freeze(GameConfig.PlantSizes)
 table.freeze(GameConfig.Factions)
 table.freeze(GameConfig.Raids)
+table.freeze(GameConfig.Defeat)
+table.freeze(GameConfig.PlayerCombat)
 
 return GameConfig
 

@@ -73,6 +73,7 @@ local DamageableService = requireServer("Combat.DamageableService")
 local StatusEffectService = requireServer("Combat.StatusEffectService")
 local AttackService = requireServer("Combat.AttackService")
 local RaidService = requireServer("Combat.RaidService")
+local DefeatService = requireServer("Combat.DefeatService")
 local PlayerDataService = requireServer("Services.PlayerDataService")
 local FarmService = requireServer("Services.FarmService")
 local ShopService = requireServer("Services.ShopService")
@@ -125,6 +126,7 @@ if guardModule then
 		StatusEffectService = StatusEffectService,
 		AttackService = AttackService,
 		RaidService = RaidService,
+		DefeatService = DefeatService,
 		TrainingGround = TrainingGround,
 		PlayerDataService = PlayerDataService,
 		FarmService = FarmService,
@@ -154,6 +156,12 @@ RaidService:Start()
 FarmService:Start()
 PlacementService:Start()
 ShopService:Start()
+
+--[[
+	After placement, because it looks up the player's Checkpoint through it,
+	and after RaidService, because calling off a raid is how a defeat ends.
+]]
+DefeatService:Start()
 
 -- Started last: its receipt handlers grant through the services above.
 MarketplaceService:Start()
@@ -186,6 +194,18 @@ end)
 
 RaidService.WaveCleared:Connect(function(userId: number)
 	print(`[Raid] {userId} cleared the wave`)
+end)
+
+DefeatService.AnchorLost:Connect(function(player: Player)
+	print(`[Defeat] {player.Name}'s Checkpoint has shattered`)
+end)
+
+DefeatService.Defeated:Connect(function(player: Player)
+	print(`[Defeat] {player.Name} fell without an anchor`)
+end)
+
+DefeatService.Resolved:Connect(function(player: Player, choice: string)
+	print(`[Defeat] {player.Name} chose {choice}`)
 end)
 
 -- << Register additional services here as later steps are added >>

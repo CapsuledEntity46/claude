@@ -38,6 +38,12 @@ local function giveCharacter(player, position)
 	root.Position = position
 	root.Parent = character
 
+	-- A Humanoid, because the player's health lives there rather than in the
+	-- damageable registry. See GameConfig.PlayerCombat.
+	local humanoid = Instance.new("Humanoid")
+	humanoid.Name = "Humanoid"
+	humanoid.Parent = character
+
 	character.PrimaryPart = root
 	character.Parent = WorkspaceService
 	player.Character = character
@@ -4325,14 +4331,29 @@ local function runTests()
 			checkEqual(RaidService:CountRaiders(farmer.UserId), 0, "and none are left")
 			listener:Disconnect()
 
-			-- A base with nothing standing cannot be raided.
+			--[[
+				A base with nothing standing is STILL raidable, because the
+				player is a target in their own right - a raid is something to
+				survive, not something to stand inside and watch.
+			]]
 			DamageableService:Unregister(core)
 			DamageableService:Unregister(tower)
 			DamageableService:Unregister(mill)
+
+			local personal = RaidService:SummonWave(farmer)
+			checkEqual(personal.Ok, true, "a player with no buildings left can still be raided in person")
+
+			for entityId in RaidService:GetRaiders() do
+				DamageableService:ApplyDamage(entityId, 999999, "Siege", nil)
+			end
+
+			-- Only with no base AND no body is there nothing to come for.
+			farmer.Character.Parent = nil
+			farmer.Character = nil
 			checkEqual(
 				RaidService:SummonWave(farmer).Reason,
 				"NothingToRaid",
-				"and there is no raiding a player who owns nothing"
+				"but a player with neither a base nor a body has nothing to raid"
 			)
 
 			PlayersService.PlayerRemoving:Fire(farmer)

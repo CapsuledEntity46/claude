@@ -164,6 +164,24 @@ function RaidService:_targetsOf(userId: number)
 		end
 	end
 
+	--[[
+		And the player themselves, so a raid is something to survive rather
+		than something to stand inside and watch.
+
+		Added last, so Spatial's list-position tie-break prefers the base: a
+		raider walks past you to hit the Mill, which reads as a raid rather
+		than as a vendetta.
+	]]
+	local owner = Players:GetPlayerByUserId(userId)
+
+	if owner then
+		local candidate = AttackService.GetPlayerCandidate(owner)
+
+		if candidate then
+			table.insert(candidates, candidate)
+		end
+	end
+
 	return candidates
 end
 
@@ -345,6 +363,35 @@ end
 
 function RaidService:GetRaiders()
 	return self._raiders
+end
+
+--[[
+	Calls off a player's raid, removing every raider still standing.
+
+	Used by the defeat loop: whichever way a player chooses to come back, they
+	need a moment to stand up, and raiders still swinging would make the
+	choice pointless. The raiders simply leave - they are not killed, so no
+	rewards are paid for a fight the player lost.
+]]
+function RaidService:ClearRaid(player: Player): number
+	local cleared = 0
+
+	-- Collected first: _forget mutates the table it would be iterating.
+	local doomed = {}
+
+	for entityId, raider in self._raiders do
+		if raider.TargetUserId == player.UserId then
+			table.insert(doomed, entityId)
+		end
+	end
+
+	for _, entityId in doomed do
+		DamageableService:Unregister(entityId)
+		self:_forget(entityId)
+		cleared += 1
+	end
+
+	return cleared
 end
 
 --[[

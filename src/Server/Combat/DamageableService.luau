@@ -497,14 +497,37 @@ function DamageableService:Rebuild(entityId: number, payer: Player): { [string]:
 		return { Ok = false, Reason = "NotEnoughResources", Cost = cost }
 	end
 
+	self:Restore(entityId)
+
+	return { Ok = true, Cost = cost }
+end
+
+--[[
+	Un-shatters an entity and returns it to full health, FREE.
+
+	Split out from Rebuild because the defeat loop has already charged for
+	this, in Revenge Tokens or in a cut of the treasury. Routing that through
+	Rebuild would bill a player twice for one recovery - once for the defeat
+	and again for the masonry.
+
+	Ownership is not checked here: the caller has already decided this should
+	happen. Rebuild is the one that asks whether the payer is entitled.
+]]
+function DamageableService:Restore(entityId: number): boolean
+	local entity = self._entities[entityId]
+
+	if not entity then
+		return false
+	end
+
 	entity.Shattered = false
-	entity.State.Health = archetype.MaxHealth
+	entity.State.Health = entity.Archetype.MaxHealth
 	entity.State.DamagedAt = os.time()
 
 	commit(self, entity)
 	self.Rebuilt:Fire(entityId, entity)
 
-	return { Ok = true, Cost = cost }
+	return true
 end
 
 --------------------------------------------------------------------------------

@@ -54,6 +54,7 @@ MODULE_PATHS = [
     "src/Server/Combat/StatusEffectService.luau",
     "src/Server/Combat/AttackService.luau",
     "src/Server/Combat/RaidService.luau",
+    "src/Server/Combat/DefeatService.luau",
     "src/Server/Services/ShopService.luau",
     "src/Server/Services/MarketplaceService.luau",
 ]

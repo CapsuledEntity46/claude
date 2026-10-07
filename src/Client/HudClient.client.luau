@@ -177,7 +177,7 @@ screen.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 local strip = Instance.new("Frame")
 strip.Name = "Stats"
 strip.Position = UDim2.fromOffset(12, 12)
-strip.Size = UDim2.fromOffset(238, 164)
+strip.Size = UDim2.fromOffset(238, 204)
 strip.BackgroundColor3 = COLORS.Panel
 strip.BackgroundTransparency = 0.15
 strip.BorderSizePixel = 0
@@ -253,6 +253,26 @@ local xpLabel = label({
 })
 xpLabel.Parent = strip
 
+--[[
+	Advancing an age lives in the STATS card, beside the age it changes,
+	rather than in the action bar.
+
+	It began in the bar and did not fit: three buttons totalling 396 pixels in
+	a 230 pixel row, so the layout clipped "Inventory" down to "Inv" and the
+	cost ran off the edge. Its label has to carry the cost - a button that
+	says only "Advance Age" and then refuses is worse than no button - and a
+	label that long belongs where there is room for it.
+]]
+local ageButton = button({
+	Name = "AgeButton",
+	Position = UDim2.fromOffset(12, 170),
+	Size = UDim2.fromOffset(214, 26),
+	BackgroundColor3 = COLORS.Accent,
+	Text = "Advance Age",
+})
+ageButton.TextSize = 12
+ageButton.Parent = strip
+
 -- Buttons, bottom-left
 local bar = Instance.new("Frame")
 bar.Name = "Buttons"
@@ -282,20 +302,6 @@ local storeButton = button({
 	Text = "Store",
 })
 storeButton.Parent = bar
-
---[[
-	Advancing an age had no way to be asked for at all: the server could do it
-	and nothing could request it, so the entire Age system was unreachable in
-	play. The button's label carries the cost, because a button that says only
-	"Advance Age" and then refuses is worse than no button.
-]]
-local ageButton = button({
-	Name = "AgeButton",
-	Size = UDim2.fromOffset(188, 34),
-	BackgroundColor3 = COLORS.Accent,
-	Text = "Advance Age",
-})
-ageButton.Parent = bar
 
 local inventoryPanel, inventoryList = listPanel("Inventory", UDim2.fromOffset(460, 420))
 inventoryPanel.Parent = screen

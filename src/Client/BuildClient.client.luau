@@ -28,7 +28,7 @@ local Buildability = require(Shared.Buildability)
 local GameConfig = require(Shared.GameConfig)
 local Remotes = require(Shared.Remotes)
 
-local EXPECTED_FRAMEWORK = 13
+local EXPECTED_FRAMEWORK = 14
 
 local player = Players.LocalPlayer
 local ATTR = GameConfig.Attributes

@@ -94,6 +94,57 @@ function Spatial.FindNearest(
 	return best, math.sqrt(bestDistance)
 end
 
+--[[
+	Distance from `origin` to a candidate's SURFACE rather than its centre.
+
+	A candidate may carry a `Radius` - half its footprint. Without it, a nine
+	stud club could not reach a sixteen stud wide building at all without the
+	attacker standing inside the walls, because centre-to-centre distance to
+	anything large is dominated by the thing's own size. Range means "how far
+	I can reach past myself", not "how close my middle gets to your middle".
+
+	Clamped at zero, so standing inside something reads as touching it.
+]]
+function Spatial.SurfaceDistance(origin: Vector3, candidate: Candidate): number
+	local radius = tonumber((candidate :: any).Radius) or 0
+	return math.max(Spatial.GroundDistance(origin, candidate.Position) - radius, 0)
+end
+
+--[[
+	The nearest candidate whose SURFACE is within `reach`, by surface distance.
+
+	The separate function rather than a flag on FindNearest: the two answer
+	different questions, and a caller that wants one and gets the other is a
+	bug that only shows up against large targets.
+]]
+function Spatial.FindNearestInReach(
+	origin: Vector3,
+	candidates: { Candidate },
+	reach: number,
+	accept: ((Candidate) -> boolean)?
+): (Candidate?, number)
+	local best = nil
+	local bestDistance = math.huge
+
+	for _, candidate in candidates do
+		if candidate.Position and (accept == nil or accept(candidate)) then
+			local distance = Spatial.SurfaceDistance(origin, candidate)
+
+			-- Strictly less than, so the first of equals wins; see FindNearest.
+			if distance <= reach and distance < bestDistance then
+				best = candidate
+				bestDistance = distance
+			end
+		end
+	end
+
+	if not best then
+		return nil, math.huge
+	end
+
+	return best, bestDistance
+end
+
 --- Every candidate within `radius`, in list order.
 function Spatial.FindWithin(
 	origin: Vector3,

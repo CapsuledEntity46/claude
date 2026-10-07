@@ -64,6 +64,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Shared = ReplicatedStorage:WaitForChild("Shared")
 local Combat = require(Shared.Combat)
 local GameConfig = require(Shared.GameConfig)
+local Remotes = require(Shared.Remotes)
 local Signal = require(Shared.Signal)
 local Spatial = require(Shared.Spatial)
 
@@ -72,13 +73,13 @@ local StatusEffectService = require(script.Parent.StatusEffectService)
 
 local AttackService = {}
 
-AttackService.FrameworkVersion = 13
+AttackService.FrameworkVersion = 14
 
 AttackService._started = false
 --- entityId -> { EntityId, LastAttackAt, Suspended }
 AttackService._attackers = {}
 
---- (attackerId, targetId, attack, dealt) - one per shot, for client effects
+--- (attackerId, targetId, attack, dealt, origin, impact) - one per shot
 AttackService.Fired = Signal.new()
 
 --------------------------------------------------------------------------------
@@ -158,6 +159,26 @@ end
 -- Targets
 --------------------------------------------------------------------------------
 
+--[[
+	Half an entity's footprint on the ground plane.
+
+	Used so range is measured to a target's surface. Without it a nine stud
+	club could not reach a sixteen stud wide Town Center without the raider
+	standing inside the walls - which is exactly what it did.
+]]
+function AttackService.GetBodyRadius(entity): number
+	local model = entity.Model
+	local part = if model then model.PrimaryPart else nil
+
+	if not part then
+		return 0
+	end
+
+	-- The larger horizontal half-extent: a conservative circle around a
+	-- rectangular footprint, so nothing is unreachable from any angle.
+	return math.max(part.Size.X, part.Size.Z) / 2
+end
+
 --- Where an entity is, or nil if it has no body to shoot at.
 function AttackService.GetPosition(entity): Vector3?
 	local model = entity.Model
@@ -203,6 +224,7 @@ function AttackService:GetCandidates(attacker)
 						table.insert(candidates, {
 							EntityId = targetId,
 							Position = position,
+							Radius = AttackService.GetBodyRadius(target),
 							Tag = target.Archetype.TargetTag,
 						})
 					end
@@ -231,8 +253,12 @@ function AttackService.SelectTarget(origin: Vector3, candidates, priority: strin
 		preferred = "Resource"
 	end
 
+	--[[
+		Measured to the target's SURFACE, so reach means what it says against
+		a building as well as against a raider.
+	]]
 	if preferred then
-		local target = Spatial.FindNearest(origin, candidates, range, function(candidate)
+		local target = Spatial.FindNearestInReach(origin, candidates, range, function(candidate)
 			return candidate.Tag == preferred
 		end)
 
@@ -241,7 +267,7 @@ function AttackService.SelectTarget(origin: Vector3, candidates, priority: strin
 		end
 	end
 
-	return Spatial.FindNearest(origin, candidates, range)
+	return Spatial.FindNearestInReach(origin, candidates, range)
 end
 
 --------------------------------------------------------------------------------
@@ -365,8 +391,16 @@ function AttackService:Step()
 						]]
 						attacker.LastAttackAt = now
 
+						--[[
+							The impact point is read BEFORE the shot, because
+							resolving it can destroy the target and take its
+							model with it - and a tracer to nowhere is worse
+							than no tracer.
+						]]
+						local impact = AttackService.GetPosition(DamageableService:Get(target.EntityId) or {})
 						local dealt = self:_resolveShot(attacker, entity, attack, target.EntityId, origin)
-						self.Fired:Fire(entityId, target.EntityId, attack, dealt)
+
+						self.Fired:Fire(entityId, target.EntityId, attack, dealt, origin, impact)
 					end
 				end
 			end
@@ -410,6 +444,23 @@ function AttackService:Start()
 	-- A rebuilt one starts shooting again.
 	DamageableService.Rebuilt:Connect(function(entityId: number)
 		self:Register(entityId)
+	end)
+
+	--[[
+		Shots are broadcast to everyone, not just the owner: a raid is a
+		spectacle, and a neighbour watching your towers work is the point of
+		building them where they can be seen.
+
+		Fire-and-forget on purpose. A dropped effect costs a missing tracer
+		and nothing else, because the remote carries no state - every number
+		that matters is already replicated as an attribute.
+	]]
+	local effect = Remotes.GetEvent(GameConfig.RemoteNames.CombatEffect)
+
+	self.Fired:Connect(function(_attackerId, _targetId, attack, _dealt, origin, impact)
+		if origin and impact then
+			effect:FireAllClients(attack.Id, origin, impact)
+		end
 	end)
 
 	task.spawn(function()

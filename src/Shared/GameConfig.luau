@@ -85,7 +85,7 @@ local GameConfig = {}
 	tree fails with a message naming the stale module instead of a nil-index
 	deep inside unrelated code.
 ]]
-GameConfig.FrameworkVersion = 13
+GameConfig.FrameworkVersion = 14
 
 --------------------------------------------------------------------------------
 -- Persistence
@@ -1640,6 +1640,14 @@ GameConfig.Raids = {
 		about how fast a horde crosses the field.
 	]]
 	MoveTickInterval = 0.25,
+
+	--[[
+		How far inside its reach a raider closes before stopping, as a
+		fraction. Anything less than 1 leaves a margin, and the margin is what
+		stops a raider parking a hair outside its own attack range - where its
+		next step is zero and it would stand there forever.
+	]]
+	EngageFraction = 0.85,
 }
 
 GameConfig.Placement = {
@@ -1863,6 +1871,20 @@ GameConfig.RemoteNames = {
 	SelectSeed = "SelectSeed",
 	UseBoost = "UseBoost",
 	SelectFarm = "SelectFarm",
+
+	--[[
+		Server -> client, fire and forget: a shot was taken, draw it.
+
+		Combat is otherwise completely silent to look at. Health and status
+		effects are derived from replicated attributes and need no traffic, but
+		a shot is an EVENT with no state behind it - once it has landed there
+		is nothing left on either entity that says it happened, so there is
+		nothing for a client to derive it from.
+	]]
+	CombatEffect = "CombatEffect",
+
+	-- Client asks to advance an age. The server owns the cost and the check.
+	AdvanceAge = "AdvanceAge",
 
 	-- RemoteFunctions
 	ProcessTransaction = "ProcessTransaction",
@@ -2387,6 +2409,11 @@ do
 	for _, attack in GameConfig.Attacks do
 		longestRange = math.max(longestRange, attack.Range)
 	end
+
+	assert(
+		GameConfig.Raids.EngageFraction > 0 and GameConfig.Raids.EngageFraction < 1,
+		"Raids.EngageFraction must be in (0, 1): at 1 a raider can park outside its own reach"
+	)
 
 	assert(
 		GameConfig.Raids.SpawnDistance > longestRange,

@@ -71,7 +71,7 @@ local StatusEffectService = require(script.Parent.StatusEffectService)
 
 local RaidService = {}
 
-RaidService.FrameworkVersion = 13
+RaidService.FrameworkVersion = 14
 
 RaidService._started = false
 --- entityId -> { EntityId, Model, OwnerUserId, TargetUserId, LastMoveAt }
@@ -157,6 +157,7 @@ function RaidService:_targetsOf(userId: number)
 				table.insert(candidates, {
 					EntityId = entityId,
 					Position = position,
+					Radius = AttackService.GetBodyRadius(entity),
 					Tag = entity.Archetype.TargetTag,
 				})
 			end
@@ -254,8 +255,21 @@ function RaidService:_move(now: number)
 		local attack = GameConfig.GetAttack(entity.Archetype.AttackId)
 		local reach = if attack then attack.Range else 0
 
-		-- Already close enough; AttackService does the rest.
-		if distance <= reach then
+		--[[
+			How far it still has to walk, measured to the target's SURFACE and
+			stopping comfortably INSIDE reach rather than exactly on it.
+
+			Both halves matter. Centre-to-centre put raiders inside buildings,
+			because a nine stud club against a sixteen stud wide Town Center
+			meant closing to nine studs of its middle. And stopping exactly at
+			reach was a deadlock waiting to happen: a hair of floating point
+			error leaves the raider a fraction outside attack range, where its
+			step is zero and it will never move again or fire again.
+		]]
+		local surfaceDistance = math.max(distance - (mark.Radius or 0), 0)
+		local stopAt = reach * GameConfig.Raids.EngageFraction
+
+		if surfaceDistance <= stopAt then
 			continue
 		end
 
@@ -277,9 +291,9 @@ function RaidService:_move(now: number)
 			continue
 		end
 
-		-- Never overshoot into the target, or a raider would oscillate across
-		-- it and never settle inside its own reach.
-		local step = math.min(speed * elapsed, math.max(distance - reach, 0))
+		-- Never overshoot, or a raider would oscillate across its target and
+		-- never settle inside its own reach.
+		local step = math.min(speed * elapsed, surfaceDistance - stopAt)
 
 		local direction = Vector3.new(
 			mark.Position.X - body.Position.X,

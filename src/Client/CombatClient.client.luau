@@ -27,7 +27,7 @@ local Combat = require(Shared.Combat)
 local GameConfig = require(Shared.GameConfig)
 local StatusEffects = require(Shared.StatusEffects)
 
-local EXPECTED_FRAMEWORK = 13
+local EXPECTED_FRAMEWORK = 14
 
 if GameConfig.FrameworkVersion ~= EXPECTED_FRAMEWORK then
 	warn(
@@ -50,7 +50,21 @@ local COLORS = {
 --- How far away a bar is still drawn. Past this it is pixels of noise.
 local VIEW_DISTANCE = 220
 
---- model -> overlay
+--[[
+	model -> { Model, Overlay? }
+
+	The overlay is built LAZILY, on the first frame the model has a
+	PrimaryPart, and that is the whole reason this is a record rather than
+	just the overlay.
+
+	PrimaryPart is a reference to a CHILD, so the client cannot resolve it
+	until that child has itself replicated - which is routinely after the
+	model and its attributes have arrived. An earlier version built the
+	overlay once on discovery and gave up if PrimaryPart was missing, with
+	nothing to retry it. The result was no health bars and no status pips
+	anywhere in the game, which is a very quiet way for a combat system to
+	fail.
+]]
 local tracked = {}
 
 --------------------------------------------------------------------------------
@@ -161,24 +175,21 @@ local function track(model: Instance)
 		return
 	end
 
-	local overlay = buildOverlay(model)
-
-	if overlay then
-		tracked[model] = overlay
-	end
+	-- Recorded now, drawn when it has a body to draw over.
+	tracked[model] = { Model = model, Overlay = nil }
 end
 
 local function untrack(model: Instance)
-	local overlay = tracked[model]
+	local record = tracked[model]
 
-	if not overlay then
+	if not record then
 		return
 	end
 
 	tracked[model] = nil
 
-	if overlay.Billboard then
-		overlay.Billboard:Destroy()
+	if record.Overlay and record.Overlay.Billboard then
+		record.Overlay.Billboard:Destroy()
 	end
 end
 
@@ -303,8 +314,23 @@ RunService.RenderStepped:Connect(function()
 	local cameraPosition = camera.CFrame.Position
 	local stale = nil
 
-	for model, overlay in tracked do
-		if not model.Parent or not updateOverlay(overlay, now, cameraPosition) then
+	for model, record in tracked do
+		if not model.Parent then
+			stale = stale or {}
+			table.insert(stale, model)
+			continue
+		end
+
+		--[[
+			First frame this model has a body: draw its overlay. Retried every
+			frame until it does, which costs one nil check and removes every
+			assumption about the order properties replicate in.
+		]]
+		if not record.Overlay then
+			record.Overlay = buildOverlay(model)
+		end
+
+		if record.Overlay and not updateOverlay(record.Overlay, now, cameraPosition) then
 			stale = stale or {}
 			table.insert(stale, model)
 		end

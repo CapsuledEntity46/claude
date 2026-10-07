@@ -29,7 +29,7 @@ local Shared = ReplicatedStorage:WaitForChild("Shared")
 local GameConfig = require(Shared.GameConfig)
 local Remotes = require(Shared.Remotes)
 
-local EXPECTED_FRAMEWORK = 13
+local EXPECTED_FRAMEWORK = 14
 
 local player = Players.LocalPlayer
 local ATTR = GameConfig.Attributes
@@ -283,6 +283,20 @@ local storeButton = button({
 })
 storeButton.Parent = bar
 
+--[[
+	Advancing an age had no way to be asked for at all: the server could do it
+	and nothing could request it, so the entire Age system was unreachable in
+	play. The button's label carries the cost, because a button that says only
+	"Advance Age" and then refuses is worse than no button.
+]]
+local ageButton = button({
+	Name = "AgeButton",
+	Size = UDim2.fromOffset(188, 34),
+	BackgroundColor3 = COLORS.Accent,
+	Text = "Advance Age",
+})
+ageButton.Parent = bar
+
 local inventoryPanel, inventoryList = listPanel("Inventory", UDim2.fromOffset(460, 420))
 inventoryPanel.Parent = screen
 
@@ -295,14 +309,57 @@ screen.Parent = player:WaitForChild("PlayerGui")
 -- Stats
 --------------------------------------------------------------------------------
 
+--[[
+	Shows the next age and what it costs, or greys out with the reason.
+
+	The cost comes from GameConfig, which both sides read, so the label cannot
+	drift from what the server will actually charge. Affordability is only a
+	prediction - the server spends the resources and decides - but predicting
+	it here means the common refusal never has to happen.
+]]
+local function refreshAgeButton()
+	local age = player:GetAttribute(ATTR.Age) or 1
+	local nextAge = GameConfig.GetAge(age + 1)
+
+	if not nextAge then
+		ageButton.Text = "Imperial Age"
+		ageButton.BackgroundColor3 = COLORS.Disabled
+		ageButton.Active = false
+		return
+	end
+
+	local cost = GameConfig.GetAdvanceCost(age) or {}
+	local parts = {}
+	local affordable = true
+
+	-- Resource order from the directory, so the cost always reads the same way.
+	for _, resourceId in GameConfig.GetResourceIds() do
+		local needed = cost[resourceId]
+
+		if needed then
+			table.insert(parts, `{comma(needed)} {resourceId}`)
+
+			if (player:GetAttribute(resourceId) or 0) < needed then
+				affordable = false
+			end
+		end
+	end
+
+	ageButton.Text = `{nextAge.Name}  ({table.concat(parts, "  ")})`
+	ageButton.BackgroundColor3 = if affordable then COLORS.Buy else COLORS.Disabled
+	ageButton.Active = affordable
+end
+
 local function refreshStats()
 	for resourceId, control in resourceLabels do
 		local definition = GameConfig.Resources[resourceId]
 		control.Text = `{definition.Name}  {comma(player:GetAttribute(resourceId) or 0)}`
 	end
 
-	local ageName = player:GetAttribute(ATTR.AgeName) or "Dark Age"
+	local ageName = player:GetAttribute(ATTR.AgeName) or "Stone Age"
 	purseLabel.Text = `Purse {comma(player:GetAttribute(ATTR.InventoryGold) or 0)}   •   {ageName}`
+
+	refreshAgeButton()
 
 	local level = player:GetAttribute(ATTR.Level) or 1
 	local xp = player:GetAttribute(ATTR.XP) or 0
@@ -555,7 +612,56 @@ storeButton.MouseButton1Click:Connect(function()
 	refreshStore()
 end)
 
-local watched = { ATTR.Level, ATTR.XP, ATTR.XPToNextLevel, ATTR.RevengeTokens, ATTR.InventoryGold, ATTR.AgeName }
+--[[
+	Advancing an age. The client sends nothing but the request: cost,
+	availability and the spend all belong to the server, and the greyed-out
+	state above is only a prediction of its answer.
+]]
+local advancing = false
+
+ageButton.MouseButton1Click:Connect(function()
+	if advancing then
+		return
+	end
+
+	local nextAge = GameConfig.GetAge((player:GetAttribute(ATTR.Age) or 1) + 1)
+
+	if not nextAge then
+		return
+	end
+
+	advancing = true
+	local ok, result = pcall(function()
+		return Remotes.GetFunction(GameConfig.RemoteNames.AdvanceAge):InvokeServer()
+	end)
+	advancing = false
+
+	if not ok or type(result) ~= "table" then
+		ageButton.Text = "Advance failed"
+		return
+	end
+
+	if not result.Ok then
+		-- Shown on the button itself, which is where the player is looking.
+		ageButton.Text = if result.Reason == "NotEnoughResources"
+			then `Need more for {nextAge.Name}`
+			else tostring(result.Reason)
+
+		-- Restored once anything changes, which the attribute watchers do.
+		task.delay(2.5, refreshAgeButton)
+	end
+end)
+
+-- Age itself, so the button updates the moment the server agrees.
+local watched = {
+	ATTR.Level,
+	ATTR.XP,
+	ATTR.XPToNextLevel,
+	ATTR.RevengeTokens,
+	ATTR.InventoryGold,
+	ATTR.Age,
+	ATTR.AgeName,
+}
 
 for resourceId in GameConfig.Resources do
 	table.insert(watched, resourceId)

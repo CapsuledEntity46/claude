@@ -44,6 +44,8 @@ local RunService = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Shared = ReplicatedStorage:WaitForChild("Shared")
 local GameConfig = require(Shared.GameConfig)
+local RateLimiter = require(Shared.RateLimiter)
+local Remotes = require(Shared.Remotes)
 local Signal = require(Shared.Signal)
 local TableUtil = require(Shared.TableUtil)
 
@@ -58,7 +60,7 @@ local KICK_LOCK_LOST = "Your data is active on another server. Please rejoin."
 local PlayerDataService = {}
 
 -- Checked against GameConfig.FrameworkVersion by Server.FrameworkGuard.
-PlayerDataService.FrameworkVersion = 13
+PlayerDataService.FrameworkVersion = 14
 
 PlayerDataService._started = false
 PlayerDataService._profiles = {} :: { [Player]: any }
@@ -269,6 +271,12 @@ function PlayerDataService:_onPlayerRemoving(player: Player)
 	end
 
 	self._profiles[player] = nil
+
+	-- Or the limiter would hold a bucket per player who ever joined.
+	if self._ageLimiter then
+		self._ageLimiter:Forget(player)
+	end
+
 	self.ProfileReleased:Fire(player)
 
 	-- Release performs the final save and frees the session lock so the player
@@ -937,6 +945,35 @@ function PlayerDataService:Start()
 	Players.PlayerRemoving:Connect(function(player)
 		self:_onPlayerRemoving(player)
 	end)
+
+	--[[
+		Advancing an age.
+
+		A RemoteFunction rather than an event, because the player needs to be
+		told WHY it was refused - "not enough food" and "already Imperial" are
+		different problems and a silent no-op for either is maddening.
+
+		The client sends nothing but the request. Cost, availability and the
+		spend all live in TryAdvanceAge, which is the only thing that may
+		decide any of it.
+	]]
+	self._ageLimiter = RateLimiter.new(2, 4)
+
+	local advanceAge = Remotes.GetFunction(GameConfig.RemoteNames.AdvanceAge)
+
+	advanceAge.OnServerInvoke = function(player: Player)
+		if not self._ageLimiter:Consume(player) then
+			return { Ok = false, Reason = "RateLimited" }
+		end
+
+		local ok, reason = self:TryAdvanceAge(player)
+
+		if not ok then
+			return { Ok = false, Reason = reason or "Refused" }
+		end
+
+		return { Ok = true, Age = self:GetAge(player) }
+	end
 
 	-- Players who joined before this service finished requiring are still
 	-- handled, which matters during live server updates.

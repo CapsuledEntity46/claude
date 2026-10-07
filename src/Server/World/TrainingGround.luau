@@ -49,8 +49,16 @@ local DUMMY_ARCHETYPE = "EnemyRaider"
 --- Seconds before a destroyed dummy is back on its feet.
 local RESPAWN_DELAY = 6
 
---- Where the range sits, clear of the shop and the spawn.
-local ORIGIN = Vector3.new(-40, 0, 24)
+--[[
+	Tucked in behind the spawn pad, alongside the shop, rather than out in the
+	open ground.
+
+	Placement does not know about world props - IsBlocked only consults
+	structures players have built - so a range in the middle of the build area
+	would let someone put a Farm inside a dummy. Keeping the amenities in one
+	row behind spawn avoids that without inventing a second obstacle system.
+]]
+local ORIGIN = Vector3.new(18, 0, -34)
 local SPACING = 10
 
 --- entityId -> post, so the Destroyed handler can find what to put back up.

@@ -70,10 +70,9 @@ Rules that follow, and must hold in code:
 capacity and vulnerability, rather than a number on the player).
 
 ### Ages
-### Ages
 
 Progression through historical epochs, researched at the Town Center
-(Dark → Feudal → Castle → Imperial). Each age costs a large resource sum and
+(Stone → Feudal → Castle → Imperial). Each age costs a large resource sum and
 unlocks stronger units, better buildings and technology upgrades.
 
 > **Open decision: Age vs player Level.** The project currently has an MMO-style
@@ -149,20 +148,30 @@ Town Center ──▶ Mill ──▶ Wheat Farm
             └─▶ Mining Camp
 ```
 
-Two distinct requirement types, and the game needs both:
+**Prerequisite dependency** ✅ — the parent building must *exist* somewhere
+before the child can be placed. Owning a Mill is what unlocks the Farm; where
+either one stands is irrelevant.
 
-1. **Prerequisite dependency** — the parent building must *exist* somewhere
-   before the child can be placed. A dependency check before placement.
-2. **Proximity dependency** (also *aura requirement* or radius-locked
-   placement) — the child must be placed physically **within the parent's
-   influence radius**. Standard in city-builders (Anno, The Settlers) and how
-   AoE drop-off points work: Mills, Lumber Camps and Mining Camps near
-   resources cut villager walking time.
+> ⚠️ **Proximity radius: tried, removed.** An earlier revision also required
+> the child to be placed inside the parent's **influence radius**, as
+> city-builders do (Anno, The Settlers). That was a misreading of Age of
+> Empires. In AoE, putting a Mill near berries is an **optimisation** — it
+> shortens villager walking time — not a permission the Mill grants the ground.
+> Enforcing it as a rule made the build menu lie about what was buildable and
+> made players fight the game for the right to choose a spot.
+>
+> Placement is now free inside the world bounds, and **overlap is the only
+> positional restriction**.
+>
+> The radius may well come back, but as an **efficiency bonus** rather than a
+> gate: a Farm near its Mill yields faster, or a villager hauls a shorter
+> distance. That is the same spatial query, used to reward good layout instead
+> of forbidding bad layout — and a bonus cannot softlock a base the way a gate
+> can.
 
-> **Architectural note.** Proximity requires a spatial query — "is this point
-> within radius R of any building of type T owned by this player". That wants a
-> single shared placement/validation service, not per-building logic. It is also
-> the natural home for grid snapping, collision and territory rules.
+> **Architectural note.** The spatial query still wants a single shared
+> placement/validation service rather than per-building logic, and that service
+> is also the natural home for grid snapping, collision and territory rules.
 
 ### Victory conditions
 
@@ -190,11 +199,9 @@ Two distinct requirement types, and the game needs both:
 Currently six fixed plots per garden, unlocked by player Level, with
 timestamp-driven growth and harvest.
 
-> ⚠️ **Provisional — replacement decided.** The AoE model is confirmed: farms
-> are *built* by the player or villagers, require a **Mill** as prerequisite,
-> and are placed within the Mill's radius. They are not fixed slots handed out
-> by player level. The fixed garden is scaffolding until the placement service
-> lands.
+> ✅ **Replaced.** Farms are *built* by the player, require a **Mill** as
+> prerequisite, and may be placed anywhere unoccupied — not in fixed slots
+> handed out by player level. The six-slot garden and `PlotBuilder` are gone.
 >
 > What survives the rewrite: the growth model (timestamps, three visual stages,
 > offline growth), `CropFactory`, the item directory and the harvest→sell loop.
@@ -227,14 +234,35 @@ Damage flavours: **fire**, **ice**, **poison**, **splash**.
 >   the multiplier table. The config asserts every damage type prices every
 >   armour class, so a half-added type fails at startup rather than silently
 >   dealing unmodified damage.
-> - **Status effects need their own module**, and must be *derived from
->   timestamps* like growth and health: store `{ EffectId, AppliedAt, Stacks }`
->   and compute whether it is still active on read. Ticking burn damage every
->   second for every enemy is the obvious implementation and the wrong one — it
->   does not survive a restart and costs CPU proportional to the battlefield.
-> - **Splash damage** is a radius query, the same primitive the placement
->   service already needs for proximity. Worth extracting one spatial helper
->   rather than writing the distance loop twice.
+> - ✅ **Status effects** are built: `Shared.StatusEffects` (pure) and
+>   `Server.Combat.StatusEffectService`, with Burn, Chill, Poison and
+>   Regeneration as config and Fire/Ice/Poison damage types.
+>
+>   This roadmap previously said effects must be *purely* derived from
+>   timestamps, like growth and health. **That was wrong, and the distinction
+>   is worth keeping written down.** Growth and health can be derived because
+>   nothing depends on observing them at a particular moment; a crop that
+>   finishes growing unobserved is simply finished when someone looks. Damage
+>   over time is different: the *death* has to happen whether or not anyone is
+>   looking. A burning raider that only dies when queried is not burning.
+>
+>   So the resolution is **tick for liveness, timestamps for correctness**.
+>   There is one loop, and its only job is to make death happen on time. The
+>   amount is still `PerSecond * Stacks * (now - LastTickAt)` — never
+>   `PerSecond * TickInterval`. The two look identical while ticks are regular,
+>   which is exactly what makes the naive form dangerous: it converts server
+>   stutter into free healing for the enemy, and the symptom (enemies feel
+>   tanky when the server is busy) points nowhere near the cause.
+>
+>   Two further findings: damage over time must **skip flat armour**, because
+>   armour is subtracted per hit and a tick is the smallest possible hit — charge
+>   it and every effect floors at `MinimumDamage` and armoured targets become
+>   fireproof by accident. And effects are **session state**, deliberately not
+>   persisted: logging out cures poison, which is a mild exploit, but the
+>   alternative is logging in to find you drowned in a loading screen.
+> - **Splash damage** is a radius query. The placement radius has been removed,
+>   so this is now the first real need for a spatial helper — worth extracting
+>   one rather than writing the distance loop per ability.
 > - **"Tanks protect plants behind" is an enemy-targeting rule, not a plant
 >   property.** In a lane game it falls out of the geometry; in 3D it has to be
 >   explicit — enemies must prefer the nearest blocking entity over whatever is
@@ -433,7 +461,7 @@ revenge continues.
 - ✅ Receipt processing with a durable idempotency ledger and save-before-grant
 - ✅ Cash packs, Instant Grow (×1 and ×10), Revenge Tokens
 - ✅ **Extra Garden Plot removed**, replaced by Food/Wood/Stone resource packs.
-  A "plot slot" stops being a meaningful unit once plots are radius-placed
+  A "plot slot" stops being a meaningful unit once farms are freely placed
   structures, and changing what a *live* product grants is far worse than
   changing it before launch. `BonusPlotSlots` remains in the schema and is still
   honoured, so it can be granted as a quest or admin reward.
@@ -451,8 +479,9 @@ Each step should be shippable and testable on its own.
 | **Verify persistence against a real DataStore** | Highest risk in the project; cheapest to check |
 | **Four-resource economy + Ages** | Everything below prices in resources and gates on Age; doing it late means repricing everything |
 | **Shared damageable system** | Blocks buildings, sieges, repair and combat at once |
-| **Placement service** (prerequisites + proximity radius) | The foundation for farms, drop-off points, defences and base building |
+| **Placement service** (prerequisites, free placement, overlap only) | The foundation for farms, drop-off points, defences and base building |
 | **Rework farming onto placement** | Farms become Mill-dependent structures; retires the fixed plot map |
+| **Status effects** ✅ | Burn/Chill/Poison; the layer combat plants, troops and towers all need before any of them can be interesting |
 | **Animal husbandry** | Herds near a Mill; directory already supports the drops |
 | **Checkpoint and defeat loop** | Defines player survival; gives Revenge Tokens meaning |
 | **Defences and hordes** | Depends on damageable + placement |

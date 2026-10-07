@@ -161,7 +161,10 @@ either one stands is irrelevant.
 > made players fight the game for the right to choose a spot.
 >
 > Placement is now free inside the world bounds, and **overlap is the only
-> positional restriction**.
+> positional restriction** — on a four-stud tile grid, so farms tile into an
+> unbroken quilt the way AoE's do. Footprints snap by their min corner rather
+> than their centre, which is what lets an odd-tile building sit flush against
+> an even-tile one.
 >
 > The radius may well come back, but as an **efficiency bonus** rather than a
 > gate: a Farm near its Mill yields faster, or a villager hauls a shorter
@@ -208,6 +211,25 @@ timestamp-driven growth and harvest.
 > What does not: the fixed six-slot `data.Plots` map, level-gated unlocking, and
 > `PlotBuilder`'s pre-built garden.
 
+✅ **Plant density.** A farm square holds a stack of one crop — nine small
+(carrot, wheat, tomato), three large (pumpkin, watermelon), one Special. The
+point is to make food cheap in *space*: one plant per square meant a player
+feeding themselves had no room left, and the combat plants below would never
+get built. Density is a property of the plant, not the farm.
+
+> A square fills in one action and is then committed — no topping up a growing
+> stack. The two alternatives are both bad: keep the original `PlantedAt` and
+> you can plant one carrot, wait until it ripens, add eight and harvest nine
+> (the same duplication exploit the Instant Grow backdating turned out to be);
+> reset it and adding a ninth throws away eight nearly-ripe plants, which reads
+> as a bug rather than a rule.
+>
+> All plants in a square share one `PlantedAt` and one crop entity, so growth
+> stays derived from a single timestamp and a fire takes the whole square.
+> Density buys yield at the cost of concentrating risk — a trade worth having.
+> Per-plant timestamps and partial harvests are the upgrade path if that ever
+> stops being true.
+
 Still to add: watering, fertiliser and compost to accelerate growth; crop health
 that regenerates slowly and faster when tended; companion creatures and flying
 robots that tend crops automatically.
@@ -215,6 +237,11 @@ robots that tend crops automatically.
 ### 2b. Combat plants ⬜
 
 A gardening *and defence* simulator: alongside food crops, plants that fight.
+
+> The `Special` plant-size tier already exists and holds **one per square**, so
+> the space budget for these is settled before the first one is written.
+> Retrofitting density onto a combat plant would mean rebalancing every wave
+> that fights it.
 Reference is Plants vs Zombies, adapted to a 3D base under siege.
 
 | Role | Behaviour |
@@ -481,6 +508,7 @@ Each step should be shippable and testable on its own.
 | **Shared damageable system** | Blocks buildings, sieges, repair and combat at once |
 | **Placement service** (prerequisites, free placement, overlap only) | The foundation for farms, drop-off points, defences and base building |
 | **Rework farming onto placement** | Farms become Mill-dependent structures; retires the fixed plot map |
+| **Grid snapping + plant density** ✅ | Farms tile like AoE's, and a square holds a stack so food stops eating the whole base |
 | **Status effects** ✅ | Burn/Chill/Poison; the layer combat plants, troops and towers all need before any of them can be interesting |
 | **Animal husbandry** | Herds near a Mill; directory already supports the drops |
 | **Checkpoint and defeat loop** | Defines player survival; gives Revenge Tokens meaning |

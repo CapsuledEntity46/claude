@@ -1197,6 +1197,11 @@ GameConfig.Placement = {
 
 		Kept as config because "bases cannot be impenetrable" may come back as
 		a rule about walls and gates, which is where it actually belongs.
+
+		PAIRED WITH THE FOOTPRINT SIZES. Every structure grew two studs when
+		this went to zero, which leaves each pair's required separation exactly
+		where the old gap put it. Raising this again without shrinking them
+		back makes bases sprawl and will refuse layouts that used to fit.
 	]]
 	MinimumGap = 0,
 

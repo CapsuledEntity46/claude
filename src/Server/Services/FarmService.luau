@@ -77,10 +77,13 @@ local PLANT_SPAN_FRACTION = 0.75
 --[[
 	How many plants are in the square. Zero when fallow.
 
-	Defaults to ONE rather than zero for an occupied square with no count,
-	which is what every record saved before stacking existed looks like. Read
-	as zero and an existing crop would render as bare soil and harvest for
-	nothing.
+	An occupied square with no count reads as ONE, never as zero. Normalize
+	guarantees the field for anything loaded from a profile - including records
+	saved before stacking existed, which is where a missing count comes from -
+	so this is the backstop for any path that did not come through it. Read as
+	zero instead and an occupied square would render as bare soil and harvest
+	for nothing, which looks like the crop was eaten rather than like a missing
+	default.
 ]]
 local function plantCount(entry): number
 	if not entry.SeedId or entry.SeedId == "" then

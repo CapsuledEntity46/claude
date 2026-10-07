@@ -200,6 +200,15 @@ DefeatService.AnchorLost:Connect(function(player: Player)
 	print(`[Defeat] {player.Name}'s Checkpoint has shattered`)
 end)
 
+--[[
+	Logged with its source, because "the defeat panel never appeared" was
+	impossible to diagnose from outside: there was no way to tell a death that
+	went unnoticed from a death that was noticed and judged survivable.
+]]
+DefeatService.DeathNoticed:Connect(function(player: Player, source: string)
+	print(`[Defeat] {player.Name} died ({source})`)
+end)
+
 DefeatService.Defeated:Connect(function(player: Player)
 	print(`[Defeat] {player.Name} fell without an anchor`)
 end)

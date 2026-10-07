@@ -4805,6 +4805,55 @@ local function runTests()
 			)
 			checkEqual(holdout:GetAttribute("Defeated"), true, "and the panel is raised")
 
+			--[[
+				AND THE CASE THAT ACTUALLY BROKE IT: a death with NO Died
+				signal at all.
+
+				A character that falls below FallenPartsDestroyHeight has its
+				parts destroyed, so the Humanoid is torn down rather than
+				killed and Died never fires. Walking off the edge of the map -
+				the easiest way to test dying - therefore raised no defeat,
+				which is what was reported three times.
+
+				Simulated faithfully: the character is removed without its
+				Humanoid ever reaching zero, and the only evidence of the
+				death is that a new character arrives.
+			]]
+			checkEqual(DefeatService:Resolve(holdout, "Surrender").Ok, true, "cleared the previous defeat")
+			DamageableService:ApplyDamage(placed.EntityId, 999999, "Siege", nil)
+			checkEqual(DefeatService:IsAnchorShattered(holdout), true, "the anchor is ruined once more")
+
+			local voidFaller = giveCharacter(holdout, Vector3.new(140, 3, -160))
+			holdout.CharacterAdded:Fire(voidFaller)
+			advance(1)
+
+			local deaths = {}
+			local deathListener = DefeatService.DeathNoticed:Connect(function(_, source: string)
+				table.insert(deaths, source)
+			end)
+
+			-- Gone, with full health and no Died: the engine ate it.
+			checkEqual(
+				voidFaller:FindFirstChildOfClass("Humanoid").Health,
+				100,
+				"the character is at full health when it vanishes"
+			)
+			voidFaller.Parent = nil
+
+			local replacement = giveCharacter(holdout, Vector3.new(0, 3, 0))
+			holdout.CharacterAdded:Fire(replacement)
+			advance(1)
+
+			checkEqual(#deaths, 1, "the respawn is recognised as a death")
+			checkEqual(deaths[1], "Respawned", "by the backstop, since nothing else could report it")
+			checkEqual(
+				DefeatService:IsDefeated(holdout),
+				true,
+				"so falling into the void on a ruined anchor IS a defeat"
+			)
+
+			deathListener:Disconnect()
+
 			PlayersService.PlayerRemoving:Fire(holdout)
 			holdout.Parent = nil
 		end

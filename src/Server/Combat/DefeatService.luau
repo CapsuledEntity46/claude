@@ -80,6 +80,8 @@ local ANCHOR_STRUCTURE = "Checkpoint"
 DefeatService.AnchorLost = Signal.new()
 --- (player) - rebuilt, by prompt or by coming back
 DefeatService.AnchorRestored = Signal.new()
+--- (player, source) - a death was detected, whatever came of it
+DefeatService.DeathNoticed = Signal.new()
 --- (player) - fell while shattered
 DefeatService.Defeated = Signal.new()
 --- (player, choice) - "FightOn" or "Surrender"
@@ -500,7 +502,61 @@ function DefeatService:Start()
 		ever noticed: players respawned forever and the defeat panel never
 		appeared.
 	]]
+	--[[
+		WHY THERE ARE THREE WAYS TO NOTICE A DEATH.
+
+		Humanoid.Died is the obvious one and it is not sufficient. A character
+		that falls below Workspace.FallenPartsDestroyHeight has its parts
+		DESTROYED - the Humanoid is torn down rather than killed, so Died
+		never fires. Walking off the edge of the map, which is the easiest way
+		to test dying, therefore raised no defeat at all.
+
+		So:
+		  1. Humanoid.Died         - the normal case, and the fastest
+		  2. Health reaching zero  - a Humanoid emptied without Died firing
+		  3. A NEW character       - the previous one ended somehow, and this
+		                             is the backstop that cannot be dodged,
+		                             because a respawn is proof of a death
+
+		All three funnel through one place that fires at most once per
+		character, so a death reported twice is still one death.
+	]]
+	local watched = {}
+
+	local function noticeDeath(player: Player, character: Instance?, source: string)
+		local record = watched[player]
+
+		if not record or record.Dead then
+			return
+		end
+
+		-- A signal from a character we are no longer following is stale.
+		if character ~= nil and record.Character ~= character then
+			return
+		end
+
+		record.Dead = true
+
+		self.DeathNoticed:Fire(player, source)
+		self:_onDied(player)
+	end
+
 	local function watchCharacter(player: Player, character: Instance)
+		--[[
+			A new character means the previous one ended. Reported before the
+			record is replaced, so the defeat is judged against the anchor as
+			it stood when they died.
+		]]
+		local previous = watched[player]
+
+		if previous and not previous.Dead then
+			previous.Dead = true
+			self.DeathNoticed:Fire(player, "Respawned")
+			self:_onDied(player)
+		end
+
+		watched[player] = { Character = character, Dead = false }
+
 		-- Spawned, so the waits inside cannot block the signal.
 		task.spawn(function()
 			self:_placeAtAnchor(player, character)
@@ -510,7 +566,7 @@ function DefeatService:Start()
 			local humanoid = character:FindFirstChildOfClass("Humanoid")
 				or character:WaitForChild("Humanoid", 10)
 
-			if not humanoid or not character.Parent then
+			if not humanoid then
 				return
 			end
 
@@ -521,12 +577,23 @@ function DefeatService:Start()
 				player alive-but-undefeated forever.
 			]]
 			if humanoid.Health <= 0 then
-				self:_onDied(player)
+				noticeDeath(player, character, "AlreadyDead")
 				return
 			end
 
 			humanoid.Died:Connect(function()
-				self:_onDied(player)
+				noticeDeath(player, character, "Died")
+			end)
+
+			--[[
+				And health reaching zero without Died. Belt and braces: it
+				costs one comparison per health change and covers whatever
+				tears a Humanoid down without killing it properly.
+			]]
+			humanoid:GetPropertyChangedSignal("Health"):Connect(function()
+				if humanoid.Health <= 0 then
+					noticeDeath(player, character, "HealthZero")
+				end
 			end)
 		end)
 	end
@@ -549,6 +616,7 @@ function DefeatService:Start()
 
 	Players.PlayerRemoving:Connect(function(player: Player)
 		self._defeated[player] = nil
+		watched[player] = nil
 	end)
 
 	--[[

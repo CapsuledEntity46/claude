@@ -237,6 +237,28 @@ function InstanceMethods.SetAttribute(self, name, value)
 	rawget(self, "_attributeChanged"):Fire(name)
 end
 
+--[[
+	Property change signals, created on demand.
+
+	Only properties the stub routes through __newindex fire these - Health on
+	a Humanoid is the one that matters, since a Humanoid emptied without Died
+	firing is a real engine behaviour the defeat loop has to survive.
+]]
+function InstanceMethods.GetPropertyChangedSignal(self, name)
+	local signals = rawget(self, "_propertySignals")
+
+	if not signals then
+		signals = {}
+		rawset(self, "_propertySignals", signals)
+	end
+
+	if not signals[name] then
+		signals[name] = makeRbxSignal()
+	end
+
+	return signals[name]
+end
+
 function InstanceMethods.GetAttribute(self, name)
 	return rawget(self, "_attributes")[name]
 end
@@ -352,6 +374,13 @@ local InstanceMT = {
 		else
 			rawset(self, key, value)
 		end
+
+		local signals = rawget(self, "_propertySignals")
+		local signal = if signals then signals[key] else nil
+
+		if signal then
+			signal:Fire()
+		end
 	end,
 }
 
@@ -449,6 +478,13 @@ function Instance.new(className)
 
 			local remaining = math.max(current - (tonumber(amount) or 0), 0)
 			rawset(selfRef, "Health", remaining)
+
+			local signals = rawget(selfRef, "_propertySignals")
+			local healthSignal = if signals then signals.Health else nil
+
+			if healthSignal then
+				healthSignal:Fire()
+			end
 
 			if remaining <= 0 then
 				rawget(selfRef, "Died"):Fire()

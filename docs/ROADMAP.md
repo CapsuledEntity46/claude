@@ -314,6 +314,63 @@ The player's survival structure, distinct from match victory:
 > `TrySpendRevengeTokens` **before** granting the revenge, and validate the
 > target server-side.
 
+### 7b. Troops and the Barracks ⬜
+
+Age of Empires units plus custom ones, with Clash-of-Clans style progression:
+**each Barracks upgrade unlocks new troops**, rather than only improving old
+ones.
+
+**Movement and attack classes** — every combination is wanted:
+ground melee, ground ranged, flying melee, flying ranged.
+
+**Tactical roles (the combat trifecta).** Army composition should require
+mixing all three, or one unit becomes strictly correct:
+
+| Role | Profile | Purpose |
+| ---- | ------- | ------- |
+| **Tank** | High HP, low DPS, slow | Deployed first to absorb tower fire |
+| **Brawler** | Medium HP, high DPS | Punches through the core |
+| **Nuker / Support** | Low HP, extreme DPS or healing | Sits behind tanks |
+
+**Special behaviours** to support: summoners that spawn low-HP minions,
+healers, and elemental damage (fire, ice, poison) — the same flavours the
+combat plants use, so one damage-type table serves both.
+
+**Housing space.** Every unit costs capacity in Army Camps, and camp upgrades
+raise the cap. This is the main lever limiting army composition, and it must be
+a per-unit config number, not a unit count.
+
+#### Target priority
+
+Troops act autonomously once deployed. Clash of Clans distinguishes:
+
+| Priority | Behaviour |
+| -------- | --------- |
+| **Any target** | Attacks the nearest building. Ground units evaluate the three closest reachable targets; air units use straight-line distance |
+| **Defence-specific** | Ignores resource and trash buildings, paths straight at defensive towers |
+| **Resource-specific** | Targets mines, collectors and storages, with bonus damage |
+
+> **Decision: priority is a per-archetype default, and a toggle is deferred.**
+> Enemy armies get a fixed priority from config, which is enough to make hordes
+> read as intentional rather than random. A player-facing "priority target"
+> toggle is technically straightforward — it is one field on an order sent to
+> selected units — but it only becomes meaningful once unit selection exists,
+> so it belongs with RTS unit command rather than here.
+
+> **Architectural notes.**
+>
+> - Target priority is **data on the archetype**, not a branch in the AI:
+>   `TargetPriority = "Any" | "Defence" | "Resource"`. The selector reads it.
+> - "Nearest building" needs the same spatial query as placement proximity and
+>   splash damage. That is now three callers, so the shared spatial helper is
+>   worth extracting before troops, not after.
+> - **Housing space, troop stats and unlock tier are config**; only the
+>   behaviours (summon, heal, elemental hit) are code, and each should be a
+>   small named behaviour an archetype references.
+> - A Barracks upgrade unlocking a troop is the **same dependency check** the
+>   build tree already does — structure level and Age gating a recipe. Reuse
+>   the resolver rather than writing a second one.
+
 ### 8. RTS unit command ⬜
 
 Box-select multiple units with a free-moving cursor; issue move, attack, gather

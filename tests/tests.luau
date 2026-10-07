@@ -31,11 +31,14 @@ end
 	Gives a player a character with a PrimaryPart, for the server-side distance
 	checks.
 
-	`deferRoot` builds it the way the ENGINE does: the model arrives first and
-	its PrimaryPart is assigned a moment later. That ordering matters - code
-	that reads character.PrimaryPart the instant CharacterAdded fires sees nil
-	in a real game, and a stub that is readier than the engine hides it. It did
-	hide it: the respawn-at-anchor move silently never ran.
+	`deferRoot` builds it the way the ENGINE does: the model arrives first, and
+	its PrimaryPart and Humanoid are attached a moment later.
+
+	That ordering matters, and a stub readier than the engine hides real bugs.
+	It hid two, both in the same function: the respawn-at-anchor move read
+	PrimaryPart immediately and silently never ran, and the death listener read
+	the Humanoid immediately, connected nothing, and let players respawn
+	forever with no defeat panel.
 ]]
 local function giveCharacter(player, position, deferRoot)
 	local character = Instance.new("Model")
@@ -50,9 +53,9 @@ local function giveCharacter(player, position, deferRoot)
 	-- damageable registry. See GameConfig.PlayerCombat.
 	local humanoid = Instance.new("Humanoid")
 	humanoid.Name = "Humanoid"
-	humanoid.Parent = character
 
 	if not deferRoot then
+		humanoid.Parent = character
 		character.PrimaryPart = root
 	end
 
@@ -60,8 +63,14 @@ local function giveCharacter(player, position, deferRoot)
 	player.Character = character
 
 	if deferRoot then
-		-- Assigned after the current frame, as the engine does it.
+		--[[
+			Attached after the current frame, as the engine does it. BOTH of
+			them: a character arrives in pieces, and code that reads either
+			the PrimaryPart or the Humanoid the instant CharacterAdded fires
+			finds nil in a real game.
+		]]
 		task.delay(0.1, function()
+			humanoid.Parent = character
 			character.PrimaryPart = root
 		end)
 	end
@@ -4591,9 +4600,44 @@ local function runTests()
 				"respawning waits for the character and puts them at their Checkpoint"
 			)
 
-			-- And the engine's own respawn point follows the anchor, so there
-			-- is no visible teleport on the next death.
-			check(holdout.RespawnLocation ~= nil, "the engine respawn point is set to the anchor")
+			--[[
+				And NO SpawnLocation is left in the world.
+
+				An earlier version parked one on the anchor to avoid the
+				teleport flash, and it caused a worse bug: a SpawnLocation
+				stays enabled, so the engine kept treating the site as a valid
+				spawn after the anchor shattered and players reappeared in the
+				ruins - the one place the design says they must not.
+			]]
+			checkEqual(
+				placed.Model:FindFirstChild("AnchorSpawn"),
+				nil,
+				"and no SpawnLocation is left behind to capture respawns later"
+			)
+
+			--[[
+				A DEFERRED character's death is still noticed.
+
+				This is the bug the player hit: the death listener read
+				character:FindFirstChildOfClass("Humanoid") the instant
+				CharacterAdded fired, found nil, and connected nothing. Deaths
+				went unnoticed, so the defeat panel never appeared and players
+				respawned forever.
+
+				Checked here while the anchor still STANDS, so the expected
+				outcome is a plain respawn rather than a defeat - the listener
+				has to be attached either way.
+			]]
+			local deferredHumanoid = revived:FindFirstChildOfClass("Humanoid")
+			check(deferredHumanoid ~= nil, "a deferred character does get its Humanoid")
+
+			deferredHumanoid:TakeDamage(9999)
+			advance(1)
+			checkEqual(
+				DefeatService:IsDefeated(holdout),
+				false,
+				"dying with the anchor up is still not a defeat"
+			)
 
 			--[[
 				Now destroy it. It must SHATTER - stay in the registry, stay in
@@ -4686,6 +4730,28 @@ local function runTests()
 				nil,
 				"and the prompt goes away with the rubble"
 			)
+
+			--[[
+				THE REPORTED BUG, end to end: a character built the way the
+				engine builds one, dying while the anchor lies in ruins, must
+				raise the defeat.
+			]]
+			DamageableService:ApplyDamage(placed.EntityId, 999999, "Siege", nil)
+			checkEqual(DefeatService:IsAnchorShattered(holdout), true, "the anchor is in ruins again")
+
+			local lastStand = giveCharacter(holdout, Vector3.new(140, 3, -160), true)
+			holdout.CharacterAdded:Fire(lastStand)
+			advance(1)
+
+			lastStand:FindFirstChildOfClass("Humanoid"):TakeDamage(9999)
+			advance(1)
+
+			checkEqual(
+				DefeatService:IsDefeated(holdout),
+				true,
+				"a deferred character dying on a ruined anchor IS a defeat"
+			)
+			checkEqual(holdout:GetAttribute("Defeated"), true, "and the panel is raised")
 
 			PlayersService.PlayerRemoving:Fire(holdout)
 			holdout.Parent = nil

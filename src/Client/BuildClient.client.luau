@@ -125,6 +125,17 @@ end
 
 local screen = Instance.new("ScreenGui")
 screen.Name = "BuildGui"
+
+--[[
+	GUI LAYER 4. Panels the player opens. Above the HUD, because a menu that
+	opens behind the thing you were reading is worse than no menu.
+
+	ScreenGuis with equal DisplayOrder stack in an undefined order, which
+	is how the build menu ended up BEHIND the resource panel. Every GUI in
+	this project now states its layer: 1 readouts, 4 opened panels,
+	8 notices, 10 modal.
+]]
+screen.DisplayOrder = 4
 screen.ResetOnSpawn = false
 screen.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 
@@ -140,8 +151,17 @@ toggle.Parent = screen
 
 local panel = Instance.new("Frame")
 panel.Name = "Panel"
-panel.AnchorPoint = Vector2.new(0, 1)
-panel.Position = UDim2.new(0, 12, 1, -56)
+--[[
+	Bottom RIGHT, not bottom left.
+
+	It used to open above the Build button in the bottom-left corner, where a
+	330 pixel tall panel reaches up into the resource readout on any normal
+	window height - so the two overlapped and, with no DisplayOrder set, the
+	menu sometimes drew behind it. Layering fixes which one wins; moving it
+	means they never contend.
+]]
+panel.AnchorPoint = Vector2.new(1, 1)
+panel.Position = UDim2.new(1, -12, 1, -12)
 panel.Size = UDim2.fromOffset(400, 330)
 panel.BackgroundColor3 = COLORS.Panel
 panel.BorderSizePixel = 0

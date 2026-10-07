@@ -177,10 +177,39 @@ function InstanceMethods.FindFirstChild(self, name)
 	return rawget(self, "_children")[name]
 end
 
-function InstanceMethods.WaitForChild(self, name)
+--[[
+	Genuinely waits, on the virtual clock.
+
+	This used to assert the moment the child was absent, which made it
+	impossible to test any code that legitimately waits for a child arriving a
+	moment later - and a character's Humanoid and PrimaryPart are exactly
+	that. The assert turned a correct wait into a harness failure, which is
+	the opposite of what a stub should do.
+
+	It still asserts on TIMEOUT: in the harness a child that never appears is
+	a setup mistake, and returning nil silently would hide it.
+]]
+function InstanceMethods.WaitForChild(self, name, timeout)
 	local child = rawget(self, "_children")[name]
-	assert(child, `WaitForChild({name}) would block forever in the harness`)
-	return child
+
+	if child then
+		return child
+	end
+
+	local deadline = VirtualTime + (tonumber(timeout) or 10)
+
+	while VirtualTime < deadline do
+		task.wait(0.05)
+
+		child = rawget(self, "_children")[name]
+
+		if child then
+			return child
+		end
+	end
+
+	assert(child, `WaitForChild({name}) never arrived in the harness`)
+	return nil
 end
 
 function InstanceMethods.FindFirstChildOfClass(self, className)

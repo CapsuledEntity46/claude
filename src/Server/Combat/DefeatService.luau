@@ -130,6 +130,22 @@ end
 	the player has lost their safe place to reappear, so respawning on the
 	wreck would hand back the thing the raid just took.
 ]]
+--[[
+	WHY THERE IS NO SpawnLocation.
+
+	An earlier version parked a SpawnLocation on the anchor and pointed
+	player.RespawnLocation at it, to avoid the brief flash of appearing at the
+	world spawn and being moved. It caused a worse bug than it solved: a
+	SpawnLocation left in the world stays ENABLED, so the engine went on
+	treating the wreck as a valid spawn point after the anchor had shattered -
+	and players reappeared in the ruins, which is the one place the design says
+	they must not.
+
+	Clearing player.RespawnLocation was not enough, because an enabled neutral
+	SpawnLocation is a candidate for everyone regardless. Moving the character
+	ourselves has one authority and no side effects on anybody else.
+]]
+
 --- Where a character should appear, given a standing anchor. Nil otherwise.
 function DefeatService:GetAnchorSpawn(player: Player): Vector3?
 	if not self:HasStandingAnchor(player) then
@@ -195,49 +211,6 @@ function DefeatService:_placeAtAnchor(player: Player, character: Instance)
 	root.CFrame = CFrame.new(position)
 
 	return true
-end
-
---[[
-	Keeps the engine's own respawn point on the anchor.
-
-	Belt and braces with the move above, and worth having: RespawnLocation
-	means the character APPEARS at the anchor instead of appearing at the
-	world spawn and being teleported a frame later, which the player sees as
-	a flash. Cleared when the anchor falls, so a shattered anchor sends them
-	back to the world spawn.
-]]
-function DefeatService:_syncRespawnLocation(player: Player)
-	local _, placed = self:GetAnchor(player)
-	local model = if placed then placed.Model else nil
-
-	if not model or not self:HasStandingAnchor(player) then
-		player.RespawnLocation = nil
-		return
-	end
-
-	local spawn = model:FindFirstChild("AnchorSpawn")
-
-	if not spawn then
-		local position = self:GetAnchorSpawn(player)
-
-		if not position then
-			return
-		end
-
-		spawn = Instance.new("SpawnLocation")
-		spawn.Name = "AnchorSpawn"
-		spawn.Size = Vector3.new(6, 1, 6)
-		spawn.Position = Vector3.new(position.X, GameConfig.Placement.GroundY, position.Z)
-		spawn.Anchored = true
-		spawn.CanCollide = false
-		spawn.Transparency = 1
-		-- Neutral, because teams are not a concept here.
-		spawn.Neutral = true
-		spawn.Duration = 0
-		spawn.Parent = model
-	end
-
-	player.RespawnLocation = spawn
 end
 
 --------------------------------------------------------------------------------
@@ -515,26 +488,47 @@ function DefeatService:Start()
 	self._notice = Remotes.GetEvent(GameConfig.RemoteNames.Notice)
 
 	--[[
-		A newly placed or restored anchor becomes the respawn point at once,
-		rather than at the next death.
-	]]
-	PlacementService.Spawned:Connect(function(player: Player)
-		self:_syncRespawnLocation(player)
-	end)
+		Watches one character: move it to the anchor, and listen for its death.
 
+		BOTH halves have to WAIT. A character arrives in pieces - the model is
+		parented first and its Humanoid and PrimaryPart follow - so reading
+		either one the instant CharacterAdded fires finds nil.
+
+		The move was fixed for PrimaryPart and the death listener was left
+		reading FindFirstChildOfClass immediately, which is the same bug in
+		the same function. It found nil, connected nothing, and no death was
+		ever noticed: players respawned forever and the defeat panel never
+		appeared.
+	]]
 	local function watchCharacter(player: Player, character: Instance)
-		-- Spawned, so the wait inside cannot block the signal.
+		-- Spawned, so the waits inside cannot block the signal.
 		task.spawn(function()
 			self:_placeAtAnchor(player, character)
 		end)
 
-		local humanoid = character:FindFirstChildOfClass("Humanoid")
+		task.spawn(function()
+			local humanoid = character:FindFirstChildOfClass("Humanoid")
+				or character:WaitForChild("Humanoid", 10)
 
-		if humanoid then
+			if not humanoid or not character.Parent then
+				return
+			end
+
+			--[[
+				Already dead by the time we got here. Connecting now would
+				never fire, so the death is reported directly - otherwise a
+				character that died during its own setup would strand the
+				player alive-but-undefeated forever.
+			]]
+			if humanoid.Health <= 0 then
+				self:_onDied(player)
+				return
+			end
+
 			humanoid.Died:Connect(function()
 				self:_onDied(player)
 			end)
-		end
+		end)
 	end
 
 	local function watchPlayer(player: Player)
@@ -574,10 +568,6 @@ function DefeatService:Start()
 
 		self:_attachWreckPrompt(owner, entity.Model)
 
-		-- Back to the world spawn: the safe place to reappear is what the
-		-- raid just took.
-		self:_syncRespawnLocation(owner)
-
 		self:_notify(owner, "Your Checkpoint has shattered. Clear the area, then rebuild it.")
 		self.AnchorLost:Fire(owner)
 	end)
@@ -593,7 +583,6 @@ function DefeatService:Start()
 		local owner = Players:GetPlayerByUserId(entity.OwnerUserId)
 
 		if owner then
-			self:_syncRespawnLocation(owner)
 			self.AnchorRestored:Fire(owner)
 		end
 	end)

@@ -155,6 +155,16 @@ local gui = {}
 local function buildGui()
 	local screen = Instance.new("ScreenGui")
 	screen.Name = "ShopGui"
+
+--[[
+	GUI LAYER 4. Panels the player opens, same tier as the build menu.
+
+	ScreenGuis with equal DisplayOrder stack in an undefined order, which
+	is how the build menu ended up BEHIND the resource panel. Every GUI in
+	this project now states its layer: 1 readouts, 4 opened panels,
+	8 notices, 10 modal.
+]]
+screen.DisplayOrder = 4
 	screen.ResetOnSpawn = false
 	screen.Enabled = false
 	screen.ZIndexBehavior = Enum.ZIndexBehavior.Sibling

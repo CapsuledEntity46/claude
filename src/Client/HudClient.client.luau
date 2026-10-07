@@ -170,6 +170,16 @@ end
 
 local screen = Instance.new("ScreenGui")
 screen.Name = "HudGui"
+
+--[[
+	GUI LAYER 1. The always-on readouts. Everything else sits over them.
+
+	ScreenGuis with equal DisplayOrder stack in an undefined order, which
+	is how the build menu ended up BEHIND the resource panel. Every GUI in
+	this project now states its layer: 1 readouts, 4 opened panels,
+	8 notices, 10 modal.
+]]
+screen.DisplayOrder = 1
 screen.ResetOnSpawn = false
 screen.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 

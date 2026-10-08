@@ -1,0 +1,30 @@
+# Rojo / build output
+*.rbxl
+*.rbxlx
+*.rbxm
+*.rbxmx
+*.rbxl.lock
+*.rbxlx.lock
+build/
+
+# Toolchain
+/.lune/
+/sourcemap.json
+
+# Rojo CLI kept alongside the project, so `git status` stays clean and a
+# ~10 MB binary never gets committed by accident.
+rojo.exe
+rojo
+
+# Editor
+.vscode/
+.idea/
+.DS_Store
+
+# Test harness: generated bundles and the vendored Luau CLI, which is a
+# per-platform binary. See tests/README.md.
+tests/bundle.luau
+tests/bootstrap_bundle.luau
+tests/luau
+tests/luau.exe
+tests/luau-analyze

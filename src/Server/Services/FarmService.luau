@@ -1,0 +1,995 @@
+--!nonstrict
+--[[
+	FarmService
+	-----------
+	Growing, harvesting and boosting crops on PLACED FARMS.
+
+	Replaces PlotService. The difference is not cosmetic: a plot was a slot in
+	a pre-built garden handed out by player level, whereas a farm is a
+	structure the player chose to build, beside a Mill, paid for in Wood. There
+	is nothing to "unlock" because nothing exists until it is built.
+
+	WHAT CARRIED OVER
+	-----------------
+	The growth model, unchanged and still the right shape: a crop stores only
+	`SeedId` and `PlantedAt`, and its stage is DERIVED on read. Crops keep
+	growing while the player is offline, a restart cannot lose progress, and the
+	stage cannot drift because it is recomputed rather than accumulated.
+
+	WHAT STATE LIVES WHERE
+	----------------------
+	Crop state is stored ON the farm's structure entry in `data.Structures`,
+	rather than in a parallel table keyed by farm id. That is deliberate:
+	one record per farm means demolishing a farm takes its crop with it, so
+	there is no way to orphan a crop whose farm no longer exists.
+
+	ENTITY LAYOUT
+	-------------
+		Farm (Model)              structure entity - health, repairable
+		└── Crop (Model)          crop entity - health, regenerates
+		    ├── Plant1 (Model)    rebuilt per growth stage
+		    └── Plant2..N         laid out on a grid across the footprint
+		└── Body
+		    └── Manage            ProximityPrompt - opens the panel
+
+	The Crop container is stable so it can host the crop's health attributes,
+	while the plants inside it are rebuilt on a stage change.
+
+	STACKING
+	--------
+	One square holds SEVERAL plants of one kind - nine carrots, three
+	pumpkins, one combat plant - with the count set by the seed's size tier in
+	GameConfig.PlantSizes. The square is filled in a single planting action and
+	then committed: see TryPlant for why topping up a growing stack is not
+	allowed.
+
+	All the plants in a square share one `PlantedAt` and one crop entity.
+	That keeps growth derived from a single timestamp, as everywhere else, and
+	means a fire that reaches the square takes the whole stack - density buys
+	yield at the cost of concentrating risk, which is a trade worth having
+	rather than a bug.
+]]
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Shared = ReplicatedStorage:WaitForChild("Shared")
+local GameConfig = require(Shared.GameConfig)
+local Growth = require(Shared.Growth)
+local Remotes = require(Shared.Remotes)
+local Signal = require(Shared.Signal)
+
+local AttackService = require(script.Parent.Parent.Combat.AttackService)
+local DamageableService = require(script.Parent.Parent.Combat.DamageableService)
+local PlacementService = require(script.Parent.Parent.World.PlacementService)
+local PlayerDataService = require(script.Parent.PlayerDataService)
+local CropFactory = require(script.Parent.Parent.Plots.CropFactory)
+
+local FARM_ATTR = GameConfig.FarmAttributes
+local EMPTY_STAGE = GameConfig.Growth.EmptyStage
+local CROP_CONTAINER = "Crop"
+
+--- Fraction of the farm footprint the plants are laid out across, so the
+--- outer ones sit on soil rather than hanging over the edge.
+local PLANT_SPAN_FRACTION = 0.75
+
+--[[
+	How many plants are in the square. Zero when fallow.
+
+	An occupied square with no count reads as ONE, never as zero. Normalize
+	guarantees the field for anything loaded from a profile - including records
+	saved before stacking existed, which is where a missing count comes from -
+	so this is the backstop for any path that did not come through it. Read as
+	zero instead and an occupied square would render as bare soil and harvest
+	for nothing, which looks like the crop was eaten rather than like a missing
+	default.
+]]
+local function plantCount(entry): number
+	if not entry.SeedId or entry.SeedId == "" then
+		return 0
+	end
+
+	return math.max(math.floor(tonumber(entry.PlantCount) or 1), 1)
+end
+
+local FarmService = {}
+
+FarmService.FrameworkVersion = 15
+
+FarmService._started = false
+FarmService._farms = {} :: { [Player]: any }
+FarmService._lastInteraction = {} :: { [Player]: number }
+
+--- (player, instanceId, seedId)
+FarmService.Planted = Signal.new()
+--- (player, instanceId, itemId, amount)
+FarmService.Harvested = Signal.new()
+--- (player, instanceId, reason)
+FarmService.PlantFailed = Signal.new()
+--- (player, instanceId, seedId)
+FarmService.GrowthBoosted = Signal.new()
+--- (player, instanceId, seedId)
+FarmService.CropDestroyed = Signal.new()
+--- (player, instanceId, seedId) - a kept plant was cleared by its owner
+FarmService.Uprooted = Signal.new()
+
+--------------------------------------------------------------------------------
+-- Helpers
+--------------------------------------------------------------------------------
+
+function FarmService:_consumeInteraction(player: Player): boolean
+	local now = os.clock()
+	local last = self._lastInteraction[player]
+
+	if last and now - last < GameConfig.Interaction.Cooldown then
+		return false
+	end
+
+	self._lastInteraction[player] = now
+	return true
+end
+
+--[[
+	Announces a refusal AND returns it.
+
+	Two callers need the same reason for different purposes: the Notice remote
+	turns it into a sentence for the player, and the selection panel shows it
+	as the caption on the button that would not work. Signal:Fire dispatches
+	through task.spawn, so a caller cannot observe the signal synchronously -
+	the reason has to come back through the return.
+]]
+function FarmService:_refuse(player: Player, instanceId: string, reason: string): (boolean, string)
+	self.PlantFailed:Fire(player, instanceId, reason)
+	return false, reason
+end
+
+function FarmService:_getFarms(player: Player)
+	return self._farms[player] or {}
+end
+
+function FarmService:GetFarm(player: Player, instanceId: string)
+	return self:_getFarms(player)[instanceId]
+end
+
+--- The crop record on a farm, or nil when fallow.
+function FarmService:_getEntry(player: Player, instanceId: string)
+	local data = PlayerDataService:GetData(player)
+	local entry = if data then data.Structures[instanceId] else nil
+
+	if entry and entry.StructureId == "Farm" then
+		return entry
+	end
+
+	return nil
+end
+
+--------------------------------------------------------------------------------
+-- Projection
+--------------------------------------------------------------------------------
+
+--[[
+	Rebuilds the crop visual for the current stage, keeping the Crop container
+	so the crop entity's model reference and health attributes stay valid.
+]]
+function FarmService:_renderCrop(farm, seedId: string, stage: string, count: number)
+	local container = farm.Model:FindFirstChild(CROP_CONTAINER)
+
+	if stage == EMPTY_STAGE or seedId == "" or count < 1 then
+		if container then
+			container:Destroy()
+		end
+		return
+	end
+
+	if not container then
+		container = Instance.new("Model")
+		container.Name = CROP_CONTAINER
+		container.Parent = farm.Model
+	end
+
+	--[[
+		The plants are rebuilt, the CONTAINER is not: it is the crop entity's
+		model reference and carries the health attributes, so destroying it
+		would leave the damageable registry pointing at nothing.
+
+		PrimaryPart is cleared with them. It points at one of the plants, and
+		leaving it pointing at a destroyed one survives every check that asks
+		whether the MODEL is still parented - so an attacking plant would go
+		on firing from wherever its seedling used to stand.
+	]]
+	for _, child in container:GetChildren() do
+		child:Destroy()
+	end
+
+	container.PrimaryPart = nil
+
+	local structure = GameConfig.GetStructure("Farm")
+	local centre = farm.Model.PrimaryPart.Position + Vector3.new(0, structure.Size.Y / 2, 0)
+
+	local plantable = GameConfig.GetPlantable(seedId)
+	local size = if plantable then GameConfig.GetPlantSize(plantable.PlantSize) else nil
+
+	--[[
+		Slots come from CAPACITY, not from the count planted, so a part-filled
+		square shows its gaps. That is how a player discovers a carrot square
+		holds nine without being told, and it keeps the plants in the same
+		places as the square fills up.
+	]]
+	local slots = CropFactory.GetSlotPositions(
+		GameConfig.GetPlantCapacity(seedId),
+		centre,
+		structure.Size.X * PLANT_SPAN_FRACTION,
+		structure.Size.Z * PLANT_SPAN_FRACTION
+	)
+
+	for index = 1, math.min(count, #slots) do
+		local plant = CropFactory.Create(seedId, stage, slots[index], if size then size.VisualScale else 1)
+
+		if plant then
+			plant.Name = `Plant{index}`
+			plant.Parent = container
+
+			--[[
+				The container needs a PrimaryPart, and this is the only place
+				it can get one. Without it the crop has no position - so the
+				client draws no health bar over it, and an attacking plant has
+				nowhere to shoot from.
+			]]
+			if not container.PrimaryPart then
+				container.PrimaryPart = plant.PrimaryPart
+			end
+		end
+	end
+
+	return container
+end
+
+function FarmService:_projectCrop(player: Player, farm, entry, now: number)
+	local stage = Growth.GetStage(entry.SeedId, entry.PlantedAt, now)
+
+	farm.Model:SetAttribute(FARM_ATTR.SeedId, entry.SeedId)
+	farm.Model:SetAttribute(FARM_ATTR.PlantedAt, entry.PlantedAt)
+	farm.Model:SetAttribute(FARM_ATTR.ReadyAt, Growth.GetReadyAt(entry.SeedId, entry.PlantedAt))
+	farm.Model:SetAttribute(FARM_ATTR.Stage, stage)
+	farm.Model:SetAttribute(FARM_ATTR.PlantCount, plantCount(entry))
+	farm.Model:SetAttribute(FARM_ATTR.PlantCapacity, GameConfig.GetPlantCapacity(entry.SeedId))
+
+	local container = self:_renderCrop(farm, entry.SeedId, stage, plantCount(entry))
+
+	--[[
+		The crop is its own damageable entity: it regenerates, unlike the farm
+		it sits on, which must be repaired with resources.
+
+		The ARCHETYPE comes from the plantable. Food crops share "Crop"; a
+		combat plant names its own, which is where it gets its real health,
+		its armour class and its attack. That one indirection is the whole
+		mechanism - a combat plant is an archetype plus an attack profile, not
+		a new system.
+	]]
+	if container and not farm.CropEntityId then
+		farm.CropEntityId = DamageableService:Register({
+			ArchetypeId = GameConfig.GetPlantArchetypeId(entry.SeedId),
+			Model = container,
+			OwnerUserId = player.UserId,
+			State = if entry.CropHealth then { Health = entry.CropHealth, DamagedAt = entry.CropDamagedAt } else nil,
+		})
+
+		if farm.CropEntityId then
+			-- Declines for anything without an attack, so food crops take
+			-- this path too and nothing has to ask what kind of plant it is.
+			AttackService:Register(farm.CropEntityId)
+		end
+	end
+
+	--[[
+		A plant only fights once it has finished growing. Suspended rather
+		than unregistered, so maturing is a flag flip instead of a
+		re-derivation - and so no second code path can register it twice.
+	]]
+	if farm.CropEntityId then
+		AttackService:SetSuspended(farm.CropEntityId, not Growth.IsMature(stage))
+	end
+
+	self:_refreshPrompt(player, farm)
+end
+
+function FarmService:_projectFallow(player: Player, farm)
+	if farm.CropEntityId then
+		AttackService:Unregister(farm.CropEntityId)
+		DamageableService:Unregister(farm.CropEntityId)
+		farm.CropEntityId = nil
+	end
+
+	farm.Model:SetAttribute(FARM_ATTR.SeedId, "")
+	farm.Model:SetAttribute(FARM_ATTR.PlantedAt, 0)
+	farm.Model:SetAttribute(FARM_ATTR.ReadyAt, 0)
+	farm.Model:SetAttribute(FARM_ATTR.Stage, EMPTY_STAGE)
+	farm.Model:SetAttribute(FARM_ATTR.PlantCount, 0)
+	farm.Model:SetAttribute(FARM_ATTR.PlantCapacity, 0)
+
+	self:_renderCrop(farm, "", EMPTY_STAGE, 0)
+	self:_refreshPrompt(player, farm)
+end
+
+--[[
+	Keeps the farm's prompt as a GLANCEABLE state line, not an action.
+
+	The prompt now opens the panel and nothing else, so its text has one job:
+	tell you from outside whether this square is worth walking to. The detail
+	- which crop, how long, how many - is the panel's, and it derives all of
+	it from the same replicated attributes.
+]]
+function FarmService:_refreshPrompt(player: Player, farm)
+	local body = farm.Model.PrimaryPart
+	local prompt = body and body:FindFirstChild(GameConfig.Selection.PromptName)
+
+	if not prompt then
+		return
+	end
+
+	local entry = self:_getEntry(player, farm.InstanceId)
+	local seedId = if entry then entry.SeedId else nil
+	local structure = GameConfig.GetStructure("Farm")
+	local base = if structure then structure.Name else "Farm"
+
+	if not seedId or seedId == "" then
+		prompt.ObjectText = `{base} - fallow`
+		return
+	end
+
+	local plantable = GameConfig.GetPlantable(seedId)
+	local mature = Growth.IsMature(farm.Model:GetAttribute(FARM_ATTR.Stage))
+
+	--[[
+		A kept plant is named after ITSELF, not after a yield it does not
+		have. The old prompt had to be careful never to call uprooting a
+		harvest; this one does not offer either, so it only has to be honest
+		about what is growing.
+	]]
+	if not GameConfig.IsHarvestable(seedId) then
+		local archetype = GameConfig.GetArchetype(GameConfig.GetPlantArchetypeId(seedId))
+		local name = if archetype then archetype.Name else seedId
+
+		prompt.ObjectText = `{base} - {name}{if mature then "" else ", growing"}`
+		return
+	end
+
+	local yieldItem = if plantable then GameConfig.GetItem(plantable.Yields) else nil
+	local name = if yieldItem then yieldItem.Name else seedId
+
+	prompt.ObjectText = `{base} - {name}{if mature then " ready" else ", growing"}`
+end
+
+function FarmService:_refreshAll(player: Player)
+	for _, farm in self:_getFarms(player) do
+		self:_refreshPrompt(player, farm)
+	end
+end
+
+--------------------------------------------------------------------------------
+-- Seed selection
+--------------------------------------------------------------------------------
+
+--[[
+	Which seed a plant action will use: the explicit selection when valid and in
+	stock, otherwise the cheapest plantable seed owned.
+
+	Iterates the plantable directory rather than the inventory, so the result
+	never depends on inventory key order.
+]]
+function FarmService:_resolveSeedId(player: Player, chosenSeedId: string?): string?
+	local level = PlayerDataService:GetLevel(player)
+
+	--[[
+		An explicit choice outranks the stored selection, and is held to the
+		same two conditions: the level gate, and actually owning one. The
+		panel sends this; the old prompt had no way to.
+	]]
+	local chosen = GameConfig.GetPlantable(chosenSeedId)
+
+	if
+		chosen
+		and level >= chosen.RequiredLevel
+		and PlayerDataService:HasItem(player, chosen.SeedId, 1)
+	then
+		return chosen.SeedId
+	end
+
+	local selected = player:GetAttribute(GameConfig.Attributes.SelectedSeed)
+	local selectedPlantable = GameConfig.GetPlantable(selected)
+
+	if
+		selectedPlantable
+		and level >= selectedPlantable.RequiredLevel
+		and PlayerDataService:HasItem(player, selectedPlantable.SeedId, 1)
+	then
+		return selectedPlantable.SeedId
+	end
+
+	local bestId, bestPrice = nil, nil
+
+	for _, plantable in GameConfig.GetAvailablePlantables(level) do
+		if PlayerDataService:HasItem(player, plantable.SeedId, 1) then
+			local price = GameConfig.Items[plantable.SeedId].BuyPrice or 0
+			local isBetter = bestPrice == nil or price < bestPrice or (price == bestPrice and plantable.SeedId < bestId)
+
+			if isBetter then
+				bestId, bestPrice = plantable.SeedId, price
+			end
+		end
+	end
+
+	return bestId
+end
+
+--------------------------------------------------------------------------------
+-- Planting and harvesting
+--------------------------------------------------------------------------------
+
+--- `chosenSeedId` is the selection panel's explicit pick. Nil means "decide
+--- for me", which is what the prompt used to do and what any caller without a
+--- UI still wants.
+function FarmService:TryPlant(player: Player, instanceId: string, chosenSeedId: string?): boolean
+	local entry = self:_getEntry(player, instanceId)
+	local farm = self:GetFarm(player, instanceId)
+
+	if not entry or not farm then
+		return false
+	end
+
+	--[[
+		The profile, not the attribute, decides whether the farm is occupied -
+		and an occupied square cannot be topped up.
+
+		Allowing a top-up means choosing between two bad options. Keep the
+		original PlantedAt and you can plant one carrot, wait until it is
+		nearly ripe, add eight more and harvest nine - a duplication exploit
+		of exactly the kind the Instant Grow backdating turned out to be.
+		Reset PlantedAt instead and adding a ninth carrot throws away the
+		progress of eight nearly-ripe ones, which reads as a bug rather than
+		as a rule. So the square fills in one action and is then committed.
+	]]
+	if entry.SeedId and entry.SeedId ~= "" then
+		return self:_refuse(player, instanceId, "Occupied")
+	end
+
+	--[[
+		An explicit pick still goes through the resolver's checks - it is
+		client input, and "the panel offered it" is not a validation. Checked
+		HERE rather than trusted, then handed to the same code path as a
+		resolved pick so there is one planting rule and not two.
+	]]
+	local seedId = self:_resolveSeedId(player, chosenSeedId)
+	if not seedId then
+		return self:_refuse(player, instanceId, "NoSeeds")
+	end
+
+	local plantable = GameConfig.GetPlantable(seedId)
+	if not plantable or PlayerDataService:GetLevel(player) < plantable.RequiredLevel then
+		return self:_refuse(player, instanceId, "LevelTooLow")
+	end
+
+	--[[
+		One press fills the square: as many as fit, or as many as are held.
+
+		Planting fewer than a full square is allowed rather than refused - a
+		player with three seeds should be able to use them. They just cannot
+		add the other six later, per the commitment rule above.
+	]]
+	local count = math.min(GameConfig.GetPlantCapacity(seedId), PlayerDataService:GetItemCount(player, seedId))
+
+	if count < 1 then
+		return self:_refuse(player, instanceId, "NoSeeds")
+	end
+
+	-- Atomic: the seeds are consumed before the crop exists, so a spammed
+	-- prompt cannot plant two squares from one batch.
+	if not PlayerDataService:RemoveItem(player, seedId, count) then
+		return self:_refuse(player, instanceId, "NoSeeds")
+	end
+
+	local now = os.time()
+	entry.SeedId = seedId
+	entry.PlantedAt = now
+	entry.PlantCount = count
+	entry.CropHealth = nil
+	entry.CropDamagedAt = nil
+
+	PlayerDataService:IncrementStat(player, "TotalPlanted", count)
+
+	--[[
+		A KEPT plant is paid its XP now, because it will never be harvested
+		and harvest is where every other plant's XP comes from.
+
+		Paying on maturity instead would be the obvious choice and is a trap:
+		maturity is derived from a timestamp, so it is reached again every
+		time the plant is re-projected - on a rejoin, on a stage refresh - and
+		each one would pay out. Planting happens exactly once.
+	]]
+	if not GameConfig.IsHarvestable(seedId) then
+		PlayerDataService:AddXP(player, plantable.XPReward * count)
+	end
+
+	self:_projectCrop(player, farm, entry, now)
+	self.Planted:Fire(player, instanceId, seedId, count)
+
+	return true
+end
+
+function FarmService:TryHarvest(player: Player, instanceId: string): boolean
+	local entry = self:_getEntry(player, instanceId)
+	local farm = self:GetFarm(player, instanceId)
+
+	if not entry or not farm or not entry.SeedId or entry.SeedId == "" then
+		return false
+	end
+
+	local plantable = GameConfig.GetPlantable(entry.SeedId)
+
+	if not plantable then
+		-- The seed left the config; free the farm rather than trapping it.
+		entry.SeedId = ""
+		self:_projectFallow(player, farm)
+		return false
+	end
+
+	--[[
+		A combat plant is kept, not picked. Uprooting is the way to get the
+		square back, and it is a separate call so that a mis-aimed harvest can
+		never destroy a defence the player spent two hundred gold on.
+	]]
+	if not GameConfig.IsHarvestable(entry.SeedId) then
+		return self:_refuse(player, instanceId, "NotHarvestable")
+	end
+
+	-- Recomputed from the timestamp, not read from the Stage attribute, which
+	-- is only as fresh as the last tick.
+	if not Growth.IsMature(Growth.GetStage(entry.SeedId, entry.PlantedAt, os.time())) then
+		return false, "NotGrown"
+	end
+
+	-- Yield and XP are per PLANT, so a full square pays its whole stack. This
+	-- is the entire point of density: nine carrots of ground, nine carrots.
+	local count = plantCount(entry)
+	local yield = plantable.YieldAmount * count
+
+	-- Granted before the farm is cleared, so a full inventory leaves the crop
+	-- in the ground rather than destroying it.
+	if not PlayerDataService:AddItem(player, plantable.Yields, yield) then
+		return self:_refuse(player, instanceId, "InventoryFull")
+	end
+
+	PlayerDataService:AddXP(player, plantable.XPReward * count)
+	PlayerDataService:IncrementStat(player, "TotalHarvested", count)
+
+	entry.SeedId = ""
+	entry.PlantedAt = nil
+	entry.PlantCount = nil
+	entry.CropHealth = nil
+	entry.CropDamagedAt = nil
+
+	self:_projectFallow(player, farm)
+	self.Harvested:Fire(player, instanceId, plantable.Yields, yield)
+
+	return true
+end
+
+--[[
+	Clears a square of a plant that is kept rather than picked.
+
+	Returns NOTHING - no seed, no crop, no refund - for the same reason
+	demolishing a structure does: a refund below cost is defensible but "below
+	cost" is a balance decision, and a refund at cost makes the square a free
+	store of value. Planting a defence is a commitment.
+]]
+function FarmService:TryUproot(player: Player, instanceId: string): boolean
+	local entry = self:_getEntry(player, instanceId)
+	local farm = self:GetFarm(player, instanceId)
+
+	if not entry or not farm or not entry.SeedId or entry.SeedId == "" then
+		return false
+	end
+
+	-- Food crops are harvested, and harvesting pays. Routing one through here
+	-- would silently throw away a ripe square.
+	if GameConfig.IsHarvestable(entry.SeedId) then
+		return false
+	end
+
+	local seedId = entry.SeedId
+
+	entry.SeedId = ""
+	entry.PlantedAt = nil
+	entry.PlantCount = nil
+	entry.CropHealth = nil
+	entry.CropDamagedAt = nil
+
+	self:_projectFallow(player, farm)
+	self.Uprooted:Fire(player, instanceId, seedId)
+
+	return true
+end
+
+--------------------------------------------------------------------------------
+-- Growth boosts
+--------------------------------------------------------------------------------
+
+--[[
+	Picks a target for an un-aimed boost: the explicitly targeted farm when it
+	is still growing, otherwise the farm with the MOST time remaining, where
+	the boost is worth most. Ties break on instance id for determinism.
+]]
+function FarmService:_pickBoostTarget(player: Player): string?
+	local data = PlayerDataService:GetData(player)
+	if not data then
+		return nil
+	end
+
+	local now = os.time()
+
+	local targeted = player:GetAttribute(GameConfig.Attributes.TargetFarm)
+	if type(targeted) == "string" then
+		local entry = self:_getEntry(player, targeted)
+
+		if entry and entry.SeedId ~= "" and Growth.GetTimeRemaining(entry.SeedId, entry.PlantedAt, now) > 0 then
+			return targeted
+		end
+	end
+
+	local bestId, bestRemaining = nil, 0
+
+	for instanceId, entry in data.Structures do
+		if entry.StructureId == "Farm" and entry.SeedId and entry.SeedId ~= "" then
+			local remaining = Growth.GetTimeRemaining(entry.SeedId, entry.PlantedAt, now)
+
+			if remaining > 0 then
+				local better = bestId == nil
+					or remaining > bestRemaining
+					or (remaining == bestRemaining and instanceId < bestId)
+
+				if better then
+					bestId, bestRemaining = instanceId, remaining
+				end
+			end
+		end
+	end
+
+	return bestId
+end
+
+--[[
+	Completes a crop's growth, consuming one GrowthBoost.
+
+	Backdates PlantedAt rather than writing ReadyAt or Stage, because those are
+	a derived projection: an attribute write would be undone by the next tick,
+	would not persist, and would be ignored by harvest validation.
+]]
+function FarmService:CompleteGrowth(player: Player, instanceId: string?): boolean
+	local target = instanceId or self:_pickBoostTarget(player)
+	if not target then
+		return false
+	end
+
+	local entry = self:_getEntry(player, target)
+	local farm = self:GetFarm(player, target)
+
+	if not entry or not farm or not entry.SeedId or entry.SeedId == "" then
+		return false
+	end
+
+	local plantable = GameConfig.GetPlantable(entry.SeedId)
+	if not plantable then
+		return false
+	end
+
+	local now = os.time()
+
+	-- Never burn a boost on a crop that is already harvestable.
+	if Growth.IsMature(Growth.GetStage(entry.SeedId, entry.PlantedAt, now)) then
+		return false
+	end
+
+	if not PlayerDataService:RemoveItem(player, GameConfig.Monetization.GrowthBoostItemId, 1) then
+		return false
+	end
+
+	entry.PlantedAt = now - plantable.GrowTime
+
+	self:_projectCrop(player, farm, entry, now)
+	self.GrowthBoosted:Fire(player, target, entry.SeedId)
+
+	return true
+end
+
+--- Seconds until a farm's crop is harvestable; nil when fallow.
+function FarmService:GetTimeRemaining(player: Player, instanceId: string): number?
+	local entry = self:_getEntry(player, instanceId)
+
+	if not entry or not entry.SeedId or entry.SeedId == "" then
+		return nil
+	end
+
+	return Growth.GetTimeRemaining(entry.SeedId, entry.PlantedAt, os.time())
+end
+
+--------------------------------------------------------------------------------
+-- Farm lifecycle, driven by the placement service
+--------------------------------------------------------------------------------
+
+function FarmService:_attach(player: Player, instanceId: string, entry, model: Model)
+	local structure = GameConfig.GetStructure(entry.StructureId)
+
+	if not structure or not structure.HoldsCrop then
+		return
+	end
+
+	local body = model.PrimaryPart
+	if not body then
+		return
+	end
+
+	--[[
+		The farm's prompt is StructureBuilder's, because every structure has
+		one. This service only writes its ObjectText, so a farm reads as
+		"Farm - Carrot ready" from outside without the panel being open.
+	]]
+	local farm = {
+		InstanceId = instanceId,
+		Model = model,
+		Connections = {},
+		CropEntityId = nil,
+	}
+
+	local farms = self._farms[player]
+	if not farms then
+		farms = {}
+		self._farms[player] = farms
+	end
+	farms[instanceId] = farm
+
+	if entry.SeedId and entry.SeedId ~= "" and GameConfig.GetPlantable(entry.SeedId) then
+		self:_projectCrop(player, farm, entry, os.time())
+	else
+		entry.SeedId = ""
+		self:_projectFallow(player, farm)
+	end
+end
+
+function FarmService:_detach(player: Player, instanceId: string)
+	local farms = self._farms[player]
+	local farm = if farms then farms[instanceId] else nil
+
+	if not farm then
+		return
+	end
+
+	for _, connection in farm.Connections do
+		connection:Disconnect()
+	end
+
+	if farm.CropEntityId then
+		DamageableService:Unregister(farm.CropEntityId)
+	end
+
+	farms[instanceId] = nil
+end
+
+--------------------------------------------------------------------------------
+-- Growth loop
+--------------------------------------------------------------------------------
+
+--- Advances every growing crop. Attributes and visuals are only touched on a
+--- stage transition, so idle farms cost one comparison per tick.
+function FarmService:_tick()
+	local now = os.time()
+
+	for player, farms in self._farms do
+		for instanceId, farm in farms do
+			local entry = self:_getEntry(player, instanceId)
+
+			if entry and entry.SeedId and entry.SeedId ~= "" then
+				local stage = Growth.GetStage(entry.SeedId, entry.PlantedAt, now)
+
+				if stage ~= farm.Model:GetAttribute(FARM_ATTR.Stage) then
+					--[[
+						The full projection rather than just a re-render: a
+						plant reaching maturity has to stop being suspended,
+						and that lives in _projectCrop. Re-rendering alone
+						would leave a grown combat plant that never fires.
+					]]
+					self:_projectCrop(player, farm, entry, now)
+				end
+			end
+		end
+	end
+end
+
+--------------------------------------------------------------------------------
+-- Startup
+--------------------------------------------------------------------------------
+
+--[[
+	Why a planting was refused, in words the player can act on.
+
+	Same reasoning as the rebuild prompt: a prompt that declines silently is
+	indistinguishable from a prompt that is broken.
+]]
+local PLANT_REFUSALS = {
+	NoSeeds = "You have no seeds of that kind to plant.",
+	LevelTooLow = "You are not experienced enough to plant that yet.",
+	Occupied = "That square is already planted. Harvest or uproot it first.",
+	NotHarvestable = "That is a defence, not a crop. Uproot it from its panel instead.",
+	InventoryFull = "Your inventory is full, so the crop stays in the ground.",
+}
+
+function FarmService:Start()
+	assert(RunService:IsServer(), "FarmService is server-only")
+
+	if self._started then
+		return self
+	end
+	self._started = true
+
+	-- Fires for both new placements and rebuilds on rejoin, so a farm restored
+	-- from saved data gets its prompt and crop exactly like a fresh one.
+	PlacementService.Spawned:Connect(function(player: Player, instanceId: string, entry, model: Model)
+		self:_attach(player, instanceId, entry, model)
+	end)
+
+	PlacementService.Despawned:Connect(function(player: Player, instanceId: string)
+		self:_detach(player, instanceId)
+	end)
+
+	Players.PlayerRemoving:Connect(function(player: Player)
+		for instanceId in self:_getFarms(player) do
+			self:_detach(player, instanceId)
+		end
+
+		self._farms[player] = nil
+		self._lastInteraction[player] = nil
+	end)
+
+	--[[
+		Crop health is owned by the damageable registry but must survive a
+		rejoin, so it is mirrored onto the farm's structure entry.
+	]]
+	DamageableService.StateChanged:Connect(function(_, state, entity)
+		if entity.ArchetypeId ~= "Crop" then
+			return
+		end
+
+		local owner = Players:GetPlayerByUserId(entity.OwnerUserId)
+		if not owner then
+			return
+		end
+
+		for instanceId, farm in self:_getFarms(owner) do
+			if farm.CropEntityId == entity.Id then
+				local entry = self:_getEntry(owner, instanceId)
+
+				if entry then
+					entry.CropHealth = state.Health
+					entry.CropDamagedAt = state.DamagedAt
+				end
+
+				return
+			end
+		end
+	end)
+
+	-- A crop killed by damage leaves the farm fallow, exactly like harvesting.
+	DamageableService.Destroyed:Connect(function(_, _killer, entity)
+		if entity.ArchetypeId ~= "Crop" then
+			return
+		end
+
+		local owner = Players:GetPlayerByUserId(entity.OwnerUserId)
+		if not owner then
+			return
+		end
+
+		for instanceId, farm in self:_getFarms(owner) do
+			if farm.CropEntityId == entity.Id then
+				local entry = self:_getEntry(owner, instanceId)
+				local seedId = if entry then entry.SeedId else nil
+
+				farm.CropEntityId = nil
+
+				if entry then
+					entry.SeedId = ""
+					entry.PlantedAt = nil
+					entry.CropHealth = nil
+					entry.CropDamagedAt = nil
+				end
+
+				self:_projectFallow(owner, farm)
+				self.CropDestroyed:Fire(owner, instanceId, seedId)
+
+				return
+			end
+		end
+	end)
+
+	--[[
+		Refusals reach the player. Without this, pressing E on a farm and
+		having nothing happen is the same experience as a bug.
+	]]
+	local notice = Remotes.GetEvent(GameConfig.RemoteNames.Notice)
+
+	self.PlantFailed:Connect(function(player: Player, _instanceId, reason: string)
+		local message = PLANT_REFUSALS[reason]
+
+		if message then
+			notice:FireClient(player, message)
+		end
+	end)
+
+	local selectSeed = Remotes.GetEvent(GameConfig.RemoteNames.SelectSeed)
+
+	selectSeed.OnServerEvent:Connect(function(player: Player, seedId: unknown)
+		if not self:_consumeInteraction(player) then
+			return
+		end
+
+		local plantable = GameConfig.GetPlantable(seedId)
+		if not plantable then
+			return
+		end
+
+		player:SetAttribute(GameConfig.Attributes.SelectedSeed, plantable.SeedId)
+		self:_refreshAll(player)
+	end)
+
+	--[[
+		Boost targeting. ProcessReceipt cannot carry a farm id, so the client
+		records its intended target beforehand and the receipt handler reads it.
+		Validated here, stored as a server-written attribute, so the receipt
+		path never touches client input.
+	]]
+	local selectFarm = Remotes.GetEvent(GameConfig.RemoteNames.SelectFarm)
+
+	selectFarm.OnServerEvent:Connect(function(player: Player, instanceId: unknown)
+		if not self:_consumeInteraction(player) then
+			return
+		end
+
+		if type(instanceId) ~= "string" or not self:_getEntry(player, instanceId) then
+			return
+		end
+
+		player:SetAttribute(GameConfig.Attributes.TargetFarm, instanceId)
+	end)
+
+	local useBoost = Remotes.GetEvent(GameConfig.RemoteNames.UseBoost)
+
+	useBoost.OnServerEvent:Connect(function(player: Player, instanceId: unknown)
+		if not self:_consumeInteraction(player) then
+			return
+		end
+
+		-- nil means "pick the best target for me"; anything else must be real.
+		local target = nil
+
+		if instanceId ~= nil then
+			if type(instanceId) ~= "string" or not self:_getEntry(player, instanceId) then
+				return
+			end
+
+			target = instanceId
+		end
+
+		self:CompleteGrowth(player, target)
+	end)
+
+	task.spawn(function()
+		while true do
+			task.wait(GameConfig.Growth.TickInterval)
+			self:_tick()
+		end
+	end)
+
+	return self
+end
+
+return FarmService

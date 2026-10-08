@@ -122,6 +122,85 @@ function makeFarm(player, x, z)
 	error("no free farm spot beside the Mill")
 end
 
+--[[
+	Shared by every husbandry section: builds a pen of `structureId` near
+	(x, z) and returns its instance id.
+
+	Ages the player up if the pen needs it, rather than assuming the Stone
+	Age, so a Barn test does not have to repeat the age-up dance.
+]]
+function makePen(player, structureId, x, z)
+	PDS:AddResource(player, "Wood", 50000)
+	PDS:AddResource(player, "Stone", 50000)
+
+	--[[
+		Searches outward for somewhere the thing will actually fit, rather
+		than trusting a fixed offset.
+
+		Overlap is checked against EVERY player's structures, and by the time
+		these sections run the world already holds the farms, towers and
+		practice ranges of a dozen earlier ones. A hardcoded spot works until
+		a section is added above it, and then fails somewhere else entirely.
+		Out-of-bounds and blocked attempts are simply the next candidate.
+	]]
+	local function placeNear(id, cx, cz)
+		for radius = 0, 6 do
+			for _, step in {
+				{ 0, 0 }, { 1, 0 }, { 0, 1 }, { -1, 0 }, { 0, -1 },
+				{ 1, 1 }, { -1, -1 }, { 1, -1 }, { -1, 1 },
+			} do
+				local result = PLACEMENT:Place(player, id, cx + step[1] * radius * 24, cz + step[2] * radius * 24)
+
+				if result.Ok then
+					return result.InstanceId
+				end
+			end
+		end
+
+		return nil
+	end
+
+	if not PLACEMENT:HasStructure(player, "TownCenter") then
+		assert(placeNear("TownCenter", x, z) ~= nil, "no room for a TownCenter")
+	end
+
+	if not PLACEMENT:HasStructure(player, "Mill") then
+		assert(placeNear("Mill", x, z) ~= nil, "no room for a Mill")
+	end
+
+	-- After the Mill, because a Barn is a Bronze Age building and the Mill it
+	-- requires is not.
+	local structure = GameConfig.GetStructure(structureId)
+
+	while PDS:GetAge(player) < structure.RequiredAge do
+		for _, resourceId in GameConfig.GetResourceIds() do
+			PDS:AddResource(player, resourceId, 50000)
+		end
+
+		assert(select(1, PDS:TryAdvanceAge(player)), "could not reach the age the pen needs")
+	end
+
+	local penId = placeNear(structureId, x, z)
+	assert(penId ~= nil, `no free spot for a {structureId}`)
+
+	return penId
+end
+
+function penOf(player, instanceId)
+	return PLACEMENT:GetPlaced(player)[instanceId].Model
+end
+
+function penPrompt(player, instanceId, name)
+	return penOf(player, instanceId).PrimaryPart:FindFirstChild(name or "Interact")
+end
+
+--- Walks the player to the pen and fires one of its prompts, so distance
+--- never silently decides the outcome of a test about something else.
+function pokePen(player, instanceId, name)
+	player.Character.PrimaryPart.Position = penOf(player, instanceId).PrimaryPart.Position
+	penPrompt(player, instanceId, name).Triggered:Fire(player)
+end
+
 function farmOf(player, instanceId)
 	return PLACEMENT:GetPlaced(player)[instanceId].Model
 end
@@ -3581,6 +3660,1613 @@ local function runTests()
 		end
 
 		------------------------------------------------------------------------
+		section("Husbandry: maturity and produce math")
+		------------------------------------------------------------------------
+
+		--[[
+			The pure module first, with no pen and no service around it. Every
+			payout in husbandry is derived from these functions, so if the
+			arithmetic is wrong everything above it is wrong in a way that is
+			much harder to read.
+		]]
+		do
+			local Husbandry = require(HusbandryModule)
+			local chick = GameConfig.GetAnimal("Chick")
+			local T0 = 1_000_000
+
+			checkEqual(Husbandry.GetStage("Chick", T0, T0), "Juvenile", "a freshly stocked animal is a juvenile")
+			checkEqual(
+				Husbandry.GetStage("Chick", T0, T0 + chick.MatureTime // 2),
+				"Adolescent",
+				"halfway through it is an adolescent"
+			)
+			checkEqual(
+				Husbandry.GetStage("Chick", T0, T0 + chick.MatureTime),
+				"Grown",
+				"and at its maturity time it is grown"
+			)
+			check(Husbandry.IsGrown("Grown"), "IsGrown recognises the final stage")
+			checkEqual(
+				Husbandry.GetStage("NotAnAnimal", T0, T0),
+				GameConfig.Husbandry.EmptyStage,
+				"an unknown animal has no stage, rather than a wrong one"
+			)
+			checkEqual(Husbandry.GetGrownAt("Chick", T0), T0 + chick.MatureTime, "GetGrownAt is stocked-at plus maturity")
+
+			-- Fed from stocking for one window, as TryStock does.
+			local fedUntil = T0 + chick.FeedDuration
+			local grownAt = T0 + chick.MatureTime
+
+			checkEqual(
+				Husbandry.GetReadyCycles("Chick", T0, T0, fedUntil, 6, grownAt),
+				0,
+				"a herd that has only just grown up has produced nothing yet"
+			)
+			checkEqual(
+				Husbandry.GetReadyCycles("Chick", T0, T0, fedUntil, 6, grownAt + chick.ProduceInterval - 1),
+				0,
+				"and a part-finished cycle counts for nothing"
+			)
+			checkEqual(
+				Husbandry.GetReadyCycles("Chick", T0, T0, fedUntil, 6, grownAt + chick.ProduceInterval),
+				1,
+				"one whole cycle after maturity is one batch"
+			)
+			checkEqual(
+				Husbandry.GetReadyCycles("Chick", T0, T0, fedUntil, 6, grownAt + chick.ProduceInterval * 2),
+				2,
+				"and two is two"
+			)
+
+			--[[
+				The window START is clamped to maturity, which is what stops a
+				herd stocked long before it grew up from paying out the wait.
+			]]
+			checkEqual(
+				Husbandry.GetWindowStart("Chick", T0, T0),
+				grownAt,
+				"the produce clock cannot start before the animals are grown"
+			)
+
+			--[[
+				The window END is clamped to the feed. This is the whole
+				cadence of the mechanic: time the herd was not fed produces
+				nothing, and because the clock keeps running it is not merely
+				deferred.
+			]]
+			local longAfter = T0 + chick.FeedDuration * 100
+			checkEqual(
+				Husbandry.GetReadyCycles("Chick", T0, T0, fedUntil, 6, longAfter),
+				(chick.FeedDuration - chick.MatureTime) // chick.ProduceInterval,
+				"produce stops where the feed ran out, however long ago that was"
+			)
+			checkEqual(
+				Husbandry.GetReadyCycles("Chick", T0, T0, nil, 6, longAfter),
+				0,
+				"a herd that was never fed has produced nothing"
+			)
+			checkEqual(
+				Husbandry.GetReadyCycles("Chick", T0, T0, fedUntil, 0, longAfter),
+				0,
+				"and an empty pen produces nothing"
+			)
+
+			--[[
+				Advancing by the cycles PAID rather than to `now` is what makes
+				collecting early cost nothing. Collect at the instant a cycle
+				lands, or thirty seconds later, and the next one is due at the
+				same moment either way.
+			]]
+			local at = grownAt + chick.ProduceInterval + 30
+			local paid = Husbandry.GetReadyCycles("Chick", T0, T0, fedUntil, 6, at)
+			local clock = Husbandry.AdvanceClock("Chick", T0, T0, paid)
+
+			checkEqual(paid, 1, "one batch is waiting half a cycle into the second")
+			checkEqual(
+				clock,
+				grownAt + chick.ProduceInterval,
+				"and the clock advances by the cycle paid, not to the moment of collection"
+			)
+			checkEqual(
+				Husbandry.GetReadyCycles("Chick", T0, clock, fedUntil, 6, at),
+				0,
+				"so collecting twice in a row pays once"
+			)
+			checkEqual(
+				Husbandry.GetReadyCycles("Chick", T0, clock, fedUntil, 6, at + 30),
+				1,
+				"and the next batch lands a cycle after the last one, not a cycle after the collection"
+			)
+
+			-- Totals are per cycle AND per animal: this is why a full pen is
+			-- worth filling.
+			checkEqual(
+				Husbandry.GetProduceTotals("Chick", 3, 6).Egg,
+				chick.Produces[1].Amount * 3 * 6,
+				"produce is counted per cycle and per animal"
+			)
+			checkEqual(
+				Husbandry.GetFeedCost("Chick", 6),
+				chick.Feed.Amount * 6,
+				"and feed is priced by headcount, so a bigger flock is a bigger commitment"
+			)
+
+			--[[
+				A pig produces nothing periodically. It must therefore report
+				no cycles at all rather than a timer that never fires, which
+				is the difference between "raised for meat" and "broken".
+			]]
+			check(not GameConfig.HasProduce("Piglet"), "a pig has no periodic produce")
+			checkEqual(
+				Husbandry.GetReadyCycles("Piglet", T0, T0, T0 + 10_000, 3, T0 + 10_000),
+				0,
+				"so a barn full of pigs never has anything to collect"
+			)
+			checkEqual(
+				Husbandry.GetNextProduceAt("Piglet", T0, T0, T0 + 10_000, 3, T0),
+				nil,
+				"and never names a next batch"
+			)
+			checkEqual(
+				Husbandry.GetNextProduceAt("Chick", T0, T0, fedUntil, 6, longAfter),
+				nil,
+				"nor does a herd whose feed has run out - there is no next batch until it is fed"
+			)
+
+			-- Slaughter totals are per animal, and sum when two entries name
+			-- the same item.
+			checkEqual(
+				Husbandry.GetSlaughterTotals("Calf", 3).Fat,
+				3,
+				"slaughter yields scale with the herd"
+			)
+		end
+
+		------------------------------------------------------------------------
+		section("Husbandry: stocking a pen")
+		------------------------------------------------------------------------
+
+		do
+			local AnimalService = require(AnimalServiceModule)
+			AnimalService:Start()
+			HUSBANDRY = AnimalService
+
+			local keeper = newPlayer(5151, "Keeper")
+			giveCharacter(keeper, Vector3.new(0, 3, 0))
+			PlayersService.PlayerAdded:Fire(keeper)
+			PDS:AddXP(keeper, 100000)
+
+			local coop = makePen(keeper, "Coop", 160, 160)
+			check(coop ~= nil, "a coop can be built beside a Mill")
+
+			local model = penOf(keeper, coop)
+			checkEqual(model:GetAttribute("AnimalId"), "", "a fresh pen is empty")
+			checkEqual(model:GetAttribute("AnimalStage"), GameConfig.Husbandry.EmptyStage, "and has no maturity stage")
+
+			--[[
+				Two prompts, on different keys. Slaughtering is irreversible
+				and sits on a building the player walks up to repeatedly to
+				collect eggs, so it must not share a gesture with collecting
+				them - the lesson from combat plants being uprooted by players
+				mashing E down a row of farms.
+			]]
+			local interact = penPrompt(keeper, coop, "Interact")
+			local cull = penPrompt(keeper, coop, "Cull")
+
+			check(interact ~= nil, "a pen gets a contextual prompt")
+			check(cull ~= nil, "and a separate one for slaughtering")
+			check(interact.KeyboardKeyCode ~= cull.KeyboardKeyCode, "on different keys")
+			checkEqual(interact.HoldDuration, 0, "the repeatable actions are a tap")
+			checkEqual(
+				cull.HoldDuration,
+				GameConfig.Interaction.DestructiveHoldDuration,
+				"and the irreversible one must be held"
+			)
+			checkEqual(cull.Enabled, false, "there is nothing to slaughter in an empty pen")
+			checkEqual(interact.ActionText, "Stock", "an empty pen offers Stock")
+			checkEqual(interact.ObjectText, "No livestock", "and says plainly that there is nothing to put in it")
+
+			-- Pressing E with nothing to stock refuses, and explains itself.
+			local refusal = nil
+			local listener = AnimalService.ActionFailed:Connect(function(_, _, reason)
+				refusal = reason
+			end)
+
+			pokePen(keeper, coop)
+			checkEqual(refusal, "NoLivestock", "stocking with no livestock refuses, and says why")
+			checkEqual(penOf(keeper, coop):GetAttribute("AnimalId"), "", "and the pen stays empty")
+
+			--[[
+				A cow does not go in a coop, and the refusal must come from the
+				PEN rather than from the animal being unaffordable. Held, and
+				still refused.
+			]]
+			refusal = nil
+			PDS:AddItem(keeper, "Calf", 2)
+			advance(1)
+			pokePen(keeper, coop)
+			checkEqual(refusal, "NoLivestock", "a coop will not take cattle, however many are held")
+			checkEqual(penOf(keeper, coop):GetAttribute("AnimalId"), "", "so the pen is still empty")
+			checkEqual(PDS:GetItemCount(keeper, "Calf"), 2, "and the calves are not consumed")
+			checkEqual(GameConfig.GetPenCapacity("Coop", "Calf"), 0, "because no calf fits in a coop at all")
+
+			-- Now the right animal, and more than fits.
+			local capacity = GameConfig.GetPenCapacity("Coop", "Chick")
+			check(capacity > 1, `a coop holds a flock ({capacity})`)
+
+			PDS:AddItem(keeper, "Chick", capacity + 4)
+
+			--[[
+				A tick, not a second. The prompt is a projection refreshed by
+				the husbandry loop, which runs on its own interval - so a test
+				that reads it one second after changing the inventory is
+				asserting the tick rate, not the text.
+			]]
+			advance(GameConfig.Husbandry.TickInterval + 1)
+
+			checkEqual(
+				penPrompt(keeper, coop, "Interact").ObjectText,
+				`Chick x{capacity}`,
+				"the prompt names how many would actually go in"
+			)
+
+			advance(1)
+			pokePen(keeper, coop)
+
+			model = penOf(keeper, coop)
+			checkEqual(model:GetAttribute("AnimalId"), "Chick", "stocking fills the pen")
+			checkEqual(model:GetAttribute("AnimalCount"), capacity, "to capacity, in one action")
+			checkEqual(model:GetAttribute("AnimalCapacity"), capacity, "and publishes what it holds")
+			checkEqual(model:GetAttribute("AnimalStage"), "Juvenile", "the animals start as juveniles")
+			checkEqual(PDS:GetItemCount(keeper, "Chick"), 4, "consuming one item per animal and no more")
+
+			local record = PDS:GetData(keeper).Structures[coop]
+			checkEqual(record.AnimalId, "Chick", "the herd is recorded on the pen's own structure entry")
+			checkEqual(record.AnimalCount, capacity, "with its headcount")
+			check(record.StockedAt ~= nil, "and the timestamp everything else derives from")
+
+			-- One visual per animal, so the flock is visible rather than implied.
+			local herd = model:FindFirstChild("Herd")
+			check(herd ~= nil, "the pen has a herd container")
+			checkEqual(#herd:GetChildren(), capacity, "with a model for every animal")
+			check(herd.PrimaryPart ~= nil, "and a PrimaryPart, so it can carry a health bar")
+
+			--[[
+				The herd ARRIVES FED, one window deep. A pen that began
+				starving the instant it was stocked would punish a player for
+				not already knowing the mechanic.
+			]]
+			local Husbandry = require(HusbandryModule)
+			check(Husbandry.IsFed(record.FedUntil, os.time()), "a newly stocked herd arrives fed")
+
+			--[[
+				For the stocking grace, and NOT for a feed window.
+
+				A full window was the first attempt and it quietly disabled
+				the whole feed mechanic: a pig's FeedDuration is longer than
+				its MatureTime, so the grace covered the entire raise and a
+				barn could be taken to slaughter having never been fed.
+			]]
+			checkEqual(
+				record.FedUntil - record.StockedAt,
+				GameConfig.Husbandry.StockingGrace,
+				"for the stocking grace exactly, not for a free feed window"
+			)
+			check(
+				GameConfig.Husbandry.StockingGrace < GameConfig.GetAnimal("Chick").FeedDuration,
+				"which is less than a feeding buys, so the grace is an introduction and not an income"
+			)
+
+			--[[
+				And cannot be topped up, for the same reason a growing square
+				cannot: keeping StockedAt would let a player stock one chick,
+				wait until it was nearly grown, add five more and slaughter six
+				grown chickens.
+			]]
+			refusal = nil
+			advance(1)
+			pokePen(keeper, coop)
+			checkEqual(PDS:GetItemCount(keeper, "Chick"), 4, "a stocked pen cannot be topped up")
+			checkEqual(penOf(keeper, coop):GetAttribute("AnimalCount"), capacity, "and its headcount does not move")
+
+			--[[
+				Called directly, because the prompt is not the thing under
+				test: on a stocked pen the prompt branches to feed or collect,
+				so it never reaches this guard - which means every other caller
+				is relying on it alone.
+			]]
+			refusal = nil
+			checkEqual(AnimalService:TryStock(keeper, coop), false, "TryStock refuses a stocked pen outright")
+			checkEqual(refusal, "Occupied", "and says why")
+
+			listener:Disconnect()
+			KEEPER, COOP = keeper, coop
+		end
+
+		------------------------------------------------------------------------
+		section("Husbandry: feeding, collecting and the produce clock")
+		------------------------------------------------------------------------
+
+		do
+			local AnimalService = HUSBANDRY
+			local Husbandry = require(HusbandryModule)
+			local keeper, coop = KEEPER, COOP
+
+			local chick = GameConfig.GetAnimal("Chick")
+			local count = penOf(keeper, coop):GetAttribute("AnimalCount")
+
+			local refusal = nil
+			local listener = AnimalService.ActionFailed:Connect(function(_, _, reason)
+				refusal = reason
+			end)
+
+			-- A juvenile herd has nothing to collect, and says so specifically.
+			refusal = nil
+			checkEqual(AnimalService:TryCollect(keeper, coop), false, "a juvenile herd has nothing to collect")
+			checkEqual(refusal, "NotGrown", "and the refusal names growing, not hunger")
+
+			--[[
+				Feed them, and note that this is not optional.
+
+				The stocking grace is deliberately shorter than the fastest
+				animal's MatureTime, so no herd can be raised on it: left
+				alone, this flock starves before it grows up. An earlier
+				version granted a full feed window at stocking and a barn of
+				pigs could be taken to slaughter having never eaten.
+			]]
+			local feedCost = Husbandry.GetFeedCost("Chick", count)
+			PDS:AddItem(keeper, chick.Feed.ItemId, feedCost * 20)
+
+			check(
+				GameConfig.Husbandry.StockingGrace < chick.MatureTime,
+				"the stocking grace runs out before the flock is grown, so it has to be fed"
+			)
+			checkEqual(AnimalService:TryFeed(keeper, coop), true, "so the keeper feeds them")
+
+			-- Grow them up. Derived from a timestamp, so the clock does it.
+			advance(chick.MatureTime + GameConfig.Husbandry.TickInterval + 1)
+			checkEqual(penOf(keeper, coop):GetAttribute("AnimalStage"), "Grown", "the flock grows up on the clock")
+
+			--[[
+				The tick re-projects on a stage transition, which is also what
+				makes the herd slaughterable. A re-render alone would leave a
+				grown flock the cull prompt refused to touch.
+			]]
+			checkEqual(penPrompt(keeper, coop, "Cull").Enabled, true, "a grown herd can be slaughtered")
+
+			refusal = nil
+			checkEqual(AnimalService:TryCollect(keeper, coop), false, "but it has not laid anything yet")
+			checkEqual(refusal, "NothingReady", "and that refusal is neither growing nor hunger")
+
+			-- One whole cycle.
+			advance(chick.ProduceInterval)
+
+			local eggsBefore = PDS:GetItemCount(keeper, "Egg")
+			local xpBefore = PDS:GetData(keeper).XP
+			local collectedBefore = PDS:GetData(keeper).Stats.TotalProduceCollected
+			local clockBefore = PDS:GetData(keeper).Structures[coop].LastCollectedAt
+
+			checkEqual(penPrompt(keeper, coop, "Interact").ActionText, "Collect", "the prompt switches to Collect")
+
+			advance(1)
+			pokePen(keeper, coop)
+
+			checkEqual(
+				PDS:GetItemCount(keeper, "Egg") - eggsBefore,
+				chick.Produces[1].Amount * count,
+				"collecting pays one batch per animal"
+			)
+			check(PDS:GetData(keeper).XP > xpBefore, "and pays XP for it")
+			checkEqual(
+				PDS:GetData(keeper).Stats.TotalProduceCollected - collectedBefore,
+				count,
+				"and counts every animal that produced, not one pen"
+			)
+
+			--[[
+				The clock advanced by exactly one cycle, NOT to the moment of
+				collection. This is the assertion the whole payout model rests
+				on: a player who collects a second late is paid the same as one
+				who collects on the dot.
+			]]
+			local record = PDS:GetData(keeper).Structures[coop]
+			checkEqual(
+				record.LastCollectedAt - math.max(clockBefore, record.StockedAt + chick.MatureTime),
+				chick.ProduceInterval,
+				"the produce clock advances by the cycle paid, not to the moment of collection"
+			)
+
+			refusal = nil
+			checkEqual(AnimalService:TryCollect(keeper, coop), false, "collecting twice in a row pays once")
+			checkEqual(refusal, "NothingReady", "the second press has nothing waiting")
+
+			--------------------------------------------------------------------
+			-- Feeding
+			--------------------------------------------------------------------
+
+			local fedBefore = PDS:GetItemCount(keeper, chick.Feed.ItemId)
+			local fedUntilBefore = PDS:GetData(keeper).Structures[coop].FedUntil
+
+			checkEqual(AnimalService:TryFeed(keeper, coop), true, "a herd with room on its clock eats")
+			checkEqual(
+				fedBefore - PDS:GetItemCount(keeper, chick.Feed.ItemId),
+				feedCost,
+				"consuming feed for the whole flock, not for one bird"
+			)
+			check(
+				PDS:GetData(keeper).Structures[coop].FedUntil > fedUntilBefore,
+				"and the fed clock moves forward"
+			)
+			check(
+				PDS:GetData(keeper).Structures[coop].FedUntil <= Husbandry.GetFeedCeiling("Chick", os.time()),
+				"but never past the ceiling, which is what bounds offline production"
+			)
+
+			--[[
+				And now it will not eat again. Feed can only be stacked
+				MaxFedWindows deep, which is the cap that bounds offline
+				production without a separate "max stored produce" rule.
+			]]
+			refusal = nil
+			local heldAfterFeeding = PDS:GetItemCount(keeper, chick.Feed.ItemId)
+			checkEqual(AnimalService:TryFeed(keeper, coop), false, "a herd fed to the ceiling will not eat more")
+			checkEqual(refusal, "FeedFull", "and says so")
+			checkEqual(
+				PDS:GetItemCount(keeper, chick.Feed.ItemId),
+				heldAfterFeeding,
+				"without consuming the feed"
+			)
+
+			--------------------------------------------------------------------
+			-- Going hungry
+			--------------------------------------------------------------------
+
+			--[[
+				Run just past the end of the feed. Not far past: an unfed herd
+				starves, and this section is about production rather than
+				death.
+			]]
+			local fedUntil = PDS:GetData(keeper).Structures[coop].FedUntil
+			advance(fedUntil - os.time() + 10)
+			check(not Husbandry.IsFed(fedUntil, os.time()), "the feed runs out")
+
+			--[[
+				Produce earned while they WERE fed is still there - going
+				hungry stops production, it does not confiscate it.
+			]]
+			local eggsBefore = PDS:GetItemCount(keeper, "Egg")
+			checkEqual(AnimalService:TryCollect(keeper, coop), true, "what they earned while fed is still collectable")
+			check(PDS:GetItemCount(keeper, "Egg") > eggsBefore, "and pays out")
+
+			-- With that banked produce taken, a hungry herd has nothing, and
+			-- reports hunger rather than an empty nest.
+			refusal = nil
+			checkEqual(AnimalService:TryCollect(keeper, coop), false, "a hungry herd produces nothing more")
+			checkEqual(refusal, "Hungry", "and names hunger, which is the thing the player can fix")
+
+			-- Feeding with an empty larder refuses rather than part-feeding.
+			PDS:RemoveItem(keeper, chick.Feed.ItemId, PDS:GetItemCount(keeper, chick.Feed.ItemId))
+
+			refusal = nil
+			checkEqual(AnimalService:TryFeed(keeper, coop), false, "a hungry herd with no feed in the bag refuses")
+			checkEqual(refusal, "NotEnoughFeed", "and names the missing feed")
+
+			listener:Disconnect()
+
+			--[[
+				Released, like every other section's player. Leaving a profile
+				active costs the shutdown flush at the end of the suite a
+				round of retries against the injected DataStore failures, and
+				enough of them exhaust the runner's clock budget - which
+				presents as "TESTS DID NOT COMPLETE" hundreds of sections
+				away from the section that caused it.
+			]]
+			PlayersService.PlayerRemoving:Fire(keeper)
+			keeper.Parent = nil
+		end
+
+		------------------------------------------------------------------------
+		section("Husbandry: a starved gap pays nothing")
+		------------------------------------------------------------------------
+
+		--[[
+			The exploit this closes: leave a herd unfed for a day, feed it
+			once, and collect a day of produce. Feeding must settle the hungry
+			stretch rather than retroactively paying for it - and it must do so
+			without throwing away batches the herd legitimately earned BEFORE
+			the feed ran out.
+		]]
+		do
+			local AnimalService = HUSBANDRY
+			local Husbandry = require(HusbandryModule)
+			local chick = GameConfig.GetAnimal("Chick")
+
+			local hand = newPlayer(5252, "Stockman")
+			giveCharacter(hand, Vector3.new(0, 3, 0))
+			PlayersService.PlayerAdded:Fire(hand)
+			PDS:AddXP(hand, 100000)
+
+			local coop = makePen(hand, "Coop", -160, 160)
+			local count = GameConfig.GetPenCapacity("Coop", "Chick")
+
+			PDS:AddItem(hand, "Chick", count)
+			advance(1)
+			pokePen(hand, coop)
+			checkEqual(penOf(hand, coop):GetAttribute("AnimalCount"), count, "a second flock is stocked")
+
+			-- Fed at once, so the flock survives to produce anything.
+			PDS:AddItem(hand, chick.Feed.ItemId, Husbandry.GetFeedCost("Chick", count) * 20)
+			checkEqual(AnimalService:TryFeed(hand, coop), true, "and fed")
+
+			--[[
+				Run to the end of that feed window without collecting, so
+				there are whole batches banked on the clock.
+			]]
+			advance(PDS:GetData(hand).Structures[coop].FedUntil - os.time())
+
+			local record = PDS:GetData(hand).Structures[coop]
+			local earned = Husbandry.GetReadyCycles(
+				"Chick",
+				record.StockedAt,
+				record.LastCollectedAt,
+				record.FedUntil,
+				count,
+				os.time()
+			)
+			check(earned > 0, `the flock banked batches while it was fed ({earned})`)
+
+			-- Now neglect them, but not long enough to kill them.
+			local gap = 60
+			advance(gap)
+
+			record = PDS:GetData(hand).Structures[coop]
+			check(not Husbandry.IsFed(record.FedUntil, os.time()), "the feed has run out")
+			checkEqual(
+				Husbandry.GetReadyCycles(
+					"Chick",
+					record.StockedAt,
+					record.LastCollectedAt,
+					record.FedUntil,
+					count,
+					os.time()
+				),
+				earned,
+				"and the hungry stretch adds nothing while it lasts"
+			)
+
+			-- Feed them. The gap must not be paid for.
+			checkEqual(AnimalService:TryFeed(hand, coop), true, "feeding a hungry herd works")
+
+			record = PDS:GetData(hand).Structures[coop]
+			checkEqual(
+				Husbandry.GetReadyCycles(
+					"Chick",
+					record.StockedAt,
+					record.LastCollectedAt,
+					record.FedUntil,
+					count,
+					os.time()
+				),
+				earned,
+				"and feeding pays for none of the time they went hungry"
+			)
+
+			--[[
+				The other half of the rule, and the reason the clock is pushed
+				rather than reset: the batches earned before the feed lapsed
+				are still there to collect.
+			]]
+			local eggsBefore = PDS:GetItemCount(hand, "Egg")
+			checkEqual(AnimalService:TryCollect(hand, coop), true, "the banked batches survive the neglect")
+			checkEqual(
+				PDS:GetItemCount(hand, "Egg") - eggsBefore,
+				chick.Produces[1].Amount * earned * count,
+				"and pay out in full, no more and no less"
+			)
+
+			PlayersService.PlayerRemoving:Fire(hand)
+			hand.Parent = nil
+		end
+
+		------------------------------------------------------------------------
+		section("Husbandry: neglect kills a herd")
+		------------------------------------------------------------------------
+
+		--[[
+			Starvation is what makes feeding matter for an animal that has no
+			periodic produce. A pig's maturity is derived from its stocking
+			time and arrives whether or not anybody turned up with a bucket, so
+			without hunger having teeth, feeding one would be a cost with no
+			consequence for skipping it.
+		]]
+		do
+			local AnimalService = HUSBANDRY
+			local DamageableService = require(DamageableServiceModule)
+			local Husbandry = require(HusbandryModule)
+			local chick = GameConfig.GetAnimal("Chick")
+
+			local absentee = newPlayer(5353, "Absentee")
+			giveCharacter(absentee, Vector3.new(0, 3, 0))
+			PlayersService.PlayerAdded:Fire(absentee)
+			PDS:AddXP(absentee, 100000)
+
+			local coop = makePen(absentee, "Coop", 160, -60)
+			local count = GameConfig.GetPenCapacity("Coop", "Chick")
+
+			PDS:AddItem(absentee, "Chick", count)
+			advance(1)
+			pokePen(absentee, coop)
+
+			local pen = AnimalService:GetPen(absentee, coop)
+			check(pen.HerdEntityId ~= nil, "a herd is a damageable entity in its own right")
+
+			local archetype = GameConfig.GetArchetype(chick.ArchetypeId)
+			checkEqual(archetype.Repairable, false, "a chicken cannot be repaired")
+			check(archetype.RegenPerSecond > 0, "but a herd heals, because it is alive")
+			checkEqual(archetype.TargetTag, "Resource", "and a raider going for the economy counts it as one")
+
+			-- While fed, nothing happens to them.
+			local fullHealth = DamageableService:GetHealth(pen.HerdEntityId)
+			advance(GameConfig.Husbandry.TickInterval * 4)
+			checkEqual(
+				DamageableService:GetHealth(pen.HerdEntityId),
+				fullHealth,
+				"a fed herd takes no damage from the husbandry loop"
+			)
+
+			-- Let the stocking grace lapse, and they start to starve.
+			advance(GameConfig.Husbandry.StockingGrace)
+			check(
+				not Husbandry.IsFed(PDS:GetData(absentee).Structures[coop].FedUntil, os.time()),
+				"the feed runs out"
+			)
+
+			advance(GameConfig.Husbandry.TickInterval * 4)
+			local starving = DamageableService:GetHealth(pen.HerdEntityId)
+			check(starving < fullHealth, `a hungry herd loses health ({starving} of {fullHealth})`)
+
+			--[[
+				Mirrored onto the pen's structure entry, because the registry
+				owns health but the profile is what survives a rejoin.
+			]]
+			check(
+				PDS:GetData(absentee).Structures[coop].HerdHealth ~= nil,
+				"and the damage is mirrored onto the pen's record, so it survives a logout"
+			)
+
+			-- Keep neglecting them, and they die.
+			local lost = nil
+			local listener = AnimalService.HerdLost:Connect(function(_, instanceId, stockId)
+				lost = { InstanceId = instanceId, StockId = stockId }
+			end)
+
+			local guard = 0
+			while DamageableService:IsAlive(pen.HerdEntityId) and guard < 400 do
+				advance(GameConfig.Husbandry.TickInterval)
+				guard += 1
+			end
+
+			check(lost ~= nil, "a neglected herd eventually dies")
+			-- Guarded, so a regression here reports a failure instead of
+			-- crashing the run and hiding every section after it.
+			checkEqual(if lost then lost.StockId else nil, "Chick", "and the loss names what died")
+			checkEqual(penOf(absentee, coop):GetAttribute("AnimalId"), "", "the pen is emptied")
+			checkEqual(PDS:GetData(absentee).Structures[coop].AnimalId, "", "on its record as well as its model")
+			checkEqual(
+				penOf(absentee, coop):FindFirstChild("Herd"),
+				nil,
+				"and the animals are gone from the world"
+			)
+
+			--[[
+				Nothing is dropped. Losing livestock has to cost something or
+				there would be no reason to feed them, and a corpse that still
+				paid out would make starvation a slower way of slaughtering.
+			]]
+			checkEqual(PDS:GetItemCount(absentee, "RawChicken"), 0, "a starved flock yields no meat")
+
+			-- The pen is reusable, which is the difference between losing a
+			-- herd and losing the building.
+			PDS:AddItem(absentee, "Chick", count)
+			advance(1)
+			pokePen(absentee, coop)
+			checkEqual(penOf(absentee, coop):GetAttribute("AnimalId"), "Chick", "and the empty pen can be restocked")
+
+			listener:Disconnect()
+			PlayersService.PlayerRemoving:Fire(absentee)
+			absentee.Parent = nil
+		end
+
+		------------------------------------------------------------------------
+		section("Husbandry: slaughter, and the pig that only slaughters")
+		------------------------------------------------------------------------
+
+		do
+			local AnimalService = HUSBANDRY
+			local Husbandry = require(HusbandryModule)
+
+			local butcher = newPlayer(5454, "Butcher")
+			giveCharacter(butcher, Vector3.new(0, 3, 0))
+			PlayersService.PlayerAdded:Fire(butcher)
+			PDS:AddXP(butcher, 100000)
+
+			local refusal = nil
+			local listener = AnimalService.ActionFailed:Connect(function(_, _, reason)
+				refusal = reason
+			end)
+
+			--------------------------------------------------------------------
+			-- A barn of pigs: no produce, slaughter only.
+			--------------------------------------------------------------------
+
+			local barn = makePen(butcher, "Barn", -160, -60)
+			check(barn ~= nil, "a barn can be built once the age allows it")
+			checkEqual(
+				GameConfig.GetStructure("Barn").RequiredAge,
+				2,
+				"and it is deliberately not a Stone Age building"
+			)
+
+			local pig = GameConfig.GetAnimal("Piglet")
+			local count = GameConfig.GetPenCapacity("Barn", "Piglet")
+			check(count >= 1, `a barn holds pigs ({count})`)
+			check(
+				count < GameConfig.GetPenCapacity("Coop", "Chick"),
+				"fewer than a coop holds chickens, because a pig takes more room"
+			)
+
+			PDS:AddItem(butcher, "Piglet", count)
+			advance(1)
+			pokePen(butcher, barn)
+			checkEqual(penOf(butcher, barn):GetAttribute("AnimalId"), "Piglet", "the barn is stocked with pigs")
+
+			--[[
+				A pig has to be fed even though it produces nothing, and this
+				is the whole justification for starvation existing.
+
+				Maturity is derived from the stocking time and arrives whether
+				or not anybody turned up with a bucket, so hunger is the only
+				thing that makes the feed cost real for an animal raised only
+				for slaughter. An earlier version granted a full feed window
+				at stocking - longer than a pig takes to mature - and a barn
+				could be raised to slaughter for nothing.
+			]]
+			check(
+				GameConfig.Husbandry.StockingGrace < pig.MatureTime,
+				"a pig cannot be raised on the stocking grace alone"
+			)
+
+			PDS:AddItem(butcher, pig.Feed.ItemId, Husbandry.GetFeedCost("Piglet", count) * 20)
+			checkEqual(AnimalService:TryFeed(butcher, barn), true, "so the pigs are fed")
+
+			-- Slaughtering a juvenile is refused rather than quietly paying
+			-- less than the prompt said.
+			refusal = nil
+			checkEqual(AnimalService:TrySlaughter(butcher, barn), false, "a juvenile herd cannot be slaughtered")
+			checkEqual(refusal, "NotGrown", "and the refusal says why")
+			checkEqual(penPrompt(butcher, barn, "Cull").Enabled, false, "the cull prompt is not even offered")
+
+			-- There is nothing to collect from a pig, ever.
+			refusal = nil
+			checkEqual(AnimalService:TryCollect(butcher, barn), false, "a pig produces nothing to collect")
+			checkEqual(refusal, "NoProduce", "and the refusal says that, rather than blaming the clock")
+
+			advance(pig.MatureTime + GameConfig.Husbandry.TickInterval + 1)
+			checkEqual(penOf(butcher, barn):GetAttribute("AnimalStage"), "Grown", "the pigs grow up")
+
+			local porkBefore = PDS:GetItemCount(butcher, "RawPork")
+			local fatBefore = PDS:GetItemCount(butcher, "Fat")
+			local xpBefore = PDS:GetData(butcher).XP
+			local slaughteredBefore = PDS:GetData(butcher).Stats.TotalAnimalsSlaughtered
+
+			advance(1)
+			pokePen(butcher, barn, "Cull")
+
+			local expected = Husbandry.GetSlaughterTotals("Piglet", count)
+			checkEqual(
+				PDS:GetItemCount(butcher, "RawPork") - porkBefore,
+				expected.RawPork,
+				"slaughtering pays the whole herd's meat"
+			)
+			checkEqual(PDS:GetItemCount(butcher, "Fat") - fatBefore, expected.Fat, "and everything else it yields")
+			check(PDS:GetData(butcher).XP > xpBefore, "and pays XP")
+			checkEqual(
+				PDS:GetData(butcher).Stats.TotalAnimalsSlaughtered - slaughteredBefore,
+				count,
+				"and counts every animal, not one pen"
+			)
+			checkEqual(penOf(butcher, barn):GetAttribute("AnimalId"), "", "the barn is emptied")
+			checkEqual(PDS:GetData(butcher).Structures[barn].AnimalId, "", "on its record too")
+			checkEqual(PDS:GetData(butcher).Structures[barn].StockedAt, nil, "and its timestamps are cleared")
+
+			--------------------------------------------------------------------
+			-- A coop of chickens: slaughtering pays the eggs first.
+			--------------------------------------------------------------------
+
+			local chick = GameConfig.GetAnimal("Chick")
+			local coop = makePen(butcher, "Coop", -160, 40)
+			local flock = GameConfig.GetPenCapacity("Coop", "Chick")
+
+			PDS:AddItem(butcher, "Chick", flock)
+			advance(1)
+			pokePen(butcher, coop)
+
+			PDS:AddItem(butcher, chick.Feed.ItemId, Husbandry.GetFeedCost("Chick", flock) * 20)
+			checkEqual(AnimalService:TryFeed(butcher, coop), true, "the flock is fed")
+
+			-- Grow up and bank a batch, without collecting it.
+			advance(chick.MatureTime + chick.ProduceInterval + 1)
+
+			local record = PDS:GetData(butcher).Structures[coop]
+			local banked = Husbandry.GetReadyCycles(
+				"Chick",
+				record.StockedAt,
+				record.LastCollectedAt,
+				record.FedUntil,
+				flock,
+				os.time()
+			)
+			check(banked > 0, "the flock has eggs waiting")
+
+			local eggsBefore = PDS:GetItemCount(butcher, "Egg")
+			local chickenBefore = PDS:GetItemCount(butcher, "RawChicken")
+
+			advance(1)
+			pokePen(butcher, coop, "Cull")
+
+			--[[
+				The eggs are paid out first, so slaughtering never silently
+				destroys produce the player had not got round to collecting.
+			]]
+			checkEqual(
+				PDS:GetItemCount(butcher, "Egg") - eggsBefore,
+				chick.Produces[1].Amount * banked * flock,
+				"slaughtering collects the waiting produce rather than destroying it"
+			)
+			checkEqual(
+				PDS:GetItemCount(butcher, "RawChicken") - chickenBefore,
+				Husbandry.GetSlaughterTotals("Chick", flock).RawChicken,
+				"and then pays the meat"
+			)
+			checkEqual(penOf(butcher, coop):GetAttribute("AnimalId"), "", "leaving the coop empty")
+
+			listener:Disconnect()
+			PlayersService.PlayerRemoving:Fire(butcher)
+			butcher.Parent = nil
+		end
+
+		------------------------------------------------------------------------
+		section("Husbandry: a herd survives a rejoin")
+		------------------------------------------------------------------------
+
+		--[[
+			The same guarantee crops have, and for the same reason: state is
+			derived from timestamps rather than counted up by a loop, so
+			animals grow and produce while the player is offline.
+		]]
+		do
+			local AnimalService = HUSBANDRY
+			local Husbandry = require(HusbandryModule)
+			local chick = GameConfig.GetAnimal("Chick")
+
+			local leaver = newPlayer(5555, "Leaver")
+			giveCharacter(leaver, Vector3.new(0, 3, 0))
+			PlayersService.PlayerAdded:Fire(leaver)
+			PDS:AddXP(leaver, 100000)
+
+			local coop = makePen(leaver, "Coop", 40, 160)
+			local count = GameConfig.GetPenCapacity("Coop", "Chick")
+
+			PDS:AddItem(leaver, "Chick", count)
+			advance(1)
+			pokePen(leaver, coop)
+			checkEqual(penOf(leaver, coop):GetAttribute("AnimalStage"), "Juvenile", "the flock goes in as juveniles")
+
+			-- Fed before leaving, which is the point of being able to feed
+			-- ahead at all.
+			PDS:AddItem(leaver, chick.Feed.ItemId, Husbandry.GetFeedCost("Chick", count) * 20)
+			checkEqual(AnimalService:TryFeed(leaver, coop), true, "and are fed before the player leaves")
+
+			-- Log out while they are still growing.
+			PlayersService.PlayerRemoving:Fire(leaver)
+			leaver.Parent = nil
+
+			advance(chick.MatureTime + chick.ProduceInterval * 2)
+
+			-- Same user id, new Player instance: a rejoin, not a reconnect.
+			local returned = newPlayer(5555, "Leaver")
+			giveCharacter(returned, Vector3.new(0, 3, 0))
+			PlayersService.PlayerAdded:Fire(returned)
+
+			local model = penOf(returned, coop)
+			check(model ~= nil, "the pen is rebuilt on rejoin")
+			checkEqual(model:GetAttribute("AnimalId"), "Chick", "with its herd still in it")
+			checkEqual(model:GetAttribute("AnimalCount"), count, "and its headcount")
+			checkEqual(model:GetAttribute("AnimalStage"), "Grown", "which grew up while the player was away")
+			check(penPrompt(returned, coop, "Interact") ~= nil, "the prompts come back")
+			check(model:FindFirstChild("Herd") ~= nil, "and so do the animals")
+
+			local record = PDS:GetData(returned).Structures[coop]
+			local waiting = Husbandry.GetReadyCycles(
+				"Chick",
+				record.StockedAt,
+				record.LastCollectedAt,
+				record.FedUntil,
+				count,
+				os.time()
+			)
+			check(waiting > 0, `and they produced while nobody was watching ({waiting} batches`)
+
+			local eggsBefore = PDS:GetItemCount(returned, "Egg")
+			checkEqual(AnimalService:TryCollect(returned, coop), true, "which can be collected on return")
+			checkEqual(
+				PDS:GetItemCount(returned, "Egg") - eggsBefore,
+				chick.Produces[1].Amount * waiting * count,
+				"for exactly what the offline time earned"
+			)
+
+			--[[
+				Offline production is bounded by the FEED rather than by how
+				long the player was away, which is what lets there be no
+				separate "max stored" cap.
+
+				Asserted by comparing an absurd absence against the feed
+				boundary rather than against a generous ceiling: a check that
+				`waiting` is under two feed windows passes on any
+				implementation, including one that ignores the feed entirely.
+			]]
+			checkEqual(
+				Husbandry.GetReadyCycles(
+					"Chick",
+					record.StockedAt,
+					record.LastCollectedAt,
+					record.FedUntil,
+					count,
+					os.time() + 100_000
+				),
+				Husbandry.GetReadyCycles(
+					"Chick",
+					record.StockedAt,
+					record.LastCollectedAt,
+					record.FedUntil,
+					count,
+					record.FedUntil
+				),
+				"however long the player stays away, production stops where the feed does"
+			)
+
+			--[[
+				And demolishing the pen takes the herd with it. One record per
+				pen is what guarantees this: a parallel table keyed by pen id
+				would leave a herd with nowhere to live.
+			]]
+			checkEqual(PLACEMENT:Demolish(returned, coop).Ok, true, "the pen can be demolished")
+			checkEqual(PDS:GetData(returned).Structures[coop], nil, "and the herd record goes with it")
+			checkEqual(AnimalService:GetPen(returned, coop), nil, "leaving nothing attached to a pen that is gone")
+
+			PlayersService.PlayerRemoving:Fire(returned)
+			returned.Parent = nil
+		end
+
+		------------------------------------------------------------------------
+		section("Husbandry: neglect is not undone by logging out")
+		------------------------------------------------------------------------
+
+		--[[
+			Starvation is applied by a loop that only runs for an online
+			player, but health REGENERATES from elapsed time whether or not
+			anyone is watching. So logging out used to heal a starving herd,
+			and neglect could be reset indefinitely by taking a break - which
+			left the only cost of never feeding as forgone produce, and for a
+			pig that is no cost at all.
+
+			Offline time has to cost what online time costs.
+		]]
+		do
+			local AnimalService = HUSBANDRY
+			local Husbandry = require(HusbandryModule)
+			local chick = GameConfig.GetAnimal("Chick")
+
+			local truant = newPlayer(5757, "Truant")
+			giveCharacter(truant, Vector3.new(0, 3, 0))
+			PlayersService.PlayerAdded:Fire(truant)
+			PDS:AddXP(truant, 100000)
+
+			local coop = makePen(truant, "Coop", -40, -160)
+			local count = GameConfig.GetPenCapacity("Coop", "Chick")
+
+			PDS:AddItem(truant, "Chick", count)
+			advance(1)
+			pokePen(truant, coop)
+			checkEqual(penOf(truant, coop):GetAttribute("AnimalId"), "Chick", "a flock is stocked and left unfed")
+
+			-- Let the stocking grace lapse so they are genuinely hungry.
+			advance(GameConfig.Husbandry.StockingGrace + GameConfig.Husbandry.TickInterval)
+			check(
+				not Husbandry.IsFed(PDS:GetData(truant).Structures[coop].FedUntil, os.time()),
+				"the grace runs out with nobody feeding them"
+			)
+
+			local hurt = PDS:GetData(truant).Structures[coop].HerdHealth
+			check(hurt ~= nil, "they take starvation damage while the owner is online")
+
+			-- Now leave. Long enough that regeneration alone would heal them
+			-- to full several times over.
+			local archetype = GameConfig.GetArchetype(chick.ArchetypeId)
+			local fullHealTime = archetype.MaxHealth / archetype.RegenPerSecond
+
+			PlayersService.PlayerRemoving:Fire(truant)
+			truant.Parent = nil
+
+			advance(fullHealTime + 100)
+
+			local returned = newPlayer(5757, "Truant")
+			giveCharacter(returned, Vector3.new(0, 3, 0))
+			PlayersService.PlayerAdded:Fire(returned)
+
+			--[[
+				The absence is charged on attach, from the later of the feed
+				running out and the damage already taken, so no span is billed
+				twice - and over an absence this long the flock does not
+				survive it.
+			]]
+			checkEqual(
+				penOf(returned, coop):GetAttribute("AnimalId"),
+				"",
+				"a herd left hungry over a long absence is dead when the owner comes back"
+			)
+			checkEqual(
+				PDS:GetData(returned).Structures[coop].AnimalId,
+				"",
+				"and the pen's record says so too"
+			)
+			checkEqual(
+				PDS:GetData(returned).Structures[coop].FedUntil,
+				nil,
+				"with every herd field cleared, not just the animal id"
+			)
+
+			PlayersService.PlayerRemoving:Fire(returned)
+			returned.Parent = nil
+		end
+
+		------------------------------------------------------------------------
+		section("Husbandry: produce that will not fit in the bag")
+		------------------------------------------------------------------------
+
+		--[[
+			The failure this covers was unrecoverable, and every ingredient
+			was individually correct.
+
+			Produce accrues without limit for a herd that is kept fed. The
+			payout was all-or-nothing, because a part-granted payout cannot
+			advance the clock exactly once. And a refused collection leaves
+			the clock untouched, so the pending total only ever grew. Past a
+			stack limit the collection could never succeed, never shrink, and
+			slaughtering - which collects first - could not empty the pen
+			either. The pen was bricked, and both prompts went on advertising
+			the eggs.
+		]]
+		do
+			local AnimalService = HUSBANDRY
+			local Husbandry = require(HusbandryModule)
+			local ShopService = require(ShopServiceModule)
+			local chick = GameConfig.GetAnimal("Chick")
+
+			local hoarder = newPlayer(5858, "Hoarder")
+			giveCharacter(hoarder, Vector3.new(0, 3, 0))
+			PlayersService.PlayerAdded:Fire(hoarder)
+			PDS:AddXP(hoarder, 100000)
+
+			local coop = makePen(hoarder, "Coop", 40, -160)
+			local count = GameConfig.GetPenCapacity("Coop", "Chick")
+			local egg = GameConfig.GetItem("Egg")
+
+			PDS:AddItem(hoarder, "Chick", count)
+			advance(1)
+			pokePen(hoarder, coop)
+
+			--[[
+				First, that the hoard is reachable by ordinary play. Feeding
+				at the cadence the rules allow and never collecting makes the
+				pending total grow, feeding after feeding, with nothing in the
+				rules to stop it - every one of these is a legitimate action
+				at a legitimate moment.
+			]]
+			PDS:AddItem(hoarder, chick.Feed.ItemId, egg.MaxStack)
+
+			local growth = {}
+
+			for _ = 1, 4 do
+				AnimalService:TryFeed(hoarder, coop)
+				advance(chick.FeedDuration)
+
+				local at = PDS:GetData(hoarder).Structures[coop]
+				table.insert(
+					growth,
+					Husbandry.GetReadyCycles("Chick", at.StockedAt, at.LastCollectedAt, at.FedUntil, count, os.time())
+				)
+			end
+
+			check(growth[4] > growth[1], `feeding and not collecting accumulates ({growth[1]} -> {growth[4]} batches)`)
+			check(
+				growth[4] > (chick.FeedDuration * GameConfig.Husbandry.MaxFedWindows) // chick.ProduceInterval,
+				"past what any single stretch of feed could hold, so there is no ceiling in the rules"
+			)
+
+			--[[
+				The rest of the hoard is CONSTRUCTED rather than simulated.
+
+				Reaching a full stack honestly takes around forty feedings and
+				three hours of virtual time, and the runner's clock budget is
+				shared with every section after this one. The behaviour under
+				test is the collection, not the arithmetic of getting there -
+				and the loop above already established that getting there
+				needs nothing but patience.
+
+				Continuously fed and never collected, which is what the
+				timestamps of a long session look like.
+			]]
+			local record = PDS:GetData(hoarder).Structures[coop]
+			local wanted = math.ceil((egg.MaxStack * 1.2) / (chick.Produces[1].Amount * count))
+
+			record.StockedAt = os.time() - (chick.MatureTime + wanted * chick.ProduceInterval)
+			record.LastCollectedAt = record.StockedAt
+			record.FedUntil = os.time() + chick.FeedDuration
+
+			AnimalService:_projectHerd(hoarder, AnimalService:GetPen(hoarder, coop), record, os.time())
+
+			local pending = Husbandry.GetReadyCycles(
+				"Chick",
+				record.StockedAt,
+				record.LastCollectedAt,
+				record.FedUntil,
+				count,
+				os.time()
+			)
+			local pendingEggs = Husbandry.GetProduceTotals("Chick", pending, count).Egg
+
+			check(
+				pendingEggs > egg.MaxStack,
+				`more eggs are waiting than one stack holds ({pendingEggs} > {egg.MaxStack})`
+			)
+			checkEqual(PDS:GetItemCount(hoarder, "Egg"), 0, "and the player is holding none of them yet")
+
+			--[[
+				Collecting pays the batches that FIT rather than refusing the
+				lot. The clock still advances by exactly what was paid, which
+				is what keeps the grant consumed-exactly-once - the atomicity
+				argument applies to the items within a batch, not to the
+				number of batches.
+			]]
+			local clockBefore = record.LastCollectedAt
+			checkEqual(AnimalService:TryCollect(hoarder, coop), true, "collecting pays out what will fit")
+
+			local collected = PDS:GetItemCount(hoarder, "Egg")
+			check(collected > 0, `and that is most of a stack ({collected})`)
+			check(collected <= egg.MaxStack, "without ever exceeding the stack limit")
+
+			record = PDS:GetData(hoarder).Structures[coop]
+
+			-- Measured from the window START, not the raw clock: the two
+			-- differ by the wait for the flock to grow up, which is not a
+			-- batch anybody was paid for.
+			local startBefore = Husbandry.GetWindowStart("Chick", record.StockedAt, clockBefore)
+
+			checkEqual(
+				(record.LastCollectedAt - startBefore) // chick.ProduceInterval,
+				collected // (chick.Produces[1].Amount * count),
+				"and the clock advances by the batches paid, so the remainder is still owed"
+			)
+
+			local remaining = Husbandry.GetReadyCycles(
+				"Chick",
+				record.StockedAt,
+				record.LastCollectedAt,
+				record.FedUntil,
+				count,
+				os.time()
+			)
+			check(remaining > 0, `the rest is still waiting in the coop ({remaining} batches`)
+
+			--[[
+				With the bag now full, collecting refuses - and the prompt
+				says so rather than advertising eggs it cannot hand over.
+				That mismatch is how the deadlock presented itself to a
+				player: an enabled prompt naming a precise number, refusing on
+				every press.
+			]]
+			local refusal = nil
+			local listener = AnimalService.ActionFailed:Connect(function(_, _, reason)
+				refusal = reason
+			end)
+
+			checkEqual(AnimalService:TryCollect(hoarder, coop), false, "a full bag cannot take another batch")
+			checkEqual(refusal, "InventoryFull", "and the refusal names the bag")
+
+			advance(GameConfig.Husbandry.TickInterval + 1)
+			checkEqual(
+				penPrompt(hoarder, coop, "Interact").Enabled,
+				false,
+				"the prompt stops offering a collection that would be refused"
+			)
+
+			-- Slaughtering is refused too, because it would have to bank the
+			-- waiting produce first.
+			refusal = nil
+			local eggsAtRefusal = PDS:GetItemCount(hoarder, "Egg")
+			local meatAtRefusal = PDS:GetItemCount(hoarder, "RawChicken")
+
+			checkEqual(AnimalService:TrySlaughter(hoarder, coop), false, "and the herd cannot be slaughtered either")
+			checkEqual(refusal, "InventoryFull", "for the same reason")
+			checkEqual(penOf(hoarder, coop):GetAttribute("AnimalId"), "Chick", "so the herd is still standing")
+
+			--[[
+				And the refusal granted NOTHING. Both payouts are checked
+				before either is handed over, because collecting first and
+				then refusing on the meat left a press on "Slaughter" that
+				delivered eggs, left the herd alive, and reported an error.
+			]]
+			checkEqual(PDS:GetItemCount(hoarder, "Egg"), eggsAtRefusal, "a refused slaughter banks no produce")
+			checkEqual(PDS:GetItemCount(hoarder, "RawChicken"), meatAtRefusal, "and no meat")
+
+			--[[
+				And here is the difference between a refusal and a deadlock:
+				selling the eggs fixes it. Previously nothing did - the
+				pending total was already larger than a stack on its own, so
+				emptying the bag changed nothing and only demolishing the
+				building cleared the pen.
+			]]
+			checkEqual(ShopService:SellAll(hoarder).Ok, true, "selling the eggs makes room")
+			checkEqual(PDS:GetItemCount(hoarder, "Egg"), 0, "so the bag is empty again")
+
+			checkEqual(AnimalService:TryCollect(hoarder, coop), true, "and the rest of the produce can be collected")
+
+			checkEqual(ShopService:SellAll(hoarder).Ok, true, "sell that too")
+			checkEqual(AnimalService:TrySlaughter(hoarder, coop), true, "after which the herd can be slaughtered")
+			checkEqual(penOf(hoarder, coop):GetAttribute("AnimalId"), "", "leaving the pen empty and reusable")
+
+			--------------------------------------------------------------------
+			-- The other half: the produce fits but the MEAT does not.
+			--------------------------------------------------------------------
+
+			--[[
+				Both payouts have to be checked before either is granted, and
+				this is the case that proves it. Collecting first and then
+				checking room for the meat was the obvious order, and it left
+				a press on "Slaughter" that banked the eggs, left the herd
+				standing and reported a full inventory - or, with the meat
+				silently rejected by the stack limit, slaughtered the flock
+				for nothing at all.
+			]]
+			local second = makePen(hoarder, "Coop", 40, -160)
+
+			PDS:AddItem(hoarder, "Chick", count)
+			advance(1)
+			pokePen(hoarder, second)
+
+			PDS:AddItem(hoarder, chick.Feed.ItemId, Husbandry.GetFeedCost("Chick", count) * 4)
+			checkEqual(AnimalService:TryFeed(hoarder, second), true, "a fresh flock is stocked and fed")
+
+			advance(chick.MatureTime + chick.ProduceInterval + 1)
+
+			-- Room for the eggs, none at all for the meat.
+			local meat = GameConfig.GetItem("RawChicken")
+			PDS:AddItem(hoarder, "RawChicken", meat.MaxStack)
+			checkEqual(PDS:GetItemCount(hoarder, "Egg"), 0, "the egg basket is empty")
+
+			refusal = nil
+			checkEqual(
+				AnimalService:TrySlaughter(hoarder, second),
+				false,
+				"slaughtering is refused when there is no room for the meat"
+			)
+			checkEqual(refusal, "InventoryFull", "and says so")
+			checkEqual(PDS:GetItemCount(hoarder, "Egg"), 0, "without banking the produce it would have collected first")
+			checkEqual(PDS:GetItemCount(hoarder, "RawChicken"), meat.MaxStack, "and without losing the meat to a full stack")
+			checkEqual(penOf(hoarder, second):GetAttribute("AnimalId"), "Chick", "so the flock is still alive")
+
+			-- Make room, and it goes through in one press, eggs and all.
+			PDS:RemoveItem(hoarder, "RawChicken", meat.MaxStack)
+			checkEqual(AnimalService:TrySlaughter(hoarder, second), true, "with room, the slaughter succeeds")
+			check(PDS:GetItemCount(hoarder, "Egg") > 0, "banking the waiting produce")
+			check(PDS:GetItemCount(hoarder, "RawChicken") > 0, "and paying the meat")
+
+			listener:Disconnect()
+			PlayersService.PlayerRemoving:Fire(hoarder)
+			hoarder.Parent = nil
+		end
+
+		------------------------------------------------------------------------
+		section("Husbandry: the directory already handled the drops")
+		------------------------------------------------------------------------
+
+		--[[
+			The claim the item directory refactor made was that adding a
+			mechanic would need no change to storage, replication or the shop -
+			only a table saying which animal produces which drop. These check
+			that it held.
+		]]
+		do
+			local ShopService = require(ShopServiceModule)
+
+			checkEqual(
+				table.find(GameConfig.ItemCategories, "Livestock") ~= nil,
+				true,
+				"livestock is a category like any other"
+			)
+
+			for stockId, animal in GameConfig.Animals do
+				local stockItem = GameConfig.GetItem(stockId)
+
+				check(stockItem ~= nil, `{stockId} is in the master item directory`)
+				checkEqual(stockItem.Category, "Livestock", `{stockId} is categorised as livestock`)
+				check(GameConfig.IsBuyable(stockItem), `{stockId} can be bought`)
+
+				--[[
+					And not sold. A buy price and a sell price on one item is an
+					arbitrage loop, which is why seeds are one-way too.
+				]]
+				checkEqual(
+					GameConfig.IsSellable(stockItem),
+					false,
+					`{stockId} cannot be sold back, so there is no arbitrage loop`
+				)
+
+				-- Every drop has to be worth something, or raising the animal
+				-- is work for nothing.
+				for _, yield in animal.Produces do
+					local item = GameConfig.GetItem(yield.ItemId)
+					checkEqual(item.Category, "AnimalDrops", `{yield.ItemId} is an animal drop`)
+					check(GameConfig.IsSellable(item), `{yield.ItemId} can be sold`)
+				end
+
+				for _, yield in animal.Slaughter do
+					local item = GameConfig.GetItem(yield.ItemId)
+					checkEqual(item.Category, "AnimalDrops", `{yield.ItemId} is an animal drop`)
+					check(GameConfig.IsSellable(item), `{yield.ItemId} can be sold`)
+				end
+			end
+
+			--[[
+				Selling produce needed no new code at all: the shop is
+				category-agnostic, so an egg sells through exactly the path a
+				carrot does - and the gold lands in the TREASURY, because
+				market income always does.
+			]]
+			local trader = newPlayer(5656, "Trader")
+			PlayersService.PlayerAdded:Fire(trader)
+
+			PDS:AddItem(trader, "Egg", 10)
+			local goldBefore = PDS:GetGold(trader)
+			local purseBefore = PDS:GetInventoryGold(trader)
+
+			local sale = ShopService:ProcessTransaction(trader, "Sell", "Egg", 10)
+			checkEqual(sale.Ok, true, "produce sells through the ordinary shop path")
+			checkEqual(
+				PDS:GetGold(trader) - goldBefore,
+				GameConfig.GetItem("Egg").SellPrice * 10,
+				"for its listed price"
+			)
+			checkEqual(PDS:GetInventoryGold(trader), purseBefore, "and the proceeds are treasury gold, not purse gold")
+
+			-- Livestock is sold BY the shop and never bought back by it.
+			local buy = ShopService:ProcessTransaction(trader, "Buy", "Chick", 1)
+			checkEqual(buy.Ok, false, "a level 1 player cannot buy a chick")
+			checkEqual(buy.Reason, "LevelTooLow", "because livestock is level gated like seeds")
+
+			PDS:AddXP(trader, 100000)
+			PDS:AddResource(trader, "Gold", 10000)
+			checkEqual(
+				ShopService:ProcessTransaction(trader, "Buy", "Chick", 1).Ok,
+				true,
+				"but an experienced one can"
+			)
+			checkEqual(
+				ShopService:ProcessTransaction(trader, "Sell", "Chick", 1).Ok,
+				false,
+				"and the shop will not buy it back"
+			)
+
+			PlayersService.PlayerRemoving:Fire(trader)
+			trader.Parent = nil
+		end
+
+		------------------------------------------------------------------------
+		section("Husbandry: a pen record is normalised, not migrated")
+		------------------------------------------------------------------------
+
+		--[[
+			Structure entries are not covered by the Template, so Reconcile
+			never sees them and Normalize is the only place they are defaulted.
+			Same situation as a farm square's PlantCount, and the same
+			treatment.
+		]]
+		do
+			local Husbandry = require(HusbandryModule)
+			local now = os.time()
+
+			-- A herd with no headcount reads as ONE, never as none: read as
+			-- zero and the pen would render empty and slaughter for nothing.
+			local defaulted = DataSchema.Normalize({
+				SchemaVersion = DataSchema.Version,
+				Structures = {
+					["1"] = { StructureId = "Coop", X = 0, Z = 0, AnimalId = "Chick", StockedAt = now - 10 },
+				},
+			})
+			checkEqual(defaulted.Structures["1"].AnimalCount, 1, "a herd with no count reads as one animal")
+
+			-- Over-full herds are clamped to what the pen allows, so dropping
+			-- a pen's capacity cannot leave old saves paying out too much.
+			local overfull = DataSchema.Normalize({
+				SchemaVersion = DataSchema.Version,
+				Structures = {
+					["1"] = {
+						StructureId = "Coop",
+						X = 0,
+						Z = 0,
+						AnimalId = "Chick",
+						StockedAt = now - 10,
+						AnimalCount = 9_999,
+					},
+				},
+			})
+			checkEqual(
+				overfull.Structures["1"].AnimalCount,
+				GameConfig.GetPenCapacity("Coop", "Chick"),
+				"an over-full pen is clamped to its capacity"
+			)
+
+			--[[
+				A species that does not belong in the pen is cleared. This is
+				what a config edit moving cattle out of the coop looks like on
+				an old save.
+			]]
+			local misplaced = DataSchema.Normalize({
+				SchemaVersion = DataSchema.Version,
+				Structures = {
+					["1"] = { StructureId = "Coop", X = 0, Z = 0, AnimalId = "Calf", StockedAt = now - 10 },
+				},
+			})
+			checkEqual(misplaced.Structures["1"].AnimalId, "", "an animal that cannot live in the pen is cleared")
+			checkEqual(misplaced.Structures["1"].StockedAt, nil, "along with its timestamps")
+
+			-- An animal that left the config entirely frees the pen rather
+			-- than trapping it.
+			local unknown = DataSchema.Normalize({
+				SchemaVersion = DataSchema.Version,
+				Structures = {
+					["1"] = { StructureId = "Coop", X = 0, Z = 0, AnimalId = "Dodo", StockedAt = now - 10 },
+				},
+			})
+			checkEqual(unknown.Structures["1"].AnimalId, "", "an animal that left the config frees the pen")
+
+			--[[
+				FedUntil is the one timestamp in a profile that is SUPPOSED to
+				be in the future, so it is capped at the feed ceiling rather
+				than at `now`. Clamping it like the others would quietly starve
+				every fed herd on load.
+			]]
+			local fed = DataSchema.Normalize({
+				SchemaVersion = DataSchema.Version,
+				Structures = {
+					["1"] = {
+						StructureId = "Coop",
+						X = 0,
+						Z = 0,
+						AnimalId = "Chick",
+						StockedAt = now - 10,
+						FedUntil = now + 120,
+					},
+				},
+			})
+			checkEqual(fed.Structures["1"].FedUntil, now + 120, "a future FedUntil survives a load")
+			check(Husbandry.IsFed(fed.Structures["1"].FedUntil, now), "so a fed herd is still fed")
+
+			local tampered = DataSchema.Normalize({
+				SchemaVersion = DataSchema.Version,
+				Structures = {
+					["1"] = {
+						StructureId = "Coop",
+						X = 0,
+						Z = 0,
+						AnimalId = "Chick",
+						StockedAt = now - 10,
+						FedUntil = now + 99_999_999,
+					},
+				},
+			})
+			check(
+				tampered.Structures["1"].FedUntil <= Husbandry.GetFeedCeiling("Chick", now),
+				"but a tampered one is capped at the feed ceiling"
+			)
+
+			--[[
+				The produce clock cannot predate the herd or run ahead of the
+				wall clock: behind, and the pen pays out time before the
+				animals existed; ahead, and it never pays out at all.
+			]]
+			local skewed = DataSchema.Normalize({
+				SchemaVersion = DataSchema.Version,
+				Structures = {
+					["1"] = {
+						StructureId = "Coop",
+						X = 0,
+						Z = 0,
+						AnimalId = "Chick",
+						StockedAt = now - 10,
+						LastCollectedAt = 0,
+					},
+				},
+			})
+			checkEqual(
+				skewed.Structures["1"].LastCollectedAt,
+				skewed.Structures["1"].StockedAt,
+				"a produce clock predating the herd is pulled up to the stocking time"
+			)
+
+			--[[
+				Clamping the two ENDS of the produce window is not enough,
+				because the payout derives from the SPAN between them.
+
+				An ancient stocking time beside a plausible FedUntil passes
+				every individual clamp - the stocking time is in the past, the
+				feed clock is within its ceiling, the produce clock sits
+				between them - and still presents a window decades wide. That
+				is corrupt or clock-skewed data rather than a client exploit,
+				which is exactly what this function is for.
+			]]
+			local ancient = DataSchema.Normalize({
+				SchemaVersion = DataSchema.Version,
+				Structures = {
+					["1"] = {
+						StructureId = "Coop",
+						X = 0,
+						Z = 0,
+						AnimalId = "Chick",
+						StockedAt = 1,
+						LastCollectedAt = 1,
+						FedUntil = now + 600,
+					},
+				},
+			})
+
+			local widest = GameConfig.Husbandry.MaxStoredCycles * GameConfig.GetAnimal("Chick").ProduceInterval
+			local capacity = GameConfig.GetPenCapacity("Coop", "Chick")
+
+			check(
+				Husbandry.GetReadyCycles(
+					"Chick",
+					ancient.Structures["1"].StockedAt,
+					ancient.Structures["1"].LastCollectedAt,
+					ancient.Structures["1"].FedUntil,
+					capacity,
+					now
+				) <= GameConfig.Husbandry.MaxStoredCycles,
+				"a record from 1970 cannot present a payout of millions of batches"
+			)
+			check(
+				ancient.Structures["1"].LastCollectedAt >= ancient.Structures["1"].FedUntil - widest,
+				"because the produce window is floored at the widest any sequence of feedings could leave"
+			)
+
+			-- An empty pen carries no herd fields at all.
+			local empty = DataSchema.Normalize({
+				SchemaVersion = DataSchema.Version,
+				Structures = {
+					["1"] = { StructureId = "Coop", X = 0, Z = 0, AnimalId = "", AnimalCount = 5 },
+				},
+			})
+			checkEqual(empty.Structures["1"].AnimalCount, nil, "an empty pen holds no headcount")
+
+			-- And the stats husbandry increments are in the template, so
+			-- existing players get them by Reconcile with no migration.
+			checkEqual(DataSchema.Template.Stats.TotalAnimalsRaised, 0, "raising animals is counted")
+			checkEqual(DataSchema.Template.Stats.TotalProduceCollected, 0, "so is produce collected")
+			checkEqual(DataSchema.Template.Stats.TotalAnimalsSlaughtered, 0, "and so is slaughter")
+		end
+
+		------------------------------------------------------------------------
 		section("Combat plants: an archetype plus an attack")
 		------------------------------------------------------------------------
 
@@ -6101,9 +7787,22 @@ task.spawn(function()
 	finished = true
 end)
 
--- Drive the virtual clock until the test coroutine completes.
+--[[
+	Drive the virtual clock until the test coroutine completes.
+
+	The guard is a DEADLOCK net, not a budget: it exists so a test that waits
+	on something that will never happen fails in a second rather than hanging
+	the run. It therefore has to stay comfortably above the virtual time the
+	suite legitimately needs, which grows as sections are added - husbandry
+	alone simulates animals being raised, fed and starved.
+
+	When this trips, the banner says "TESTS DID NOT COMPLETE" with no clue
+	which section is responsible, and the honest answer is usually that the
+	suite outgrew the number rather than that anything deadlocked. Print
+	`guard` here before assuming otherwise.
+]]
 local guard = 0
-while not finished and guard < 5000 do
+while not finished and guard < 50000 do
 	advance(1)
 	guard += 1
 end

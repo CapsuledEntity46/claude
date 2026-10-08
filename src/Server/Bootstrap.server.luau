@@ -76,6 +76,7 @@ local RaidService = requireServer("Combat.RaidService")
 local DefeatService = requireServer("Combat.DefeatService")
 local PlayerDataService = requireServer("Services.PlayerDataService")
 local FarmService = requireServer("Services.FarmService")
+local AnimalService = requireServer("Services.AnimalService")
 local ShopService = requireServer("Services.ShopService")
 local MarketplaceService = requireServer("Services.MarketplaceService")
 local PlacementService = requireServer("World.PlacementService")
@@ -130,6 +131,7 @@ if guardModule then
 		TrainingGround = TrainingGround,
 		PlayerDataService = PlayerDataService,
 		FarmService = FarmService,
+		AnimalService = AnimalService,
 		PlacementService = PlacementService,
 		ShopService = ShopService,
 		MarketplaceService = MarketplaceService,
@@ -154,6 +156,11 @@ AttackService:Start()
 RaidService:Start()
 
 FarmService:Start()
+
+-- Alongside FarmService: both attach their behaviour to placed structures
+-- through PlacementService.Spawned, and neither knows about the other.
+AnimalService:Start()
+
 PlacementService:Start()
 ShopService:Start()
 
@@ -186,6 +193,19 @@ end)
 
 FarmService.Harvested:Connect(function(player: Player, instanceId: string, itemId: string, amount: number)
 	print(`[Farm] {player.Name} harvested {amount}x {itemId} from farm {instanceId}`)
+end)
+
+AnimalService.Collected:Connect(function(player: Player, instanceId: string, stockId: string, _totals, cycles: number)
+	print(`[Husbandry] {player.Name} collected {cycles} batch(es) of {stockId} produce from pen {instanceId}`)
+end)
+
+--[[
+	Logged because an empty pen is the only other evidence, and "my animals
+	vanished" is impossible to tell apart from "my animals were never saved"
+	without a line saying which one happened.
+]]
+AnimalService.HerdLost:Connect(function(player: Player, instanceId: string, stockId: string?)
+	print(`[Husbandry] {player.Name} lost a herd of {tostring(stockId)} in pen {instanceId}`)
 end)
 
 RaidService.WaveStarted:Connect(function(userId: number, raiders: number)

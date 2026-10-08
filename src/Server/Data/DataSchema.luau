@@ -25,6 +25,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Shared = ReplicatedStorage:WaitForChild("Shared")
 local GameConfig = require(Shared.GameConfig)
+local Husbandry = require(Shared.Husbandry)
 local TableUtil = require(Shared.TableUtil)
 
 local DataSchema = {}
@@ -116,6 +117,9 @@ DataSchema.Template = {
 	Stats = {
 		TotalHarvested = 0,
 		TotalPlanted = 0,
+		TotalAnimalsRaised = 0,
+		TotalProduceCollected = 0,
+		TotalAnimalsSlaughtered = 0,
 		TotalGoldEarned = 0,
 		JoinCount = 0,
 		PlayTime = 0,
@@ -493,6 +497,90 @@ function DataSchema.Normalize(data: { [string]: any }): { [string]: any }
 				else
 					entry.CropHealth = math.clamp(math.floor(cropHealth), 0, cropMax)
 					entry.CropDamagedAt = math.min(math.floor(toFiniteNumber(entry.CropDamagedAt) or now), now)
+				end
+			end
+		end
+
+		--[[
+			A pen carries its herd on the same record as the structure, for
+			the same reason a Farm carries its crop: demolishing the pen takes
+			the herd with it, so no herd can outlive the building it lived in.
+		]]
+		if structure.HousesLivestock then
+			local animal = GameConfig.GetAnimal(entry.AnimalId)
+			local stockedAt = toFiniteNumber(entry.StockedAt)
+
+			--[[
+				Emptied when the animal left the config, when its stocking
+				time is gone, or when the species no longer belongs in this
+				pen - that last one being what a config edit moving cattle out
+				of the coop looks like on an old save.
+			]]
+			if animal == nil or stockedAt == nil or animal.HousedIn ~= structure.Id then
+				entry.AnimalId = ""
+				entry.StockedAt = nil
+				entry.AnimalCount = nil
+				entry.FedUntil = nil
+				entry.LastCollectedAt = nil
+				entry.HerdHealth = nil
+				entry.HerdDamagedAt = nil
+			else
+				entry.StockedAt = math.min(math.floor(stockedAt), now)
+
+				--[[
+					Headcount, clamped to what the pen allows. Same reasoning
+					as a farm square's PlantCount: structure entries are not
+					covered by the Template, so Reconcile never sees them and
+					this is the only place they are defaulted - and after a
+					config edit, dropping a pen's capacity must not leave old
+					herds over-full and paying out more than it holds.
+				]]
+				local capacity = GameConfig.GetPenCapacity(structure.Id, entry.AnimalId)
+				local count = math.floor(toFiniteNumber(entry.AnimalCount) or 1)
+				entry.AnimalCount = math.clamp(count, 1, math.max(capacity, 1))
+
+				--[[
+					FedUntil is the one timestamp in a profile that is SUPPOSED
+					to be in the future, so it is capped at the feed ceiling
+					rather than at `now`. Clamping it like the others would
+					quietly starve every fed herd on load - and leaving it
+					unclamped would let a tampered save claim feed for a year.
+				]]
+				local fedUntil = math.floor(toFiniteNumber(entry.FedUntil) or 0)
+				entry.FedUntil = math.clamp(fedUntil, 0, Husbandry.GetFeedCeiling(entry.AnimalId, now))
+
+				--[[
+					The produce clock cannot predate the herd or run ahead of
+					the wall clock. Behind, and the pen pays out time before
+					the animals existed; ahead, and it never pays out at all.
+
+					Clamping the two ENDS is not enough on its own, because
+					the payout derives from the SPAN between them: a record
+					with a 1970 stocking time and a plausible FedUntil passes
+					every individual clamp and still presents a window decades
+					wide. So the span is floored at the most any sequence of
+					collections could legitimately leave outstanding.
+
+					Unreachable in real play - MaxStoredCycles is thousands of
+					batches - so this trims corrupt and clock-skewed records
+					without taking produce off a player who has merely been
+					hoarding it.
+				]]
+				local widest = GameConfig.Husbandry.MaxStoredCycles * (animal.ProduceInterval or 0)
+				local earliest = math.max(entry.StockedAt, math.floor(entry.FedUntil - widest))
+
+				local collected = math.floor(toFiniteNumber(entry.LastCollectedAt) or entry.StockedAt)
+				entry.LastCollectedAt = math.clamp(collected, math.min(earliest, now), now)
+
+				local herdMax = GameConfig.Archetypes[animal.ArchetypeId].MaxHealth
+				local herdHealth = toFiniteNumber(entry.HerdHealth)
+
+				if herdHealth == nil then
+					entry.HerdHealth = nil
+					entry.HerdDamagedAt = nil
+				else
+					entry.HerdHealth = math.clamp(math.floor(herdHealth), 0, herdMax)
+					entry.HerdDamagedAt = math.min(math.floor(toFiniteNumber(entry.HerdDamagedAt) or now), now)
 				end
 			end
 		end

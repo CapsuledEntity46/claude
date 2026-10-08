@@ -10,41 +10,63 @@ Built in steps; this repository currently contains **Step 1 (Data & Stats)**,
 ```
 src/
 ├── Shared/                       → ReplicatedStorage.Shared
-│   ├── GameConfig.luau           Master item directory, plantables, economy, garden, shop
+│   ├── GameConfig.luau           Master item directory, plantables, animals, economy, structures, shop
 │   ├── Types.luau                Shared type definitions for persisted data
-│   ├── Growth.luau               Pure stage math, used by both server and client
+│   ├── Growth.luau               Pure crop stage math, used by both server and client
+│   ├── Husbandry.luau            Pure maturity and produce math, likewise
+│   ├── Buildability.luau         One build-tree verdict for the server and the build menu
+│   ├── Spatial.luau              Reach, splash falloff and blocking queries
+│   ├── Combat.luau               Health derivation and the damage/armour table
+│   ├── StatusEffects.luau        Pure burn/chill/poison derivation
 │   ├── Remotes.luau              Lazy remote creation (server) / lookup (client)
 │   ├── RateLimiter.luau          Token-bucket throttle
 │   ├── Signal.luau               Pure-Luau event (no BindableEvent serialisation cost)
 │   └── TableUtil.luau            DeepCopy / Reconcile
 └── Server/                       → ServerScriptService.Server
     ├── Bootstrap.server.luau     Single server entry point; starts services in order
+    ├── FrameworkGuard.luau       Fails fast when modules disagree about shared config
     ├── Data/
     │   ├── DataSchema.luau       Saved data template, migrations, normalisation
     │   └── ProfileStore.luau     Session-locked, auto-saving, backup-mirrored DataStore layer
     ├── Plots/
-    │   ├── PlotBuilder.luau      Procedurally builds gardens, soil and prompts
     │   └── CropFactory.luau      Builds the crop model for a seed at a growth stage
+    ├── Pens/
+    │   └── AnimalFactory.luau    Builds the animal model for a species at a maturity stage
     ├── World/
-    │   └── ShopBuilder.luau      Builds the Workspace.ShopNPC storefront
+    │   ├── PlacementService.luau Validate → pay → build → persist → replicate
+    │   ├── StructureBuilder.luau Builds the model for a placed structure
+    │   ├── ShopBuilder.luau      Builds the Workspace.ShopNPC storefront
+    │   └── TrainingGround.luau   A practice range, so the combat layer can be felt
+    ├── Combat/
+    │   ├── DamageableService.luau One registry for everything with health
+    │   ├── StatusEffectService.luau
+    │   ├── AttackService.luau    One loop for every attacker
+    │   ├── RaidService.luau      Summoned waves, levels and escalation
+    │   └── DefeatService.luau    The Checkpoint and the two ways back
     └── Services/
         ├── PlayerDataService.luau   The only module permitted to mutate player data
-        ├── PlotService.luau         Garden assignment, plant/harvest, growth loop
+        ├── FarmService.luau         Planting, harvesting and boosting on placed farms
+        ├── AnimalService.luau       Stocking, feeding, collecting and slaughtering in placed pens
         ├── ShopService.luau         ProcessTransaction: buying and selling any item
         └── MarketplaceService.luau  Developer Product receipt processing
 
 src/Client/                       → StarterPlayer.StarterPlayerScripts.Client
-├── HudClient.client.luau         Cash/Level/XP strip, Inventory panel, Robux store
-└── ShopClient.client.luau        Builds ShopGui; opens it from the ShopNPC prompt
+├── HudClient.client.luau         Resource strip, Level/XP, Inventory panel, Robux store
+├── ShopClient.client.luau        Builds ShopGui; opens it from the ShopNPC prompt
+├── BuildClient.client.luau       The build menu and the placement ghost
+├── CombatClient.client.luau      Health bars and target feedback
+├── DefeatClient.client.luau      The defeat panel
+├── EffectsClient.client.luau     Draws shots, which have no state to derive from
+└── NoticeClient.client.luau      Shows one-line refusals from the server
 ```
 
 The long-term design target is recorded in [docs/ROADMAP.md](docs/ROADMAP.md).
 
 Built with [Rojo](https://rojo.space): `rojo serve` or `rojo build -o game.rbxl`.
 
-Nothing needs to be placed in Workspace by hand. `PlotService` creates
-`Workspace.Gardens` at runtime and `PlotBuilder` generates each garden's parts,
-so the game builds and runs from source with no manual Studio setup.
+Nothing needs to be placed in Workspace by hand. Farms, pens, towers and the
+storefront are all built at runtime from their `GameConfig` definitions, so the
+game builds and runs from source with no manual Studio setup.
 
 ---
 
@@ -514,38 +536,48 @@ and replace `buildGui()` with lookups into it — nothing else in the file chang
 | ----- | -------- | ------- |
 | `Items` | item id | `Name`, `Category`, `BuyPrice`, `SellPrice`, `MaxStack`, `Rarity` |
 | `Plantables` | **seed** item id | `Yields`, `YieldAmount`, `GrowTime`, `XPReward`, `RequiredLevel`, `Color` |
+| `Animals` | **livestock** item id | `MatureTime`, `Feed`, `Produces`, `Slaughter`, `HousedIn`, `RequiredLevel`, `Color` |
 
-A `nil` price means "not tradeable in that direction". Seeds are buyable but not
-sellable (no buy-back arbitrage); crops and animal drops are sellable but not
-buyable; `GrowthBoost` is neither, because it is Robux-only — it lives in the
-directory purely for stacking and UI.
+A `nil` price means "not tradeable in that direction". Seeds and livestock are
+buyable but not sellable (no buy-back arbitrage); crops and animal drops are
+sellable but not buyable; `GrowthBoost` is neither, because it is Robux-only —
+it lives in the directory purely for stacking and UI.
 
-Registered categories: `Seeds`, `Crops`, `AnimalDrops`, `Boosts`.
+Registered categories: `Seeds`, `Livestock`, `Crops`, `AnimalDrops`, `Boosts`.
 
 | Category | Items |
 | -------- | ----- |
-| Seeds | `CarrotSeed`, `WheatSeed`, `TomatoSeed`, `PumpkinSeed`, `WatermelonSeed`, `GoldenAppleSeed`, `StarfruitSeed` |
+| Seeds | `CarrotSeed`, `WheatSeed`, `TomatoSeed`, `PumpkinSeed`, `WatermelonSeed`, `GoldenAppleSeed`, `StarfruitSeed`, plus the combat-plant seeds |
+| Livestock | `Chick`, `Piglet`, `Calf` |
 | Crops | `Carrot`, `Wheat`, `Tomato`, `Pumpkin`, `Watermelon`, `GoldenApple`, `Starfruit` |
-| AnimalDrops | `Egg`, `Milk`, `RawBeef`, `Leather` |
+| AnimalDrops | `Egg`, `Milk`, `RawBeef`, `Leather`, `RawChicken`, `RawPork`, `Fat` |
 | Boosts | `GrowthBoost` |
 
-`AnimalDrops` have no production mechanic yet — husbandry comes later. They are
-registered now so inventory, shop and UI already handle them, which is the point
-of the refactor: the only thing husbandry will need to add is a table saying
-which animal produces which drop.
+`Egg`, `Milk`, `RawBeef` and `Leather` predate husbandry: they were registered
+when this directory was built, to prove a new item kind needed no inventory,
+replication or schema change. **That claim held.** Adding the mechanic added
+`RawChicken`, `RawPork`, `Fat`, a `Livestock` category and a table saying which
+animal produces which drop — and nothing in storage, replication or the shop
+moved. Selling an egg needed no new code at all, and the `Livestock` shop tab
+appeared because the clients build their tabs by iterating `ItemCategories`.
+
+`Plantables` and `Animals` are deliberately the same shape: a seed and a chick
+are both an item you buy, consume into a structure, and wait on. Keying
+husbandry by the livestock item rather than inventing a separate animal id is
+what let the shop, the inventory and the level gate carry over unchanged —
+`GetRequiredLevel` is one function serving both.
 
 Future mechanics follow the same shape and touch nothing above:
 
 ```lua
-GameConfig.Animals    -- keyed by animal id,    Produces = {"Egg", "Milk"}
-GameConfig.Recipes    -- keyed by output id,    Inputs   = { Wheat = 3 }
-GameConfig.Structures -- keyed by structure id, Cost     = { Leather = 2 }
+GameConfig.Recipes    -- keyed by output id,    Inputs = { Wheat = 3 }
 ```
 
 Config is asserted at require time: every item id must be a legal attribute
 name, every plantable must reference a real `Seeds` item and yield a real
-sellable item, and every `StarterKit` entry must exist. A bad edit fails on
-startup rather than mid-session.
+sellable item, every animal must fit in a pen that exists and be worth either
+producing from or slaughtering, and every `StarterKit` entry must exist. A bad
+edit fails on startup rather than mid-session.
 
 ### 2. Unified inventory API
 

@@ -19,10 +19,17 @@
 	               size.
 	  Plantables - gardening behaviour, keyed by SEED item id. Carries GrowTime,
 	               XP, level gate, and what crop item it yields.
+	  Animals    - husbandry behaviour, keyed by LIVESTOCK item id. Carries
+	               MatureTime, feed, what it produces and what it yields when
+	               slaughtered.
+
+	Plantables and Animals are the same shape on purpose: a seed and a chick
+	are both an item you buy, consume into a structure, and wait on. Keying
+	husbandry by the livestock item rather than by a separate "animal id" is
+	what let the shop, the inventory and the level gate carry over unchanged.
 
 	Future mechanics follow the same pattern and touch nothing above:
 
-	  Animals    - husbandry, keyed by animal id, `Produces = {"Egg", "Milk"}`
 	  Recipes    - crafting, keyed by output item id, `Inputs = {...}`
 	  Structures - RTS/survival building, keyed by structure id, `Cost = {...}`
 
@@ -34,7 +41,7 @@
 
 export type Rarity = "Common" | "Uncommon" | "Rare" | "Epic" | "Legendary"
 
-export type ItemCategory = "Seeds" | "Crops" | "AnimalDrops" | "Boosts"
+export type ItemCategory = "Seeds" | "Livestock" | "Crops" | "AnimalDrops" | "Boosts"
 
 export type ItemDefinition = {
 	Id: string,
@@ -282,8 +289,15 @@ end
 -- Master item directory
 --------------------------------------------------------------------------------
 
--- Display order for category tabs in the shop UI.
-GameConfig.ItemCategories = { "Seeds", "Crops", "AnimalDrops", "Boosts" }
+--[[
+	Display order for category tabs in the shop UI.
+
+	Livestock sits next to Seeds because they are the two things you BUY to
+	put into a structure, and the two categories the shop sells rather than
+	buys. The clients build their tabs by iterating this list, so adding a
+	category needed no client change.
+]]
+GameConfig.ItemCategories = { "Seeds", "Livestock", "Crops", "AnimalDrops", "Boosts" }
 
 GameConfig.Items = {
 	--------------------------------------------------------------------------
@@ -465,8 +479,47 @@ GameConfig.Items = {
 	},
 
 	--------------------------------------------------------------------------
-	-- Animal drops: produced by husbandry (mechanic not built yet), sellable.
-	-- Present now so the shop, inventory and UI already handle them.
+	-- Livestock: bought young, consumed into a pen, not sellable.
+	--
+	-- Not sellable for the same reason seeds are not: a buy price and a sell
+	-- price on one item is an arbitrage loop. The way to get value back out
+	-- of an animal is to raise it.
+	--------------------------------------------------------------------------
+	Chick = {
+		Id = "Chick",
+		Name = "Chick",
+		Category = "Livestock",
+		BuyPrice = 120,
+		SellPrice = nil,
+		MaxStack = 99,
+		Rarity = "Common",
+	},
+	Piglet = {
+		Id = "Piglet",
+		Name = "Piglet",
+		Category = "Livestock",
+		BuyPrice = 150,
+		SellPrice = nil,
+		MaxStack = 99,
+		Rarity = "Uncommon",
+	},
+	Calf = {
+		Id = "Calf",
+		Name = "Calf",
+		Category = "Livestock",
+		BuyPrice = 650,
+		SellPrice = nil,
+		MaxStack = 99,
+		Rarity = "Rare",
+	},
+
+	--------------------------------------------------------------------------
+	-- Animal drops: produced by husbandry, sellable.
+	--
+	-- Egg, Milk, RawBeef and Leather predate the mechanic - they were added
+	-- when the directory was refactored, to prove a new category needed no
+	-- inventory change. Raising the animals that produce them added only
+	-- RawChicken, RawPork and Fat, and nothing else in this file moved.
 	--------------------------------------------------------------------------
 	Egg = {
 		Id = "Egg",
@@ -503,6 +556,33 @@ GameConfig.Items = {
 		SellPrice = 90,
 		MaxStack = 999,
 		Rarity = "Uncommon",
+	},
+	RawChicken = {
+		Id = "RawChicken",
+		Name = "Raw Chicken",
+		Category = "AnimalDrops",
+		BuyPrice = nil,
+		SellPrice = 65,
+		MaxStack = 999,
+		Rarity = "Common",
+	},
+	RawPork = {
+		Id = "RawPork",
+		Name = "Raw Pork",
+		Category = "AnimalDrops",
+		BuyPrice = nil,
+		SellPrice = 140,
+		MaxStack = 999,
+		Rarity = "Uncommon",
+	},
+	Fat = {
+		Id = "Fat",
+		Name = "Tallow",
+		Category = "AnimalDrops",
+		BuyPrice = nil,
+		SellPrice = 40,
+		MaxStack = 999,
+		Rarity = "Common",
 	},
 
 	--------------------------------------------------------------------------
@@ -792,10 +872,23 @@ function GameConfig.GetPlantable(seedId: unknown): PlantableDefinition?
 	return GameConfig.Plantables[seedId]
 end
 
---- Level required to buy or plant an item. Non-plantable items are ungated.
+--[[
+	Level required to buy or use an item. Items with no behaviour behind them
+	-- crops, produce, boosts -- are ungated.
+
+	One function for both mechanics, because the shop catalogue, the build of
+	the store panel and the stock/plant resolvers all consult it: a cow gated
+	in the shop but not at the pen, or the reverse, is the kind of split that
+	only shows up as a player buying something they cannot use.
+]]
 function GameConfig.GetRequiredLevel(itemId: string): number
 	local plantable = GameConfig.Plantables[itemId]
-	return if plantable then plantable.RequiredLevel else 0
+	if plantable then
+		return plantable.RequiredLevel
+	end
+
+	local animal = GameConfig.Animals[itemId]
+	return if animal then animal.RequiredLevel else 0
 end
 
 --- Seeds a player of `level` may buy or plant, cheapest first (then by id).
@@ -822,10 +915,324 @@ function GameConfig.GetAvailablePlantables(level: number): { PlantableDefinition
 end
 
 --------------------------------------------------------------------------------
--- Growth
+-- Husbandry (livestock behaviour, keyed by LIVESTOCK item id)
 --------------------------------------------------------------------------------
 
+--- One item id and a quantity. Used for feed, produce and slaughter yields,
+--- which are all "this many of that item".
+export type AnimalYield = { ItemId: string, Amount: number }
+
+--- A named point on a [0, 1] progress curve. Crop growth and animal maturity
+--- are the same shape - a threshold you have either passed or not - so they
+--- share one type and one piece of stage math.
 export type GrowthStage = { Id: string, Threshold: number }
+
+export type AnimalSizeDefinition = {
+	Id: string,
+	Name: string,
+	Space: number, -- units of pen space one animal occupies
+	VisualScale: number,
+}
+
+export type AnimalDefinition = {
+	StockId: string, -- the Livestock item consumed to stock one animal
+	Name: string, -- the grown animal, which is not the item's name
+	ArchetypeId: string,
+	HousedIn: string, -- the structure id that accepts it
+	AnimalSize: string,
+	MatureTime: number,
+	RequiredLevel: number,
+
+	-- Per animal, per feeding. A pen of six eats six times this.
+	Feed: AnimalYield,
+	FeedDuration: number,
+
+	-- Periodic produce. Empty for an animal raised only for slaughter, in
+	-- which case ProduceInterval and ProduceXP are nil.
+	Produces: { AnimalYield },
+	ProduceInterval: number?,
+	ProduceXP: number?,
+
+	Slaughter: { AnimalYield },
+	SlaughterXP: number,
+
+	Color: Color3,
+}
+
+--[[
+	How much pen space one animal takes, and how big it looks.
+
+	Capacity is expressed as a per-ANIMAL cost against a per-PEN allowance,
+	rather than as "this pen holds four things". The difference matters the
+	moment a pen can hold more than one species: a count would have to be
+	re-decided for every pen/species pair, whereas a space cost is decided
+	once per animal and every pen prices it automatically.
+
+	Same reasoning as PlantSizes, and the same visual trick - six small birds
+	or three big cattle, so the pen's contents read at a glance.
+]]
+GameConfig.AnimalSizes = {
+	Small = {
+		Id = "Small",
+		Name = "Small",
+		Space = 1,
+		VisualScale = 0.55,
+	},
+
+	Large = {
+		Id = "Large",
+		Name = "Large",
+		Space = 3,
+		VisualScale = 1.0,
+	},
+} :: { [string]: AnimalSizeDefinition }
+
+--[[
+	The husbandry loop.
+
+	STOCK -> GROW -> FEED -> COLLECT -> (eventually) SLAUGHTER
+
+	Every one of those is derived from a timestamp on the pen's structure
+	entry, exactly as a crop's stage is derived from PlantedAt. Nothing
+	accumulates, so animals grow and produce while the player is offline and a
+	restart cannot lose progress.
+
+	WHY FEED IS THE THROTTLE
+	------------------------
+	Produce accrues only over time the herd was FED, and feeding can be
+	stacked at most `MaxFedWindows` deep. That one rule does three jobs:
+
+	  * it bounds offline production without a separate "max stored" cap,
+	  * it makes husbandry cost crops, so farming has a customer other than
+	    the market,
+	  * and it gives the mechanic an attention cadence - a flock left alone
+	    stops paying.
+
+	WHY NEGLECT HAS TEETH
+	---------------------
+	An unfed herd STARVES: it loses health every tick through the ordinary
+	damageable registry, and dies if ignored long enough. Without that,
+	feeding a slaughter-only animal like a pig would be pointless, because
+	maturity is derived from the stocking time and arrives whether or not
+	anybody turned up with a bucket.
+
+	Starvation is a fraction of max health per second rather than a flat
+	number, so it bites a chicken and a cow on the same schedule instead of
+	needing a per-species figure that would drift out of step with their
+	health.
+]]
+GameConfig.Husbandry = {
+	EmptyStage = "Empty",
+	GrownStage = "Grown",
+
+	--[[
+		Slower than the growth loop, because nothing here is per-second:
+		maturity is minutes away and the shortest produce interval is a
+		minute. The loop exists for liveness - to notice a stage change, a
+		produce batch or a lapsed feed - and correctness comes from the
+		timestamps, so ticking faster would buy nothing but work.
+	]]
+	TickInterval = 5,
+
+	-- How many feed windows can be stacked ahead. Two lets a player feed
+	-- before logging off and still be paid for the gap; a hundred would make
+	-- the cadence meaningless.
+	MaxFedWindows = 2,
+
+	--[[
+		How long a newly stocked herd arrives fed for.
+
+		A pen that began starving the instant it was stocked would punish a
+		player for not already knowing the mechanic, so there is a grace - but
+		it is a SHORT fixed grace rather than a full feed window.
+
+		A full window was the first attempt and it quietly disabled the
+		feature: a pig's FeedDuration is longer than its MatureTime, so the
+		grace covered the entire raise and a barn could be taken to slaughter
+		having never been fed once. Asserted below to be shorter than the
+		fastest animal's MatureTime, so no animal can ever be raised on the
+		grace alone.
+	]]
+	StockingGrace = 60,
+
+	--[[
+		The most batches ONE collection pays out.
+
+		Not a limit on how much a pen may accumulate - a player who keeps
+		feeding is paying for every batch and is entitled to all of them. It
+		loses nothing, because collecting advances the clock by the batches
+		PAID, so a capped collection leaves the remainder on the clock for the
+		next press.
+
+		It exists to bound the arithmetic. A corrupt or clock-skewed profile
+		can otherwise present a window decades wide, and "tens of millions of
+		cycles" is a number that should never reach a payout calculation
+		however it got there.
+	]]
+	MaxStoredCycles = 2_000,
+
+	-- Fraction of the herd's max health lost per second while unfed.
+	-- Asserted below to outpace every herd's regeneration, or a hungry herd
+	-- would heal faster than it starved and the rule would be decorative.
+	StarvationFractionPerSecond = 0.01,
+	StarvationDamageType = "Starvation",
+
+	Stages = {
+		{ Id = "Juvenile", Threshold = 0.0 },
+		{ Id = "Adolescent", Threshold = 0.5 },
+		{ Id = "Grown", Threshold = 1.0 },
+	} :: { GrowthStage },
+}
+
+--[[
+	The animals, keyed by the livestock item that becomes one.
+
+	Chickens are the entry point: cheap, quick, and productive on a short
+	cadence, so husbandry can be learned in a couple of minutes. Cattle are
+	the opposite end - expensive, slow, and worth more per visit. Pigs are
+	neither: they produce NOTHING periodically and exist to be fattened and
+	slaughtered, which is a different play pattern (set it and forget it,
+	modulo feeding) rather than a worse version of the same one.
+]]
+GameConfig.Animals = {
+	Chick = {
+		StockId = "Chick",
+		Name = "Chicken",
+		ArchetypeId = "Chicken",
+		HousedIn = "Coop",
+		AnimalSize = "Small",
+		MatureTime = 120,
+		RequiredLevel = 2,
+		Feed = { ItemId = "Wheat", Amount = 1 },
+		FeedDuration = 300,
+		Produces = { { ItemId = "Egg", Amount = 1 } },
+		ProduceInterval = 60,
+		ProduceXP = 4,
+		Slaughter = { { ItemId = "RawChicken", Amount = 1 } },
+		SlaughterXP = 12,
+		Color = Color3.fromRGB(236, 230, 214),
+	},
+
+	Piglet = {
+		StockId = "Piglet",
+		Name = "Pig",
+		ArchetypeId = "Pig",
+		HousedIn = "Barn",
+		AnimalSize = "Large",
+		MatureTime = 300,
+		RequiredLevel = 6,
+		Feed = { ItemId = "Carrot", Amount = 2 },
+		FeedDuration = 360,
+		-- Raised for meat, so there is nothing to collect in the meantime.
+		Produces = {},
+		ProduceInterval = nil,
+		ProduceXP = nil,
+		Slaughter = {
+			{ ItemId = "RawPork", Amount = 2 },
+			{ ItemId = "Fat", Amount = 1 },
+		},
+		SlaughterXP = 90,
+		Color = Color3.fromRGB(226, 166, 170),
+	},
+
+	Calf = {
+		StockId = "Calf",
+		Name = "Cow",
+		ArchetypeId = "Cow",
+		HousedIn = "Barn",
+		AnimalSize = "Large",
+		MatureTime = 600,
+		RequiredLevel = 10,
+		Feed = { ItemId = "Wheat", Amount = 2 },
+		FeedDuration = 600,
+		Produces = { { ItemId = "Milk", Amount = 2 } },
+		ProduceInterval = 120,
+		ProduceXP = 18,
+		Slaughter = {
+			{ ItemId = "RawBeef", Amount = 1 },
+			{ ItemId = "Leather", Amount = 1 },
+			{ ItemId = "Fat", Amount = 1 },
+		},
+		SlaughterXP = 140,
+		Color = Color3.fromRGB(96, 82, 74),
+	},
+} :: { [string]: AnimalDefinition }
+
+--- Resolves an untrusted livestock item id to its husbandry behaviour.
+function GameConfig.GetAnimal(stockId: unknown): AnimalDefinition?
+	if type(stockId) ~= "string" then
+		return nil
+	end
+
+	return GameConfig.Animals[stockId]
+end
+
+function GameConfig.GetAnimalSize(sizeId: unknown): AnimalSizeDefinition?
+	if type(sizeId) ~= "string" then
+		return nil
+	end
+
+	return GameConfig.AnimalSizes[sizeId]
+end
+
+--- Whether `stockId` produces anything between stocking and slaughter.
+function GameConfig.HasProduce(stockId: unknown): boolean
+	local animal = GameConfig.GetAnimal(stockId)
+	return animal ~= nil and #animal.Produces > 0 and (animal.ProduceInterval or 0) > 0
+end
+
+--[[
+	How many of `stockId` fit in a pen of `structureId`. 0 when the pen is not
+	housing, when the animal is unknown, or when that pen does not take that
+	species - so a caller that forgets to validate cannot stock anything.
+]]
+function GameConfig.GetPenCapacity(structureId: unknown, stockId: unknown): number
+	local structure = GameConfig.GetStructure(structureId)
+	local animal = GameConfig.GetAnimal(stockId)
+
+	if not structure or not animal or not structure.HousesLivestock then
+		return 0
+	end
+
+	if animal.HousedIn ~= structure.Id then
+		return 0
+	end
+
+	local size = GameConfig.GetAnimalSize(animal.AnimalSize)
+	if not size then
+		return 0
+	end
+
+	return math.floor((structure.LivestockSpace or 0) / size.Space)
+end
+
+--- Animals a player of `level` may stock, cheapest first so the UI and the
+--- server's fallback pick agree on what "the obvious one" is.
+function GameConfig.GetAvailableAnimals(level: number): { AnimalDefinition }
+	local available = {}
+
+	for _, animal in GameConfig.Animals do
+		if level >= animal.RequiredLevel then
+			table.insert(available, animal)
+		end
+	end
+
+	table.sort(available, function(a, b)
+		local priceA = GameConfig.Items[a.StockId].BuyPrice or 0
+		local priceB = GameConfig.Items[b.StockId].BuyPrice or 0
+
+		if priceA == priceB then
+			return a.StockId < b.StockId
+		end
+		return priceA < priceB
+	end)
+
+	return available
+end
+
+--------------------------------------------------------------------------------
+-- Growth
+--------------------------------------------------------------------------------
 
 GameConfig.Growth = {
 	EmptyStage = "Empty",
@@ -943,7 +1350,7 @@ GameConfig.TargetPriorities = { "Any", "Defence", "Resource" }
 GameConfig.TargetTags = { "Core", "Defence", "Resource", "Crop", "Unit" }
 
 GameConfig.Combat = {
-	DamageTypes = { "Melee", "Pierce", "Siege", "Magic", "Fire", "Ice", "Poison" },
+	DamageTypes = { "Melee", "Pierce", "Siege", "Magic", "Fire", "Ice", "Poison", "Starvation" },
 	ArmourClasses = { "Unarmoured", "Light", "Heavy", "Building", "Crop" },
 
 	--[[
@@ -991,6 +1398,18 @@ GameConfig.Combat = {
 		Fire = { Unarmoured = 1.20, Light = 1.30, Heavy = 0.70, Building = 0.60, Crop = 2.00 },
 		Ice = { Unarmoured = 0.60, Light = 0.60, Heavy = 0.60, Building = 0.25, Crop = 0.50 },
 		Poison = { Unarmoured = 1.40, Light = 1.20, Heavy = 1.00, Building = 0.10, Crop = 0.50 },
+
+		--[[
+			Hunger, which is not an attack and has no attacker.
+
+			Flat across every armour class because that is what starving
+			means: a thicker hide does not help. It is applied only to
+			livestock, by the husbandry loop, and no attack profile uses it -
+			the row is uniform so that if something else ever starves, the
+			answer is already here rather than being invented at the call
+			site.
+		]]
+		Starvation = { Unarmoured = 1.00, Light = 1.00, Heavy = 1.00, Building = 1.00, Crop = 1.00 },
 	},
 }
 
@@ -1189,6 +1608,91 @@ GameConfig.Archetypes = {
 		RegenPerSecond = 0,
 		Repairable = true,
 		RepairCostPerHealth = { Wood = 0.5 },
+		DestroyBehaviour = "Remove",
+		Faction = "Player",
+		TargetTag = "Resource",
+	},
+
+	Coop = {
+		Id = "Coop",
+		Name = "Chicken Coop",
+		MaxHealth = 400,
+		ArmourClass = "Building",
+		Armour = 0,
+		RegenPerSecond = 0,
+		Repairable = true,
+		RepairCostPerHealth = { Wood = 0.25 },
+		DestroyBehaviour = "Remove",
+		Faction = "Player",
+		TargetTag = "Resource",
+	},
+
+	Barn = {
+		Id = "Barn",
+		Name = "Barn",
+		MaxHealth = 1_000,
+		ArmourClass = "Building",
+		Armour = 4,
+		RegenPerSecond = 0,
+		Repairable = true,
+		RepairCostPerHealth = { Wood = 0.5, Stone = 0.2 },
+		DestroyBehaviour = "Remove",
+		Faction = "Player",
+		TargetTag = "Resource",
+	},
+
+	--[[
+		The HERDS.
+
+		One archetype per species, and one ENTITY per pen rather than per
+		animal: the herd in a pen shares a health pool exactly as the stack of
+		plants in a farm square shares a crop entity. Density therefore
+		concentrates risk here too - a raider that reaches a full coop takes
+		the whole flock - which is the same trade the farm makes and worth
+		having rather than a bug to fix.
+
+		Tagged "Resource", so a Looter heading for the Mills and Farms goes
+		for the livestock as well. Nothing in the targeting code was told
+		about animals; it reads the tag.
+
+		They regenerate, because a herd is alive and a fed one should recover
+		from a raid without the player spending resources on it. Repairable is
+		false for the same reason: you cannot repair a chicken.
+	]]
+	Chicken = {
+		Id = "Chicken",
+		Name = "Chickens",
+		MaxHealth = 120,
+		ArmourClass = "Light",
+		Armour = 0,
+		RegenPerSecond = 0.3,
+		Repairable = false,
+		DestroyBehaviour = "Remove",
+		Faction = "Player",
+		TargetTag = "Resource",
+	},
+
+	Pig = {
+		Id = "Pig",
+		Name = "Pigs",
+		MaxHealth = 300,
+		ArmourClass = "Light",
+		Armour = 0,
+		RegenPerSecond = 0.5,
+		Repairable = false,
+		DestroyBehaviour = "Remove",
+		Faction = "Player",
+		TargetTag = "Resource",
+	},
+
+	Cow = {
+		Id = "Cow",
+		Name = "Cattle",
+		MaxHealth = 500,
+		ArmourClass = "Light",
+		Armour = 0,
+		RegenPerSecond = 0.8,
+		Repairable = false,
 		DestroyBehaviour = "Remove",
 		Faction = "Player",
 		TargetTag = "Resource",
@@ -1543,6 +2047,19 @@ export type StructureDefinition = {
 	Color: Color3,
 	MaxPerPlayer: number,
 	SortOrder: number,
+
+	--[[
+		Per-building behaviour flags.
+
+		A service filters on the flag rather than on the structure id, which is
+		what keeps per-building behaviour out of the placement system: farms
+		are the only thing FarmService attaches to, pens the only thing
+		AnimalService attaches to, and neither service names the other's
+		buildings.
+	]]
+	HoldsCrop: boolean?,
+	HousesLivestock: boolean?,
+	LivestockSpace: number?, -- pen space available to animals, see AnimalSizes
 }
 
 --[[
@@ -1635,6 +2152,53 @@ GameConfig.Structures = {
 		Color = Color3.fromRGB(142, 146, 152),
 		MaxPerPlayer = 6,
 		SortOrder = 50,
+	},
+
+	--[[
+		The pens.
+
+		Both require a Mill, for the reason the Farm does: husbandry is the
+		other half of the Mill's job, and the dependency is EXISTENCE rather
+		than proximity - the radius model was tried and removed. A herd near
+		its Mill may one day eat less or produce faster, but it will not be
+		forbidden from standing elsewhere.
+
+		A Coop is Stone Age and cheap, so chickens are reachable about as
+		early as a second farm. The Barn is Bronze Age and expensive, which is
+		what keeps cattle a goal rather than an alternative opening.
+	]]
+	Coop = {
+		Id = "Coop",
+		Name = "Chicken Coop",
+		Description = "Houses a flock of chickens. Feed them, collect the eggs; requires a Mill.",
+		ArchetypeId = "Coop",
+		RequiredAge = 1,
+		Prerequisites = { "Mill" },
+		Cost = { Wood = 80 },
+		Size = Vector3.new(8, 6, 8),
+		Color = Color3.fromRGB(168, 132, 92),
+		MaxPerPlayer = 8,
+		SortOrder = 60,
+		HousesLivestock = true,
+		-- Six Small animals, or two Large ones if a small species is ever
+		-- housed here. See AnimalSizes for why this is space, not a count.
+		LivestockSpace = 6,
+	},
+
+	Barn = {
+		Id = "Barn",
+		Name = "Barn",
+		Description = "Houses pigs and cattle. Requires a Mill, and the Bronze Age.",
+		ArchetypeId = "Barn",
+		RequiredAge = 2,
+		Prerequisites = { "Mill" },
+		Cost = { Wood = 220, Stone = 60 },
+		Size = Vector3.new(16, 10, 12),
+		Color = Color3.fromRGB(142, 76, 62),
+		MaxPerPlayer = 4,
+		SortOrder = 70,
+		HousesLivestock = true,
+		LivestockSpace = 9,
 	},
 } :: { [string]: StructureDefinition }
 
@@ -1971,6 +2535,10 @@ GameConfig.Attributes = {
 	]]
 	Defeated = "Defeated",
 	TargetFarm = "TargetFarm", -- instance id a boost purchase applies to
+
+	-- Which livestock a stock action will use, the counterpart of
+	-- SelectedSeed. Server-written, from a validated remote.
+	SelectedStock = "SelectedStock",
 }
 
 --[[
@@ -2005,6 +2573,31 @@ GameConfig.FarmAttributes = {
 	PlantCapacity = "PlantCapacity", -- 0 when fallow
 }
 
+--[[
+	Published on a pen holding a herd.
+
+	Every field is a TIMESTAMP or a count, never a derived quantity: there is
+	no "eggs waiting" attribute, because the client computes that from
+	LastCollectedAt, FedUntil and the config with Shared.Husbandry - the same
+	function the server validates with. A pen that is producing therefore
+	costs no replication traffic at all between collections, exactly like a
+	growing crop.
+]]
+GameConfig.AnimalAttributes = {
+	AnimalId = "AnimalId", -- the livestock item id; "" when the pen is empty
+	StockedAt = "StockedAt",
+	GrownAt = "GrownAt",
+	-- Named apart from the farm's "Stage" so the two are never confused in a
+	-- client reading both, even though no model carries both.
+	Stage = "AnimalStage",
+	AnimalCount = "AnimalCount", -- 0 when empty
+	AnimalCapacity = "AnimalCapacity", -- 0 when empty
+	-- A FUTURE timestamp while the herd is fed, which is the one place in
+	-- this project where that is normal rather than a tamper signal.
+	FedUntil = "FedUntil",
+	LastCollectedAt = "LastCollectedAt",
+}
+
 -- A single flat folder now: one attribute per item id, no category subfolders.
 GameConfig.InventoryFolderName = "Inventory"
 GameConfig.StructuresFolderName = "Structures"
@@ -2029,6 +2622,17 @@ GameConfig.StructureCountsFolderName = "StructureCounts"
 
 GameConfig.RemoteNames = {
 	SelectSeed = "SelectSeed",
+
+	--[[
+		Which livestock to stock a pen with, the counterpart of SelectSeed.
+
+		Like SelectSeed it has no client caller yet - the server falls back to
+		the cheapest animal owned, so the mechanic is complete without it -
+		and both get wired up together by the selection panel in
+		docs/ROADMAP.md, which is where choosing what to put in a building
+		belongs.
+	]]
+	SelectAnimal = "SelectAnimal",
 
 	--[[
 		How a defeated player answers. A function, not an event: spending a
@@ -2347,6 +2951,151 @@ for seedId, plantable in GameConfig.Plantables do
 	end
 end
 
+do
+	local stages = GameConfig.Husbandry.Stages
+	assert(#stages > 0, "GameConfig.Husbandry.Stages must not be empty")
+	assert(stages[1].Threshold == 0, "the first maturity stage must start at 0")
+	assert(stages[#stages].Threshold == 1, "the final maturity stage must start at 1.0")
+	assert(stages[#stages].Id == GameConfig.Husbandry.GrownStage, "the final maturity stage must be GrownStage")
+
+	for index = 2, #stages do
+		assert(stages[index].Threshold > stages[index - 1].Threshold, "maturity stage thresholds must ascend")
+	end
+
+	assert(GameConfig.Husbandry.MaxFedWindows >= 1, "a pen must be feedable at least one window ahead")
+	assert(GameConfig.Husbandry.MaxStoredCycles >= 1, "a collection must be able to pay at least one batch")
+
+	-- Zero would busy-loop the husbandry thread AND zero out every starvation
+	-- charge, which is a lot of damage for one absent number. Same assert as
+	-- StatusEffectRules.TickInterval, for the same reason.
+	assert(GameConfig.Husbandry.TickInterval > 0, "GameConfig.Husbandry.TickInterval must be positive")
+
+	assert(
+		GameConfig.Husbandry.StarvationFractionPerSecond > 0,
+		"starvation must cost something, or feeding a slaughter-only animal would be pointless"
+	)
+	assert(
+		table.find(GameConfig.Combat.DamageTypes, GameConfig.Husbandry.StarvationDamageType) ~= nil,
+		`husbandry starves livestock with unknown damage type {GameConfig.Husbandry.StarvationDamageType}`
+	)
+	assert(GameConfig.Husbandry.StockingGrace > 0, "a newly stocked herd must arrive fed for some time")
+end
+
+for id, size in GameConfig.AnimalSizes do
+	assert(size.Id == id, `animal size {id} has a mismatched Id field`)
+	assert(size.Space >= 1, `animal size {id} must occupy at least one unit of pen space`)
+	assert(size.VisualScale > 0, `animal size {id} must have a positive VisualScale`)
+end
+
+--- Shared by the produce and slaughter checks below: both are lists of
+--- "this many of that item", and both are worthless if the item cannot be sold.
+local function assertYields(label: string, yields)
+	for index, yield in yields do
+		assert(yield.Amount > 0, `{label} entry {index} must be a positive amount`)
+
+		local item = GameConfig.Items[yield.ItemId]
+		assert(item ~= nil, `{label} entry {index} names unknown item {tostring(yield.ItemId)}`)
+		assert(
+			item.Category == "AnimalDrops",
+			`{label} entry {index} yields {yield.ItemId}, which is not an AnimalDrop`
+		)
+		assert(
+			GameConfig.IsSellable(item),
+			`{label} entry {index} yields {yield.ItemId}, which has no SellPrice - the animal would be worthless`
+		)
+	end
+end
+
+for stockId, animal in GameConfig.Animals do
+	assert(animal.StockId == stockId, `animal {stockId} has a mismatched StockId field`)
+	assert(animal.MatureTime > 0, `animal {stockId} must have a positive MatureTime`)
+	assert(
+		GameConfig.AnimalSizes[animal.AnimalSize] ~= nil,
+		`animal {stockId} has unknown AnimalSize {tostring(animal.AnimalSize)}`
+	)
+	local herdArchetype = GameConfig.Archetypes[animal.ArchetypeId]
+	assert(herdArchetype ~= nil, `animal {stockId} grows into unknown archetype {tostring(animal.ArchetypeId)}`)
+
+	--[[
+		Starvation has to outpace regeneration, or a hungry herd heals faster
+		than it starves and never dies. That would disable the rule the whole
+		feed mechanic rests on, silently, from two numbers in a different
+		table - so the relationship is asserted rather than left to whoever
+		next tunes a herd's health.
+	]]
+	assert(
+		herdArchetype.MaxHealth * GameConfig.Husbandry.StarvationFractionPerSecond > herdArchetype.RegenPerSecond,
+		`animal {stockId} regenerates at {herdArchetype.RegenPerSecond}/s, which is faster than it starves - `
+			.. `a hungry herd would be immortal`
+	)
+
+	--[[
+		And no animal may be raised on the stocking grace alone. If the grace
+		outlasts the raise, the animal reaches slaughter without ever being
+		fed, which is exactly what starvation exists to prevent.
+	]]
+	assert(
+		animal.MatureTime > GameConfig.Husbandry.StockingGrace,
+		`animal {stockId} matures in {animal.MatureTime}s, within its stocking grace of `
+			.. `{GameConfig.Husbandry.StockingGrace}s - it could be raised without ever being fed`
+	)
+
+	-- The livestock item is what the player buys and the pen consumes, so it
+	-- has to be in the directory and in the category the shop sells.
+	local stockItem = GameConfig.Items[stockId]
+	assert(stockItem ~= nil, `animal {stockId} has no matching item in the directory`)
+	assert(stockItem.Category == "Livestock", `animal {stockId} must reference an item in the Livestock category`)
+
+	--[[
+		The pen has to exist, house livestock, and have room for at least one.
+		A space cost larger than any pen's allowance is silently dead config:
+		the animal would be buyable and never stockable anywhere.
+	]]
+	local pen = GameConfig.Structures[animal.HousedIn]
+	assert(pen ~= nil, `animal {stockId} is housed in unknown structure {tostring(animal.HousedIn)}`)
+	assert(pen.HousesLivestock == true, `animal {stockId} is housed in {animal.HousedIn}, which is not a pen`)
+	assert(
+		GameConfig.GetPenCapacity(animal.HousedIn, stockId) >= 1,
+		`animal {stockId} does not fit in a {animal.HousedIn} even once`
+	)
+
+	-- Feed is what gives neglect a cost and gives farming a customer.
+	assert(GameConfig.Items[animal.Feed.ItemId] ~= nil, `animal {stockId} eats unknown item {animal.Feed.ItemId}`)
+	assert(animal.Feed.Amount > 0, `animal {stockId} must eat a positive amount`)
+	assert(animal.FeedDuration > 0, `animal {stockId} must have a positive FeedDuration`)
+
+	--[[
+		An animal must be worth raising ONE of the two ways, and must be
+		configured consistently for whichever it is.
+
+		A periodic producer with no interval would never pay out, and an
+		interval with nothing to produce is an empty timer - both read as
+		working and silently do nothing, which is the failure mode these
+		checks exist for.
+	]]
+	assert(
+		#animal.Produces > 0 or #animal.Slaughter > 0,
+		`animal {stockId} neither produces nor yields anything when slaughtered, so raising it does nothing`
+	)
+
+	if #animal.Produces > 0 then
+		assert(
+			(animal.ProduceInterval or 0) > 0,
+			`animal {stockId} produces {#animal.Produces} thing(s) but has no ProduceInterval`
+		)
+		assert((animal.ProduceXP or 0) > 0, `animal {stockId} produces but pays no ProduceXP`)
+		assertYields(`animal {stockId} Produces`, animal.Produces)
+	else
+		assert(animal.ProduceInterval == nil, `animal {stockId} produces nothing, so it must not name a ProduceInterval`)
+		assert(animal.ProduceXP == nil, `animal {stockId} produces nothing, so it must not name a ProduceXP`)
+	end
+
+	if #animal.Slaughter > 0 then
+		assert(animal.SlaughterXP > 0, `animal {stockId} can be slaughtered but pays no SlaughterXP`)
+		assertYields(`animal {stockId} Slaughter`, animal.Slaughter)
+	end
+end
+
 for id, attack in GameConfig.Attacks do
 	assert(attack.Id == id, `attack {id} has a mismatched Id field`)
 	assert(attack.Range > 0, `attack {id} must have a positive Range`)
@@ -2403,6 +3152,28 @@ for id, structure in GameConfig.Structures do
 	end
 	assert(GameConfig.Archetypes[structure.ArchetypeId] ~= nil, `structure {id} names unknown archetype`)
 	assert(structure.MaxPerPlayer > 0, `structure {id} must allow at least one`)
+
+	--[[
+		A pen has to have room, and something to put in it. A pen no animal
+		names as its home is a building the player can pay for and never use,
+		which is a balance-looking bug with a config cause.
+	]]
+	if structure.HousesLivestock then
+		assert((structure.LivestockSpace or 0) >= 1, `pen {id} has no LivestockSpace, so nothing can live in it`)
+
+		local housesSomething = false
+
+		for _, animal in GameConfig.Animals do
+			if animal.HousedIn == id then
+				housesSomething = true
+				break
+			end
+		end
+
+		assert(housesSomething, `pen {id} is a pen no animal is housed in`)
+	else
+		assert(structure.LivestockSpace == nil, `structure {id} has LivestockSpace but does not house livestock`)
+	end
 	assert(structure.RequiredAge >= 1 and structure.RequiredAge <= #GameConfig.Ages, `structure {id} has a bad age`)
 
 	for resourceId in structure.Cost do

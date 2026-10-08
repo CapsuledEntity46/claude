@@ -1,6 +1,6 @@
 # Tests
 
-A headless test suite for the server and shared code: **1101 assertions**, no
+A headless test suite for the server and shared code: **1896 assertions**, no
 Roblox Studio required.
 
 ## Why this exists
@@ -57,6 +57,16 @@ that a missing module aborts with a named, actionable error rather than
 - **Luau caps live locals at 200 per function** and the suite is one function,
   so sections are wrapped in `do ... end` blocks. Adding locals to an existing
   section can push it over; scope them.
+- Tests that build things need somewhere to put them. Overlap is checked
+  against **every** player's structures, so by the later sections the world is
+  crowded; `makeFarm` and `makePen` search outward for a free spot rather than
+  trusting a fixed offset, which is what stops adding a section from breaking
+  an unrelated one further down.
+- A replicated attribute is only as fresh as the last tick of the loop that
+  publishes it. Crop growth ticks every second but husbandry ticks every five,
+  so a test that crosses a threshold and immediately reads the attribute is
+  asserting the tick rate. Advance past the threshold by an interval, or assert
+  against the pure module instead.
 - Assertions are `check(condition, label)` and `checkEqual(actual, expected,
   label)`. Labels read as sentences because the output is the documentation.
 - `advance(n)` moves the virtual clock and resumes parked threads in time

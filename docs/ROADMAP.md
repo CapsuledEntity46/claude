@@ -346,18 +346,86 @@ The fix is the one an RTS wants anyway. Roblox gives a free mouse cursor, so:
 >   `Interaction.DestructiveHoldDuration` hold rather than a tap, so mashing E
 >   cannot destroy a defence. The real fix is the panel.
 
-### 3. Animal husbandry 🟡
+### 3. Animal husbandry ✅
 
-Drop items exist and are sellable; nothing produces them.
+Built as `Server.Services.AnimalService`, with the maturity and produce
+arithmetic in `Shared.Husbandry` so the client derives the same timers the
+server validates against.
 
-| Animal | Produces |
-| ------ | -------- |
-| Chicken | Egg, RawChicken |
-| Pig | RawPork, Fat |
-| Cow | Milk, Leather, RawBeef, Fat |
+| Animal | Produces | Slaughtered for |
+| ------ | -------- | --------------- |
+| Chicken | Egg | RawChicken |
+| Pig | — | RawPork, Fat |
+| Cow | Milk | RawBeef, Leather, Fat |
 
-⬜ Animal entities, pens, feeding, growth to maturity, collection cadence.
-In the RTS frame these are herdable units near a Mill, not free-standing props.
+✅ Animal entities, pens, feeding, growth to maturity, collection cadence.
+
+The loop is **stock → grow → feed → collect → slaughter**. A pen is to a herd
+what a farm square is to a crop: a placed structure holding a stack of one
+kind of thing, whose state is four timestamps on its own structure entry. Pens
+require a **Mill** — existence, not proximity, per the radius decision above.
+
+Two things turned out to be the whole design:
+
+- **Feed is the throttle.** Produce accrues only over time the herd was fed,
+  and feed can be stacked at most `Husbandry.MaxFedWindows` deep. That bounds
+  offline production without a separate cap, gives farming a customer other
+  than the market, and gives the mechanic an attention cadence.
+- **Neglect has teeth.** An unfed herd starves through the ordinary damageable
+  registry and dies if ignored. Without it, feeding a pig would be a cost with
+  no consequence for skipping it, because maturity is derived from the stocking
+  time and arrives whether or not anybody turned up with a bucket.
+
+Three things about those two rules were wrong in the first pass, found by
+review rather than by play, and all three are the same mistake — a rule that
+looks enforced and is not:
+
+- A newly stocked herd was granted a full **feed window** of grace. A pig's
+  `FeedDuration` is longer than its `MatureTime`, so the grace covered the
+  whole raise and a barn could be taken to slaughter having never been fed.
+  The grace is now a short fixed `StockingGrace`, asserted to be shorter than
+  the fastest animal's maturity.
+- Starvation was applied only by the tick, which runs for online players,
+  while health **regenerates from elapsed time** whether or not anyone is
+  watching. Logging out healed a starving herd, so neglect could be reset by
+  taking a break. The unfed span is now charged on attach.
+- Nothing asserted that starvation **outpaces** regeneration, which two
+  numbers in the archetype table could have silently reversed.
+
+> **Architectural notes.**
+>
+> - Produce is the first **grant** in the project derived from a timestamp, and
+>   that needed care. Maturity can be re-derived harmlessly; a payout cannot.
+>   Collecting advances the produce clock by the cycles *paid* rather than to
+>   `now`, so the grant is consumed exactly once and collecting early does not
+>   discard a part-finished cycle.
+> - A collection pays **the batches that fit**, not all or nothing. The
+>   all-or-nothing version deadlocked: pending produce grows without limit for
+>   a herd kept fed, a refused collection leaves the clock untouched, and
+>   slaughtering collects first — so past a stack limit the pen could never be
+>   emptied by any action, and both prompts went on advertising the eggs. The
+>   atomicity argument applies to the items within one batch, not to the number
+>   of batches.
+> - Feeding after a lapse pushes the produce clock forward by the starved
+>   duration. Leaving it alone would let a player feed once a day and be paid
+>   for the day; resetting it to `now` would discard batches the herd earned
+>   before the feed ran out. Both were wrong, and the second one is the kind of
+>   wrong that reads as a bug rather than a rule.
+> - One **herd entity** per pen, not one per animal, mirroring the one crop
+>   entity per farm square. Density therefore concentrates risk — a Looter that
+>   reaches a full coop takes the flock — which is the same trade the farm
+>   makes. Herds are tagged `Resource`, so raiders aimed at the economy count
+>   livestock as part of it with no targeting change at all.
+> - Capacity is a per-animal **space cost** against a per-pen allowance rather
+>   than a headcount, per the housing rule below.
+> - 🟡 Animals are static props. The roadmap's "herdable units" need the unit
+>   command system; writing movement against a pen now would mean writing it
+>   twice.
+> - 🟡 A pen has four actions and a ProximityPrompt has one gesture, so there
+>   are two prompts on different keys — the irreversible one held. That is one
+>   prompt too many, and the selection panel in §2c is where it belongs. The
+>   service is written for it: the prompts are a thin shell over
+>   `TryStock`/`TryFeed`/`TryCollect`/`TrySlaughter`.
 
 ### 4. Fishing ⬜
 
@@ -549,6 +617,11 @@ combat plants use, so one damage-type table serves both.
 raise the cap. This is the main lever limiting army composition, and it must be
 a per-unit config number, not a unit count.
 
+> 🟡 Already proven by husbandry: `GameConfig.AnimalSizes` gives each animal a
+> `Space` cost and each pen a `LivestockSpace` allowance, and
+> `GetPenCapacity(structureId, stockId)` divides one by the other. Army Camps
+> want the same two fields under different names.
+
 #### Target priority
 
 Troops act autonomously once deployed. Clash of Clans distinguishes:
@@ -673,7 +746,7 @@ Each step should be shippable and testable on its own.
 | **Build UX: sticky placement** ✅ | Hold a building and place a row of them; one shared buildability rule for the server and the menu |
 | **Grid snapping + plant density** ✅ | Farms tile like AoE's, and a square holds a stack so food stops eating the whole base |
 | **Status effects** ✅ | Burn/Chill/Poison; the layer combat plants, troops and towers all need before any of them can be interesting |
-| **Animal husbandry** | Herds near a Mill; directory already supports the drops |
+| **Animal husbandry** ✅ | Herds in Mill-dependent pens; the directory did already support the drops, and feed gave farming a customer |
 | **Checkpoint and defeat loop** | Defines player survival; gives Revenge Tokens meaning |
 | **Defences and hordes** | Depends on damageable + placement |
 | **RTS unit command** | Needs the custom camera |

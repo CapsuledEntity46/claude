@@ -77,6 +77,7 @@ local DefeatService = requireServer("Combat.DefeatService")
 local PlayerDataService = requireServer("Services.PlayerDataService")
 local FarmService = requireServer("Services.FarmService")
 local AnimalService = requireServer("Services.AnimalService")
+local BuildingActionService = requireServer("Services.BuildingActionService")
 local ShopService = requireServer("Services.ShopService")
 local MarketplaceService = requireServer("Services.MarketplaceService")
 local PlacementService = requireServer("World.PlacementService")
@@ -132,6 +133,7 @@ if guardModule then
 		PlayerDataService = PlayerDataService,
 		FarmService = FarmService,
 		AnimalService = AnimalService,
+		BuildingActionService = BuildingActionService,
 		PlacementService = PlacementService,
 		ShopService = ShopService,
 		MarketplaceService = MarketplaceService,
@@ -162,6 +164,14 @@ FarmService:Start()
 AnimalService:Start()
 
 PlacementService:Start()
+
+--[[
+	After the services it routes to, and after placement: it reads ownership
+	through PlacementService and dispatches to FarmService and AnimalService,
+	so every one of them has to be listening before a client can ask.
+]]
+BuildingActionService:Start()
+
 ShopService:Start()
 
 --[[

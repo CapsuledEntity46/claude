@@ -190,28 +190,135 @@ function penOf(player, instanceId)
 	return PLACEMENT:GetPlaced(player)[instanceId].Model
 end
 
-function penPrompt(player, instanceId, name)
-	return penOf(player, instanceId).PrimaryPart:FindFirstChild(name or "Interact")
-end
-
---- Walks the player to the pen and fires one of its prompts, so distance
---- never silently decides the outcome of a test about something else.
-function pokePen(player, instanceId, name)
-	player.Character.PrimaryPart.Position = penOf(player, instanceId).PrimaryPart.Position
-	penPrompt(player, instanceId, name).Triggered:Fire(player)
-end
-
 function farmOf(player, instanceId)
 	return PLACEMENT:GetPlaced(player)[instanceId].Model
 end
 
-function promptOf(player, instanceId)
-	return farmOf(player, instanceId).PrimaryPart:FindFirstChild("Interact")
+--[[
+	The one prompt an owned building has left.
+
+	It opens the selection panel and does nothing else - the server connects
+	nothing to it - so these helpers no longer fire it. They send the action
+	the panel's buttons would send, which is the path that now matters.
+]]
+function managePrompt(player, instanceId)
+	return farmOf(player, instanceId).PrimaryPart:FindFirstChild(GameConfig.Selection.PromptName)
 end
 
+penPrompt = managePrompt
+promptOf = managePrompt
+
+--[[
+	Whether the panel would offer `actionId` on this building, and why not.
+
+	Reads exactly what the client reads - the model's replicated attributes -
+	through exactly the function the client calls, so a test asserting a
+	button is greyed out is asserting the thing the player sees.
+]]
+--- How many ProximityPrompts a building carries. The pen's two overlapping
+--- prompts are the thing the panel removed, so this is worth pinning exactly.
+function promptCount(player, instanceId)
+	local n = 0
+
+	for _, child in farmOf(player, instanceId).PrimaryPart:GetChildren() do
+		if child.ClassName == "ProximityPrompt" then
+			n += 1
+		end
+	end
+
+	return n
+end
+
+function actionState(player, instanceId, actionId)
+	local model = farmOf(player, instanceId)
+	local context = ACTION_RULES.ReadContext(model, os.time())
+
+	local action = GameConfig.GetAction(actionId)
+	local choices = {}
+
+	if action and action.Choice then
+		choices = ACTION_RULES.GetChoices(
+			model:GetAttribute(GameConfig.StructureAttributes.StructureId),
+			actionId,
+			PDS:GetInventory(player),
+			PDS:GetLevel(player)
+		)
+	end
+
+	local resources = {}
+
+	for _, resourceId in GameConfig.GetResourceIds() do
+		resources[resourceId] = PDS:GetResource(player, resourceId)
+	end
+
+	return ACTION_RULES.IsAvailable(
+		actionId,
+		context,
+		choices,
+		{ Items = PDS:GetInventory(player), Resources = resources }
+	)
+end
+
+--- A bar the panel would draw, by id, or nil when the building omits it.
+function barOf(player, instanceId, barId)
+	local context = ACTION_RULES.ReadContext(farmOf(player, instanceId), os.time())
+
+	for _, bar in ACTION_RULES.GetBars(context) do
+		if bar.Id == barId then
+			return bar
+		end
+	end
+
+	return nil
+end
+
+--[[
+	Sends the action a player standing at this farm would have meant.
+
+	The farm's prompt used to decide this on the server, which is why mashing
+	E uprooted defences; the panel decides it on the client now, and this is
+	the client's half of that decision reproduced so the farming tests go on
+	testing farming rather than testing a UI.
+]]
 function pokeFarm(player, instanceId)
 	player.Character.PrimaryPart.Position = farmOf(player, instanceId).PrimaryPart.Position
-	promptOf(player, instanceId).Triggered:Fire(player)
+
+	local entry = PDS:GetData(player).Structures[instanceId]
+	local seedId = if entry then entry.SeedId else nil
+
+	local action = if not seedId or seedId == ""
+		then "Plant"
+		elseif GameConfig.IsHarvestable(seedId) then "Harvest"
+		else "Uproot"
+
+	return ACTIONS:Perform(player, instanceId, action)
+end
+
+function penOf(player, instanceId)
+	return PLACEMENT:GetPlaced(player)[instanceId].Model
+end
+
+--[[
+	The same, for a pen. `which == "Cull"` is the old second prompt, which is
+	now just another button.
+]]
+function pokePen(player, instanceId, which)
+	player.Character.PrimaryPart.Position = penOf(player, instanceId).PrimaryPart.Position
+
+	if which == "Cull" then
+		return ACTIONS:Perform(player, instanceId, "Slaughter")
+	end
+
+	local entry = PDS:GetData(player).Structures[instanceId]
+
+	if not entry or not entry.AnimalId or entry.AnimalId == "" then
+		return ACTIONS:Perform(player, instanceId, "Stock")
+	end
+
+	-- Collecting outranks feeding, as the contextual prompt used to.
+	local collectable = select(1, actionState(player, instanceId, "Collect"))
+
+	return ACTIONS:Perform(player, instanceId, if collectable then "Collect" else "Feed")
 end
 
 local function getPrompt(plot)
@@ -641,10 +748,21 @@ local function runTests()
 	PlacementService:Start()
 	FarmService:Start()
 
+	--[[
+		The action dispatcher, which every owned-building interaction now goes
+		through. Started here because the helpers above route through it, and
+		required after the services it dispatches to.
+	]]
+	local BuildingActionService = require(BuildingActionServiceModule)
+	require(AnimalServiceModule):Start()
+	BuildingActionService:Start()
+
 	-- Shared with later sections through the helpers above.
 	PLACEMENT = PlacementService
 	FARMS = FarmService
 	PDS = PlayerDataService
+	ACTIONS = BuildingActionService
+	ACTION_RULES = require(BuildingActionsModule)
 
 	--- Gives a player resources and the TownCenter -> Mill chain, then returns
 	--- a freshly placed farm's instance id.
@@ -664,19 +782,41 @@ local function runTests()
 	local farmId = buildFarm(grower, -150, -150)
 	check(farmId ~= nil, "a farm can be built beside a Mill")
 
+	--[[
+		ONE prompt, and it opens the panel rather than acting. The contextual
+		prompt that guessed between plant, harvest and uproot is gone, which is
+		what the panel is for.
+	]]
 	local prompt = farmPrompt(grower, farmId)
-	check(prompt ~= nil, "a built farm gets a plant prompt")
-	checkEqual(prompt.ActionText, "Plant", "a fallow farm offers Plant")
+	check(prompt ~= nil, "a built farm gets a management prompt")
+	checkEqual(prompt.ActionText, GameConfig.Selection.PromptActionText, "labelled from config, not per action")
+	checkEqual(promptCount(grower, farmId), 1, "and it is the only prompt on the building, so nothing can overlap")
+
+	-- What the panel would offer on a fallow square.
+	checkEqual(select(1, actionState(grower, farmId, "Plant")), true, "a fallow farm offers Plant")
+	checkEqual(select(2, actionState(grower, farmId, "Harvest")), "Empty", "and has nothing to harvest")
+	checkEqual(select(2, actionState(grower, farmId, "Uproot")), "Empty", "and nothing to uproot")
+	checkEqual(select(1, actionState(grower, farmId, "Demolish")), true, "but can always be torn down")
+
 	-- Capacity-driven rather than hardcoded, so retuning a tier does not
 	-- quietly turn these into assertions about nothing.
 	local carrotCapacity = GameConfig.GetPlantCapacity("CarrotSeed")
 	check(carrotCapacity > 1, `a carrot square holds a stack ({carrotCapacity})`)
-	checkEqual(
-		prompt.ObjectText,
-		`Carrot Seed x{math.min(carrotCapacity, PlayerDataService:GetItemCount(grower, "CarrotSeed"))}`,
-		"and names the seed and how many will go in"
+
+	--[[
+		The seed picker, which the prompt could never offer: the roadmap's
+		complaint was that `SelectedSeed` was an attribute nothing ever set.
+	]]
+	local offered = ACTION_RULES.GetChoices(
+		"Farm",
+		"Plant",
+		PlayerDataService:GetInventory(grower),
+		PlayerDataService:GetLevel(grower)
 	)
+	check(table.find(offered, "CarrotSeed") ~= nil, "and the panel offers the seeds the player holds")
+
 	checkEqual(farmModel(grower, farmId):GetAttribute("Stage"), "Empty", "a fresh farm is fallow")
+	checkEqual(barOf(grower, farmId, "Growth").Caption, "Fallow", "and its growth bar says so")
 
 	----------------------------------------------------------------------------
 	section("FarmService: planting and harvesting")
@@ -709,7 +849,8 @@ local function runTests()
 		"CarrotSeed",
 		"crop state is stored on the farm's own record, so it cannot be orphaned"
 	)
-	checkEqual(farmPrompt(grower, farmId).Enabled, false, "a growing farm's prompt is disabled")
+	checkEqual(select(2, actionState(grower, farmId, "Harvest")), "NotGrown", "a growing crop cannot be harvested")
+	checkEqual(select(2, actionState(grower, farmId, "Plant")), "Occupied", "nor can the square be re-planted")
 
 	local container = farmModel(grower, farmId):FindFirstChild("Crop")
 	check(container ~= nil, "a crop container is created")
@@ -728,7 +869,8 @@ local function runTests()
 	checkEqual(farmModel(grower, farmId):GetAttribute("Stage"), "Growing", "the loop advances Seedling -> Growing")
 	advance(carrot.GrowTime)
 	checkEqual(farmModel(grower, farmId):GetAttribute("Stage"), "Mature", "and Growing -> Mature")
-	checkEqual(farmPrompt(grower, farmId).ActionText, "Harvest", "a mature farm offers Harvest")
+	checkEqual(select(1, actionState(grower, farmId, "Harvest")), true, "a mature farm offers Harvest")
+	checkEqual(barOf(grower, farmId, "Growth").Fraction, 1, "and its growth bar is full")
 
 	local cropsBefore = PlayerDataService:GetItemCount(grower, "Carrot")
 	advance(1)
@@ -748,36 +890,117 @@ local function runTests()
 	PlayerDataService:AddItem(grower, "CarrotSeed", 60)
 
 	----------------------------------------------------------------------------
-	section("FarmService: interaction security")
+	section("Building actions: the validation ladder")
 	----------------------------------------------------------------------------
 
+	--[[
+		Owned buildings are no longer operated by prompts, so the boundary
+		moved. What used to be "did the engine let you press E" is now four
+		explicit rungs in BuildingActionService: rate, ownership, is the
+		action offered, should the panel have offered it.
+	]]
 	local intruder = newPlayer(2002, "Intruder")
 	giveCharacter(intruder, Vector3.new(0, 3, 0))
 	PlayersService.PlayerAdded:Fire(intruder)
 
 	advance(1)
-	-- Standing right on the farm, so only ownership can reject this.
-	intruder.Character.PrimaryPart.Position = farmModel(grower, farmId).PrimaryPart.Position
-	farmPrompt(grower, farmId).Triggered:Fire(intruder)
-	checkEqual(farmModel(grower, farmId):GetAttribute("SeedId"), "", "a player cannot plant on another player's farm")
 
-	-- Out of range.
+	--[[
+		Ownership is read from the PROFILE, not from an attribute on the
+		model, so there is nothing on the building for a client to have
+		tampered with - and standing on it changes nothing.
+	]]
+	intruder.Character.PrimaryPart.Position = farmModel(grower, farmId).PrimaryPart.Position
+
+	local trespass = ACTIONS:Perform(intruder, farmId, "Plant")
+	checkEqual(trespass.Ok, false, "a player cannot act on another player's farm")
+	checkEqual(trespass.Reason, "UnknownStructure", "and the refusal does not confirm it exists")
+	checkEqual(farmModel(grower, farmId):GetAttribute("SeedId"), "", "so the farm is untouched")
+
+	--[[
+		DISTANCE IS DELIBERATELY NOT A RULE ANY MORE.
+
+		The prompt path re-checked it on the server, because prompt range is
+		enforced on the client and an exploiter owns their client. That check
+		did not carry over: every action here affects only the caller's own
+		buildings and their own inventory, so acting from across the base is
+		not an exploit - it is what selecting a building across the base is
+		FOR. Ownership is the real boundary.
+	]]
 	grower.Character.PrimaryPart.Position = Vector3.new(5000, 3, 5000)
 	advance(1)
-	farmPrompt(grower, farmId).Triggered:Fire(grower)
-	checkEqual(farmModel(grower, farmId):GetAttribute("SeedId"), "", "a distant owner cannot interact")
 
-	advance(1)
-	triggerFarm(grower, farmId)
-	checkEqual(farmModel(grower, farmId):GetAttribute("SeedId"), "CarrotSeed", "an in-range owner can interact")
+	checkEqual(ACTIONS:Perform(grower, farmId, "Plant").Ok, true, "the owner can act on their farm from anywhere")
+	checkEqual(farmModel(grower, farmId):GetAttribute("SeedId"), "CarrotSeed", "and it plants")
 
-	-- Cooldown.
 	local secondFarm = { Ok = true, InstanceId = makeFarm(grower, -150, -150) }
 	check(secondFarm.Ok, "a second farm places")
-	local heldBeforeSpam = PlayerDataService:GetItemCount(grower, "CarrotSeed")
-	triggerFarm(grower, secondFarm.InstanceId)
-	checkEqual(PlayerDataService:GetItemCount(grower, "CarrotSeed"), heldBeforeSpam,
-		"an interaction inside the cooldown window is dropped")
+
+	-- An action this building does not have, and one that does not exist.
+	checkEqual(ACTIONS:Perform(grower, farmId, "Feed").Reason, "NotOffered", "a farm cannot be fed")
+	checkEqual(ACTIONS:Perform(grower, farmId, "Nonsense").Reason, "NotOffered", "an invented action is refused")
+	checkEqual(ACTIONS:Perform(grower, farmId, 42).Reason, "BadRequest", "a non-string action is rejected outright")
+	checkEqual(ACTIONS:Perform(grower, { x = 1 }, "Plant").Reason, "BadRequest", "so is a non-string instance id")
+	checkEqual(ACTIONS:Perform(grower, "99999", "Plant").Reason, "UnknownStructure", "and an id nobody owns")
+
+	--[[
+		A choice must be one the player could have been offered. The panel
+		sends an item id, and "the panel sent it" is not a validation.
+	]]
+	checkEqual(
+		ACTIONS:Perform(grower, secondFarm.InstanceId, "Plant", "Carrot").Reason,
+		"BadChoice",
+		"a crop is not a seed, however it arrives"
+	)
+	checkEqual(
+		ACTIONS:Perform(grower, secondFarm.InstanceId, "Plant", "GoldenAppleSeed").Reason,
+		"BadChoice",
+		"nor is a seed the player does not hold"
+	)
+	checkEqual(
+		ACTIONS:Perform(grower, secondFarm.InstanceId, "Plant", { exploit = true }).Reason,
+		"BadChoice",
+		"nor a table"
+	)
+	checkEqual(
+		farmModel(grower, secondFarm.InstanceId):GetAttribute("SeedId"),
+		"",
+		"and none of those planted anything"
+	)
+
+	--[[
+		THROTTLING LIVES ON THE REMOTE, not on Perform.
+
+		Perform is the public method - tests, and one day a villager or an
+		automation tool, call it directly and should not be rationed. The
+		remote is where untrusted calls arrive, so that is where the bucket
+		is. A refused action still costs a token, or spamming a doomed
+		action would be free.
+	]]
+	do
+		local actionFn = require(Shared.Remotes).GetFunction(GameConfig.RemoteNames.BuildingAction)
+		local throttled = false
+
+		for _ = 1, GameConfig.Selection.BurstSize + 8 do
+			local result = actionFn.OnServerInvoke(grower, secondFarm.InstanceId, "Harvest")
+
+			if not result.Ok and result.Reason == "RateLimited" then
+				throttled = true
+			end
+		end
+
+		check(throttled, "a burst of remote calls is rate limited")
+
+		advance(5)
+		checkEqual(
+			actionFn.OnServerInvoke(grower, secondFarm.InstanceId, "Harvest").Reason,
+			"Empty",
+			"the bucket refills, so throttling is temporary"
+		)
+	end
+
+	-- Back in range for the sections that follow.
+	grower.Character.PrimaryPart.Position = farmModel(grower, farmId).PrimaryPart.Position
 
 	----------------------------------------------------------------------------
 	section("FarmService: seed selection and boosts")
@@ -3844,36 +4067,44 @@ local function runTests()
 			checkEqual(model:GetAttribute("AnimalStage"), GameConfig.Husbandry.EmptyStage, "and has no maturity stage")
 
 			--[[
-				Two prompts, on different keys. Slaughtering is irreversible
-				and sits on a building the player walks up to repeatedly to
-				collect eggs, so it must not share a gesture with collecting
-				them - the lesson from combat plants being uprooted by players
-				mashing E down a row of farms.
+				ONE prompt, and it opens the panel. This building is why the
+				panel exists: four actions against a prompt's one gesture
+				meant two prompts on two keys, the destructive one held, drawn
+				on top of each other until a pixel offset pulled them apart.
 			]]
-			local interact = penPrompt(keeper, coop, "Interact")
-			local cull = penPrompt(keeper, coop, "Cull")
+			local prompt = penPrompt(keeper, coop)
+			check(prompt ~= nil, "a pen gets a management prompt")
+			checkEqual(prompt.ActionText, GameConfig.Selection.PromptActionText, "labelled from config")
+			checkEqual(promptCount(keeper, coop), 1, "and it is the only prompt on the pen, so nothing can overlap")
 
-			check(interact ~= nil, "a pen gets a contextual prompt")
-			check(cull ~= nil, "and a separate one for slaughtering")
-			check(interact.KeyboardKeyCode ~= cull.KeyboardKeyCode, "on different keys")
-			checkEqual(interact.HoldDuration, 0, "the repeatable actions are a tap")
+			-- All four actions exist on the building, whatever their state.
+			for _, actionId in { "Stock", "Feed", "Collect", "Slaughter" } do
+				check(
+					ACTION_RULES.Offers("Coop", actionId),
+					`a coop's panel offers {actionId}, rather than guessing between them`
+				)
+			end
+
 			checkEqual(
-				cull.HoldDuration,
-				GameConfig.Interaction.DestructiveHoldDuration,
-				"and the irreversible one must be held"
+				select(2, actionState(keeper, coop, "Stock")),
+				"NoLivestock",
+				"an empty pen offers Stock, greyed out until the player owns some"
 			)
-			checkEqual(cull.Enabled, false, "there is nothing to slaughter in an empty pen")
-			checkEqual(interact.ActionText, "Stock", "an empty pen offers Stock")
-			checkEqual(interact.ObjectText, "No livestock", "and says plainly that there is nothing to put in it")
+			checkEqual(select(2, actionState(keeper, coop, "Slaughter")), "Empty", "and has nothing to slaughter")
+			checkEqual(select(2, actionState(keeper, coop, "Collect")), "Empty", "and nothing to collect")
 
-			-- Pressing E with nothing to stock refuses, and explains itself.
+			-- Stocking with nothing to stock is refused by the panel's own
+			-- rule, before it ever reaches the husbandry service.
 			local refusal = nil
 			local listener = AnimalService.ActionFailed:Connect(function(_, _, reason)
 				refusal = reason
 			end)
 
-			pokePen(keeper, coop)
-			checkEqual(refusal, "NoLivestock", "stocking with no livestock refuses, and says why")
+			checkEqual(
+				ACTIONS:Perform(keeper, coop, "Stock").Reason,
+				"NoLivestock",
+				"stocking with no livestock refuses, and says why"
+			)
 			checkEqual(penOf(keeper, coop):GetAttribute("AnimalId"), "", "and the pen stays empty")
 
 			--[[
@@ -3884,8 +4115,11 @@ local function runTests()
 			refusal = nil
 			PDS:AddItem(keeper, "Calf", 2)
 			advance(1)
-			pokePen(keeper, coop)
-			checkEqual(refusal, "NoLivestock", "a coop will not take cattle, however many are held")
+			checkEqual(
+				ACTIONS:Perform(keeper, coop, "Stock").Reason,
+				"NoLivestock",
+				"a coop will not take cattle, however many are held"
+			)
 			checkEqual(penOf(keeper, coop):GetAttribute("AnimalId"), "", "so the pen is still empty")
 			checkEqual(PDS:GetItemCount(keeper, "Calf"), 2, "and the calves are not consumed")
 			checkEqual(GameConfig.GetPenCapacity("Coop", "Calf"), 0, "because no calf fits in a coop at all")
@@ -3904,11 +4138,14 @@ local function runTests()
 			]]
 			advance(GameConfig.Husbandry.TickInterval + 1)
 
-			checkEqual(
-				penPrompt(keeper, coop, "Interact").ObjectText,
-				`Chick x{capacity}`,
-				"the prompt names how many would actually go in"
-			)
+			--[[
+				The picker the prompt could never offer. The roadmap's
+				complaint was that there was no way to CHOOSE - the server
+				guessed from an attribute nothing set.
+			]]
+			local penChoices = ACTION_RULES.GetChoices("Coop", "Stock", PDS:GetInventory(keeper), PDS:GetLevel(keeper))
+			checkEqual(#penChoices, 1, "the panel offers exactly the livestock this pen accepts")
+			checkEqual(penChoices[1], "Chick", "which is the chick, not the calves also in the bag")
 
 			advance(1)
 			pokePen(keeper, coop)
@@ -4032,7 +4269,7 @@ local function runTests()
 				makes the herd slaughterable. A re-render alone would leave a
 				grown flock the cull prompt refused to touch.
 			]]
-			checkEqual(penPrompt(keeper, coop, "Cull").Enabled, true, "a grown herd can be slaughtered")
+			checkEqual(select(1, actionState(keeper, coop, "Slaughter")), true, "a grown herd can be slaughtered")
 
 			refusal = nil
 			checkEqual(AnimalService:TryCollect(keeper, coop), false, "but it has not laid anything yet")
@@ -4046,7 +4283,7 @@ local function runTests()
 			local collectedBefore = PDS:GetData(keeper).Stats.TotalProduceCollected
 			local clockBefore = PDS:GetData(keeper).Structures[coop].LastCollectedAt
 
-			checkEqual(penPrompt(keeper, coop, "Interact").ActionText, "Collect", "the prompt switches to Collect")
+			checkEqual(select(1, actionState(keeper, coop, "Collect")), true, "and Collect becomes available")
 
 			advance(1)
 			pokePen(keeper, coop)
@@ -4444,7 +4681,7 @@ local function runTests()
 			refusal = nil
 			checkEqual(AnimalService:TrySlaughter(butcher, barn), false, "a juvenile herd cannot be slaughtered")
 			checkEqual(refusal, "NotGrown", "and the refusal says why")
-			checkEqual(penPrompt(butcher, barn, "Cull").Enabled, false, "the cull prompt is not even offered")
+			checkEqual(select(2, actionState(butcher, barn, "Slaughter")), "NotGrown", "the panel greys Slaughter out")
 
 			-- There is nothing to collect from a pig, ever.
 			refusal = nil
@@ -4583,7 +4820,7 @@ local function runTests()
 			checkEqual(model:GetAttribute("AnimalId"), "Chick", "with its herd still in it")
 			checkEqual(model:GetAttribute("AnimalCount"), count, "and its headcount")
 			checkEqual(model:GetAttribute("AnimalStage"), "Grown", "which grew up while the player was away")
-			check(penPrompt(returned, coop, "Interact") ~= nil, "the prompts come back")
+			check(penPrompt(returned, coop) ~= nil, "the prompt comes back")
 			check(model:FindFirstChild("Herd") ~= nil, "and so do the animals")
 
 			local record = PDS:GetData(returned).Structures[coop]
@@ -4874,10 +5111,14 @@ local function runTests()
 
 			advance(GameConfig.Husbandry.TickInterval + 1)
 
-			local hungryPrompt = penPrompt(shepherd, coop, "Interact").ObjectText
+			local hungryPrompt = penPrompt(shepherd, coop).ObjectText
 			check(
 				string.find(hungryPrompt, "HUNGRY") ~= nil,
 				`a hungry herd says so on its prompt ({hungryPrompt})`
+			)
+			check(
+				string.find(barOf(shepherd, coop, "Feed").Caption, "HUNGRY") ~= nil,
+				"and on the panel's feed bar"
 			)
 			check(
 				string.find(labelOf(), "HUNGRY") ~= nil,
@@ -4887,14 +5128,22 @@ local function runTests()
 			checkEqual(AnimalService:TryFeed(shepherd, coop), true, "feeding them")
 			advance(GameConfig.Husbandry.TickInterval + 1)
 
-			local fedPrompt = penPrompt(shepherd, coop, "Interact").ObjectText
+			local fedPrompt = penPrompt(shepherd, coop).ObjectText
 			check(
 				string.find(fedPrompt, "HUNGRY") == nil,
 				`the prompt stops saying HUNGRY the moment they are fed ({fedPrompt})`
 			)
+
+			--[[
+				The countdown moved to the panel's feed bar, which is where a
+				number that changes every minute belongs - the prompt is a
+				glanceable summary now, not a readout.
+			]]
+			local fedBar = barOf(shepherd, coop, "Feed")
+			check(fedBar.Fraction > 0, "the feed bar fills when they are fed")
 			check(
-				string.find(fedPrompt, "fed %d+m") ~= nil,
-				"and carries a countdown, so a press that worked looks different from one that did not"
+				string.find(fedBar.Caption, "fed for") ~= nil,
+				`and carries a countdown, so a press that worked looks different from one that did not ({fedBar.Caption})`
 			)
 			check(
 				string.find(labelOf(), "fed %d+m") ~= nil,
@@ -4907,9 +5156,11 @@ local function runTests()
 				and it has to be visibly a different offer.
 			]]
 			local before = labelOf()
+			local barBefore = barOf(shepherd, coop, "Feed").Fraction
 			checkEqual(AnimalService:TryFeed(shepherd, coop), true, "a second feeding is allowed")
 			advance(GameConfig.Husbandry.TickInterval + 1)
 			check(labelOf() ~= before, `and visibly extends the feed ({before} -> {labelOf()})`)
+			check(barOf(shepherd, coop, "Feed").Fraction > barBefore, "and visibly fills the bar further")
 
 			--[[
 				And the notice does not repeat on every tick of the same
@@ -5162,9 +5413,9 @@ local function runTests()
 
 			advance(GameConfig.Husbandry.TickInterval + 1)
 			checkEqual(
-				penPrompt(hoarder, coop, "Interact").Enabled,
-				false,
-				"the prompt stops offering a collection that would be refused"
+				select(2, actionState(hoarder, coop, "Collect")),
+				"InventoryFull",
+				"and the panel greys Collect out, naming the bag rather than the nest"
 			)
 
 			-- Slaughtering is refused too, because it would have to bank the
@@ -5251,6 +5502,273 @@ local function runTests()
 			listener:Disconnect()
 			PlayersService.PlayerRemoving:Fire(hoarder)
 			hoarder.Parent = nil
+		end
+
+		------------------------------------------------------------------------
+		section("Selection panel: the actions are data")
+		------------------------------------------------------------------------
+
+		--[[
+			The panel generates itself from config, which is the claim worth
+			checking: if a building's actions and bars are data, then adding
+			"Train Troop" to a Barracks is a config edit and a handler, not a
+			new prompt on a new key.
+		]]
+		do
+			local ACTION_HANDLERS = { "Plant", "Harvest", "Uproot", "Stock", "Feed", "Collect", "Slaughter", "Repair", "Demolish" }
+
+			-- Every action a building offers must be one the dispatcher can
+			-- actually route, or the panel grows a button that does nothing.
+			for _, structure in GameConfig.Structures do
+				for _, actionId in structure.Actions do
+					check(
+						table.find(ACTION_HANDLERS, actionId) ~= nil,
+						`{structure.Id} offers {actionId}, and the dispatcher has a handler for it`
+					)
+				end
+			end
+
+			--[[
+				And every action the dispatcher routes is offered by some
+				building. A handler nothing can reach is dead code that reads
+				as a feature - the same rule the config asserts in reverse.
+			]]
+			for _, actionId in ACTION_HANDLERS do
+				local offered = false
+
+				for _, structure in GameConfig.Structures do
+					if table.find(structure.Actions, actionId) then
+						offered = true
+						break
+					end
+				end
+
+				check(offered, `the {actionId} handler is reachable from at least one building`)
+			end
+
+			-- A pen's four actions, in one place, which is the whole point.
+			checkEqual(#ACTION_RULES.GetActions("Coop"), 6, "a coop's panel has six buttons")
+			checkEqual(#ACTION_RULES.GetActions("Farm"), 5, "a farm's has five")
+			checkEqual(#ACTION_RULES.GetActions("Mill"), 2, "and a mill, with nothing to operate, still has two")
+			checkEqual(#ACTION_RULES.GetActions("NotAStructure"), 0, "an unknown structure offers nothing")
+
+			--[[
+				The Town Center is deliberately not demolishable: it is the
+				root of the build tree, and tearing it down would orphan
+				everything that required it.
+			]]
+			check(not ACTION_RULES.Offers("TownCenter", "Demolish"), "the Town Center cannot be demolished")
+			check(ACTION_RULES.Offers("TownCenter", "Repair"), "but it can be repaired")
+
+			-- Destructive actions are marked as such, because the panel
+			-- guards them with a confirmation rather than a hold.
+			for _, actionId in { "Uproot", "Slaughter", "Demolish" } do
+				checkEqual(
+					GameConfig.GetAction(actionId).Kind,
+					"Destructive",
+					`{actionId} is marked destructive, so the panel asks before doing it`
+				)
+			end
+
+			checkEqual(GameConfig.GetAction("Plant").Choice, "Seeds", "Plant chooses from seeds")
+			checkEqual(GameConfig.GetAction("Stock").Choice, "Livestock", "Stock chooses from livestock")
+			checkEqual(GameConfig.GetAction("Feed").Choice, nil, "and feeding has nothing to choose")
+		end
+
+		------------------------------------------------------------------------
+		section("Selection panel: repair, demolish, and the choice")
+		------------------------------------------------------------------------
+
+		do
+			local DamageableService = require(DamageableServiceModule)
+			local Husbandry = require(HusbandryModule)
+
+			local steward = newPlayer(6565, "Steward")
+			giveCharacter(steward, Vector3.new(0, 3, 0))
+			PlayersService.PlayerAdded:Fire(steward)
+			PDS:AddXP(steward, 100000)
+
+			local farm = makeFarm(steward, -200, 60)
+
+			--[[
+				THE SEED PICKER, which is the feature the panel exists to make
+				possible. The roadmap's complaint was that the server picked
+				from an attribute nothing set, so a player could not choose.
+			]]
+			PDS:AddItem(steward, "TomatoSeed", 20)
+			PDS:AddItem(steward, "CarrotSeed", 20)
+
+			local choices = ACTION_RULES.GetChoices("Farm", "Plant", PDS:GetInventory(steward), PDS:GetLevel(steward))
+			check(#choices >= 2, "the panel offers every seed the player holds")
+			checkEqual(choices[1], "CarrotSeed", "cheapest first, matching the server's own fallback order")
+
+			checkEqual(ACTIONS:Perform(steward, farm, "Plant", "TomatoSeed").Ok, true, "an explicit choice is accepted")
+			checkEqual(
+				farmOf(steward, farm):GetAttribute("SeedId"),
+				"TomatoSeed",
+				"and plants what was chosen, not what the server would have guessed"
+			)
+
+			--[[
+				Repair. Offered by every building, and greyed out on an
+				undamaged one - which is most of them, most of the time.
+			]]
+			checkEqual(select(2, actionState(steward, farm, "Repair")), "Undamaged", "an unhurt building needs no repair")
+
+			local entityId = PLACEMENT:GetPlaced(steward)[farm].EntityId
+			check(entityId ~= nil, "a farm is a damageable entity")
+			DamageableService:ApplyDamage(entityId, 100, "Melee", nil, nil)
+
+			checkEqual(select(1, actionState(steward, farm, "Repair")), true, "a damaged one offers it")
+			check(barOf(steward, farm, "Health").Fraction < 1, "and the health bar shows the damage")
+
+			for _, resourceId in GameConfig.GetResourceIds() do
+				PDS:AddResource(steward, resourceId, 10000)
+			end
+
+			checkEqual(ACTIONS:Perform(steward, farm, "Repair").Ok, true, "repairing works through the panel")
+			checkEqual(barOf(steward, farm, "Health").Fraction, 1, "and fills the bar back up")
+
+			--[[
+				Demolish goes through the same remote as everything else,
+				which is the point of one dispatcher: the build menu does not
+				need its own.
+			]]
+			checkEqual(ACTIONS:Perform(steward, farm, "Demolish").Ok, true, "demolishing works through the panel")
+			checkEqual(PDS:GetData(steward).Structures[farm], nil, "and the structure is gone")
+			checkEqual(
+				ACTIONS:Perform(steward, farm, "Repair").Reason,
+				"UnknownStructure",
+				"after which nothing can be done to it"
+			)
+
+			--[[
+				AFFORDABILITY, which is where "the panel and the server reach
+				identical verdicts" was previously untrue. Three rules priced
+				nothing while the services behind them charged: a harvest
+				needs bag room, feeding needs feed, repairing needs resources.
+				A green button and a refusal is the one way this module can
+				actively mislead rather than merely lag.
+			]]
+			local pauper = newPlayer(6767, "Pauper")
+			giveCharacter(pauper, Vector3.new(0, 3, 0))
+			PlayersService.PlayerAdded:Fire(pauper)
+			PDS:AddXP(pauper, 100000)
+
+			local pen = makePen(pauper, "Coop", -120, -40)
+			local flock = GameConfig.GetPenCapacity("Coop", "Chick")
+			local chick = GameConfig.GetAnimal("Chick")
+
+			PDS:AddItem(pauper, "Chick", flock)
+			advance(1)
+			checkEqual(ACTIONS:Perform(pauper, pen, "Stock").Ok, true, "a flock is stocked")
+
+			--[[
+				With no wheat at all, Feed must be greyed out with the cost on
+				it - which is what the old prompt said (`Needs Wheat x6`) and
+				the first version of this rule did not.
+			]]
+			checkEqual(PDS:GetItemCount(pauper, chick.Feed.ItemId), 0, "the larder is empty")
+			checkEqual(
+				select(2, actionState(pauper, pen, "Feed")),
+				"NotEnoughFeed",
+				"so the panel greys Feed out rather than promising a feeding it cannot do"
+			)
+			checkEqual(
+				ACTIONS:Perform(pauper, pen, "Feed").Reason,
+				"NotEnoughFeed",
+				"and the server refuses with the very same reason the button showed"
+			)
+
+			PDS:AddItem(pauper, chick.Feed.ItemId, Husbandry.GetFeedCost("Chick", flock))
+			checkEqual(select(1, actionState(pauper, pen, "Feed")), true, "with feed in the bag it is offered")
+
+			--[[
+				And a repair nobody can pay for. The earlier repair test banked
+				ten thousand of every resource first, which is exactly why this
+				gap survived two thousand passing assertions.
+			]]
+			local poorFarm = makeFarm(pauper, -120, -40)
+			local poorEntity = PLACEMENT:GetPlaced(pauper)[poorFarm].EntityId
+			DamageableService:ApplyDamage(poorEntity, 200, "Melee", nil, nil)
+
+			for _, resourceId in GameConfig.GetResourceIds() do
+				local held = PDS:GetResource(pauper, resourceId)
+
+				if held > 0 then
+					PDS:TrySpendResource(pauper, resourceId, held)
+				end
+			end
+
+			checkEqual(
+				select(2, actionState(pauper, poorFarm, "Repair")),
+				"NotEnoughResources",
+				"a repair the player cannot afford is greyed out, priced like a placement"
+			)
+			checkEqual(
+				ACTIONS:Perform(pauper, poorFarm, "Repair").Ok,
+				false,
+				"and refused if forced"
+			)
+
+			--[[
+				A harvest with nowhere to put the crop. TryHarvest refuses a
+				full bag and leaves the crop in the ground, so the rule has to
+				say so too - otherwise the button promises nine carrots and
+				fails on press.
+			]]
+			local hoarder = makeFarm(pauper, -120, -40)
+			local carrot = GameConfig.GetItem("Carrot")
+
+			PDS:AddItem(pauper, "CarrotSeed", GameConfig.GetPlantCapacity("CarrotSeed"))
+			advance(1)
+			checkEqual(ACTIONS:Perform(pauper, hoarder, "Plant", "CarrotSeed").Ok, true, "a carrot square is planted")
+			advance(GameConfig.GetPlantable("CarrotSeed").GrowTime + 2)
+
+			checkEqual(select(1, actionState(pauper, hoarder, "Harvest")), true, "a ripe square offers Harvest")
+
+			PDS:AddItem(pauper, "Carrot", carrot.MaxStack)
+			checkEqual(
+				select(2, actionState(pauper, hoarder, "Harvest")),
+				"InventoryFull",
+				"but not with a full bag - the crop stays in the ground, so the button says why"
+			)
+			checkEqual(
+				ACTIONS:Perform(pauper, hoarder, "Harvest").Reason,
+				"InventoryFull",
+				"and the server agrees, as it must"
+			)
+
+			--[[
+				THE STALE PANEL, which is the case the three-layer design
+				exists for.
+
+				Availability is derived from replicated attributes, and those
+				lag the profile by up to a tick. So the panel can legitimately
+				offer an action the authoritative check then refuses - and
+				when that happens the player must get the REAL reason, not a
+				generic one. Simulated by moving the profile out from under
+				the attributes, which is exactly what a tick of lag looks
+				like.
+			]]
+			PDS:RemoveItem(pauper, "Carrot", carrot.MaxStack)
+			checkEqual(select(1, actionState(pauper, hoarder, "Harvest")), true, "the panel offers Harvest again")
+
+			PDS:GetData(pauper).Structures[hoarder].SeedId = "EmberBloomSeed"
+
+			local stale = ACTIONS:Perform(pauper, hoarder, "Harvest")
+			checkEqual(stale.Ok, false, "a stale offer is refused by the layer that knows the truth")
+			checkEqual(
+				stale.Reason,
+				"NotHarvestable",
+				"and the refusal carries the real reason, not a generic one"
+			)
+
+			PlayersService.PlayerRemoving:Fire(pauper)
+			pauper.Parent = nil
+
+			PlayersService.PlayerRemoving:Fire(steward)
+			steward.Parent = nil
 		end
 
 		------------------------------------------------------------------------
@@ -5631,9 +6149,12 @@ local function runTests()
 			checkEqual(AttackService:IsAttacker(plantEntity), true, "it is an attacker from the moment it is planted")
 			checkEqual(AttackService:Get(plantEntity).Suspended, true, "but suspended while it is still a seedling")
 
-			local prompt = promptOf(gardener, plot)
-			checkEqual(prompt.ActionText, "Growing", "and its prompt says so")
-			checkEqual(prompt.Enabled, false, "offering nothing to press")
+			checkEqual(select(1, actionState(gardener, plot, "Uproot")), true, "a planted defence can be cleared")
+			checkEqual(
+				select(2, actionState(gardener, plot, "Harvest")),
+				"NotHarvestable",
+				"but never harvested - the panel will not invite destroying a defence by calling it a harvest"
+			)
 
 			--[[
 				And the flag has to actually stop it: a seedling with a raider
@@ -5677,15 +6198,20 @@ local function runTests()
 			)
 
 			--[[
-				A kept plant is named after itself and offers UPROOT, never
-				Harvest - so the prompt cannot invite a player to destroy a
-				two hundred gold defence by calling it a harvest.
+				A kept plant offers UPROOT and never Harvest, so the panel
+				cannot invite a player to destroy a two hundred gold defence
+				by calling it a harvest. The old prompt had to be careful to
+				guess the right verb; the panel shows both and greys one out.
 			]]
-			checkEqual(promptOf(gardener, plot).ActionText, "Uproot", "a grown defence offers Uproot")
+			checkEqual(select(1, actionState(gardener, plot, "Uproot")), true, "a grown defence offers Uproot")
 			checkEqual(
-				promptOf(gardener, plot).ObjectText,
-				GameConfig.Archetypes.EmberBloom.Name,
-				"named after the plant, not after a yield it does not have"
+				select(2, actionState(gardener, plot, "Harvest")),
+				"NotHarvestable",
+				"and refuses Harvest, naming the plant rather than a yield it does not have"
+			)
+			check(
+				string.find(promptOf(gardener, plot).ObjectText, GameConfig.Archetypes.EmberBloom.Name) ~= nil,
+				"while the prompt names the plant, for a glance from outside"
 			)
 
 			-- Harvesting one is refused outright, whatever calls it.

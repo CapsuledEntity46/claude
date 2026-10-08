@@ -21,6 +21,16 @@
 	appends a pen's herd state to it, so a player can tell a hungry coop from
 	a fed one without walking into prompt range. Hence LabelName and TitleName
 	rather than two string literals in two files.
+
+	THE MANAGEMENT PROMPT lives here too, because EVERY structure has a
+	selection panel - they all offer at least Repair - and it was briefly
+	attached by FarmService and AnimalService instead. That left the Mill, the
+	Watch Tower, the Town Center and the Checkpoint selectable by mouse only,
+	which is a strange gap to explain and an easy one to miss.
+
+	The server connects nothing to it. `Triggered` fires on both sides, and
+	opening a menu is a client concern - the same arrangement the shop's
+	prompt has always had.
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -75,6 +85,16 @@ function StructureBuilder.Build(structure, instanceId: string, ownerUserId: numb
 	text.Parent = label
 
 	label.Parent = body
+
+	local prompt = Instance.new("ProximityPrompt")
+	prompt.Name = GameConfig.Selection.PromptName
+	prompt.ActionText = GameConfig.Selection.PromptActionText
+	prompt.ObjectText = structure.Name
+	prompt.HoldDuration = 0
+	prompt.KeyboardKeyCode = Enum.KeyCode.E
+	prompt.MaxActivationDistance = GameConfig.Interaction.MaxActivationDistance
+	prompt.RequiresLineOfSight = false
+	prompt.Parent = body
 
 	model:SetAttribute(STRUCT_ATTR.OwnerUserId, ownerUserId)
 	model:SetAttribute(STRUCT_ATTR.StructureId, structure.Id)

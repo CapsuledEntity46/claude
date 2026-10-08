@@ -30,7 +30,7 @@
 		    ├── Plant1 (Model)    rebuilt per growth stage
 		    └── Plant2..N         laid out on a grid across the footprint
 		└── Body
-		    └── Interact          ProximityPrompt
+		    └── Manage            ProximityPrompt - opens the panel
 
 	The Crop container is stable so it can host the crop's health attributes,
 	while the plants inside it are rebuilt on a stage change.
@@ -68,7 +68,6 @@ local CropFactory = require(script.Parent.Parent.Plots.CropFactory)
 
 local FARM_ATTR = GameConfig.FarmAttributes
 local EMPTY_STAGE = GameConfig.Growth.EmptyStage
-local PROMPT_NAME = "Interact"
 local CROP_CONTAINER = "Crop"
 
 --- Fraction of the farm footprint the plants are laid out across, so the
@@ -131,18 +130,18 @@ function FarmService:_consumeInteraction(player: Player): boolean
 	return true
 end
 
---- Re-checks reach on the server. The engine enforces prompt distance on the
---- client, which an exploiter controls.
-local function isWithinReach(player: Player, part: BasePart): boolean
-	local character = player.Character
-	local root = character and character.PrimaryPart
+--[[
+	Announces a refusal AND returns it.
 
-	if not root then
-		return false
-	end
-
-	local limit = GameConfig.Interaction.MaxActivationDistance + GameConfig.Interaction.DistanceTolerance
-	return (root.Position - part.Position).Magnitude <= limit
+	Two callers need the same reason for different purposes: the Notice remote
+	turns it into a sentence for the player, and the selection panel shows it
+	as the caption on the button that would not work. Signal:Fire dispatches
+	through task.spawn, so a caller cannot observe the signal synchronously -
+	the reason has to come back through the return.
+]]
+function FarmService:_refuse(player: Player, instanceId: string, reason: string): (boolean, string)
+	self.PlantFailed:Fire(player, instanceId, reason)
+	return false, reason
 end
 
 function FarmService:_getFarms(player: Player)
@@ -313,8 +312,17 @@ function FarmService:_projectFallow(player: Player, farm)
 	self:_refreshPrompt(player, farm)
 end
 
+--[[
+	Keeps the farm's prompt as a GLANCEABLE state line, not an action.
+
+	The prompt now opens the panel and nothing else, so its text has one job:
+	tell you from outside whether this square is worth walking to. The detail
+	- which crop, how long, how many - is the panel's, and it derives all of
+	it from the same replicated attributes.
+]]
 function FarmService:_refreshPrompt(player: Player, farm)
-	local prompt = farm.Model.PrimaryPart and farm.Model.PrimaryPart:FindFirstChild(PROMPT_NAME)
+	local body = farm.Model.PrimaryPart
+	local prompt = body and body:FindFirstChild(GameConfig.Selection.PromptName)
 
 	if not prompt then
 		return
@@ -322,69 +330,35 @@ function FarmService:_refreshPrompt(player: Player, farm)
 
 	local entry = self:_getEntry(player, farm.InstanceId)
 	local seedId = if entry then entry.SeedId else nil
+	local structure = GameConfig.GetStructure("Farm")
+	local base = if structure then structure.Name else "Farm"
 
 	if not seedId or seedId == "" then
-		local selected = self:_resolveSeedId(player)
-		local item = GameConfig.GetItem(selected)
-
-		-- Shows how many this press would actually plant, which is the
-		-- cheapest way to teach that a square holds a stack.
-		local willPlant = if selected
-			then math.min(GameConfig.GetPlantCapacity(selected), PlayerDataService:GetItemCount(player, selected))
-			else 0
-
-		prompt.Enabled = true
-		prompt.ActionText = "Plant"
-		prompt.ObjectText = if item and willPlant > 0 then `{item.Name} x{willPlant}` else "No seeds"
+		prompt.ObjectText = `{base} - fallow`
 		return
 	end
 
 	local plantable = GameConfig.GetPlantable(seedId)
+	local mature = Growth.IsMature(farm.Model:GetAttribute(FARM_ATTR.Stage))
 
 	--[[
 		A kept plant is named after ITSELF, not after a yield it does not
-		have, and offers Uproot rather than Harvest - so the prompt never
-		invites the player to destroy a defence by calling it a harvest.
+		have. The old prompt had to be careful never to call uprooting a
+		harvest; this one does not offer either, so it only has to be honest
+		about what is growing.
 	]]
 	if not GameConfig.IsHarvestable(seedId) then
 		local archetype = GameConfig.GetArchetype(GameConfig.GetPlantArchetypeId(seedId))
-		local grown = Growth.IsMature(farm.Model:GetAttribute(FARM_ATTR.Stage))
+		local name = if archetype then archetype.Name else seedId
 
-		prompt.Enabled = grown
-		prompt.ActionText = if grown then "Uproot" else "Growing"
-		prompt.ObjectText = if archetype then archetype.Name else seedId
-
-		--[[
-			HELD, not tapped, and this is the whole point.
-
-			Harvesting is a tap, and a player mashing E down a row of farms
-			was destroying combat plants by accident - a two hundred gold
-			defence gone to a keypress meant for the carrots next to it. An
-			irreversible action beside a repeatable one has to need a
-			different gesture.
-		]]
-		prompt.HoldDuration = GameConfig.Interaction.DestructiveHoldDuration
+		prompt.ObjectText = `{base} - {name}{if mature then "" else ", growing"}`
 		return
 	end
 
-	-- Tap, for the repeatable actions.
-	prompt.HoldDuration = 0
-
 	local yieldItem = if plantable then GameConfig.GetItem(plantable.Yields) else nil
-	local baseName = if yieldItem then yieldItem.Name else seedId
-	local displayName = `{baseName} x{plantCount(entry) * (if plantable then plantable.YieldAmount else 1)}`
+	local name = if yieldItem then yieldItem.Name else seedId
 
-	if Growth.IsMature(farm.Model:GetAttribute(FARM_ATTR.Stage)) then
-		prompt.Enabled = true
-		prompt.ActionText = "Harvest"
-		prompt.ObjectText = displayName
-	else
-		-- Clients render the countdown from ReadyAt; the server pushes no
-		-- per-second text.
-		prompt.Enabled = false
-		prompt.ActionText = "Growing"
-		prompt.ObjectText = displayName
-	end
+	prompt.ObjectText = `{base} - {name}{if mature then " ready" else ", growing"}`
 end
 
 function FarmService:_refreshAll(player: Player)
@@ -404,8 +378,24 @@ end
 	Iterates the plantable directory rather than the inventory, so the result
 	never depends on inventory key order.
 ]]
-function FarmService:_resolveSeedId(player: Player): string?
+function FarmService:_resolveSeedId(player: Player, chosenSeedId: string?): string?
 	local level = PlayerDataService:GetLevel(player)
+
+	--[[
+		An explicit choice outranks the stored selection, and is held to the
+		same two conditions: the level gate, and actually owning one. The
+		panel sends this; the old prompt had no way to.
+	]]
+	local chosen = GameConfig.GetPlantable(chosenSeedId)
+
+	if
+		chosen
+		and level >= chosen.RequiredLevel
+		and PlayerDataService:HasItem(player, chosen.SeedId, 1)
+	then
+		return chosen.SeedId
+	end
+
 	local selected = player:GetAttribute(GameConfig.Attributes.SelectedSeed)
 	local selectedPlantable = GameConfig.GetPlantable(selected)
 
@@ -437,7 +427,10 @@ end
 -- Planting and harvesting
 --------------------------------------------------------------------------------
 
-function FarmService:TryPlant(player: Player, instanceId: string): boolean
+--- `chosenSeedId` is the selection panel's explicit pick. Nil means "decide
+--- for me", which is what the prompt used to do and what any caller without a
+--- UI still wants.
+function FarmService:TryPlant(player: Player, instanceId: string, chosenSeedId: string?): boolean
 	local entry = self:_getEntry(player, instanceId)
 	local farm = self:GetFarm(player, instanceId)
 
@@ -458,20 +451,23 @@ function FarmService:TryPlant(player: Player, instanceId: string): boolean
 		as a rule. So the square fills in one action and is then committed.
 	]]
 	if entry.SeedId and entry.SeedId ~= "" then
-		self.PlantFailed:Fire(player, instanceId, "Occupied")
-		return false
+		return self:_refuse(player, instanceId, "Occupied")
 	end
 
-	local seedId = self:_resolveSeedId(player)
+	--[[
+		An explicit pick still goes through the resolver's checks - it is
+		client input, and "the panel offered it" is not a validation. Checked
+		HERE rather than trusted, then handed to the same code path as a
+		resolved pick so there is one planting rule and not two.
+	]]
+	local seedId = self:_resolveSeedId(player, chosenSeedId)
 	if not seedId then
-		self.PlantFailed:Fire(player, instanceId, "NoSeeds")
-		return false
+		return self:_refuse(player, instanceId, "NoSeeds")
 	end
 
 	local plantable = GameConfig.GetPlantable(seedId)
 	if not plantable or PlayerDataService:GetLevel(player) < plantable.RequiredLevel then
-		self.PlantFailed:Fire(player, instanceId, "LevelTooLow")
-		return false
+		return self:_refuse(player, instanceId, "LevelTooLow")
 	end
 
 	--[[
@@ -484,15 +480,13 @@ function FarmService:TryPlant(player: Player, instanceId: string): boolean
 	local count = math.min(GameConfig.GetPlantCapacity(seedId), PlayerDataService:GetItemCount(player, seedId))
 
 	if count < 1 then
-		self.PlantFailed:Fire(player, instanceId, "NoSeeds")
-		return false
+		return self:_refuse(player, instanceId, "NoSeeds")
 	end
 
 	-- Atomic: the seeds are consumed before the crop exists, so a spammed
 	-- prompt cannot plant two squares from one batch.
 	if not PlayerDataService:RemoveItem(player, seedId, count) then
-		self.PlantFailed:Fire(player, instanceId, "NoSeeds")
-		return false
+		return self:_refuse(player, instanceId, "NoSeeds")
 	end
 
 	local now = os.time()
@@ -546,14 +540,13 @@ function FarmService:TryHarvest(player: Player, instanceId: string): boolean
 		never destroy a defence the player spent two hundred gold on.
 	]]
 	if not GameConfig.IsHarvestable(entry.SeedId) then
-		self.PlantFailed:Fire(player, instanceId, "NotHarvestable")
-		return false
+		return self:_refuse(player, instanceId, "NotHarvestable")
 	end
 
 	-- Recomputed from the timestamp, not read from the Stage attribute, which
 	-- is only as fresh as the last tick.
 	if not Growth.IsMature(Growth.GetStage(entry.SeedId, entry.PlantedAt, os.time())) then
-		return false
+		return false, "NotGrown"
 	end
 
 	-- Yield and XP are per PLANT, so a full square pays its whole stack. This
@@ -564,8 +557,7 @@ function FarmService:TryHarvest(player: Player, instanceId: string): boolean
 	-- Granted before the farm is cleared, so a full inventory leaves the crop
 	-- in the ground rather than destroying it.
 	if not PlayerDataService:AddItem(player, plantable.Yields, yield) then
-		self.PlantFailed:Fire(player, instanceId, "InventoryFull")
-		return false
+		return self:_refuse(player, instanceId, "InventoryFull")
 	end
 
 	PlayerDataService:AddXP(player, plantable.XPReward * count)
@@ -617,39 +609,6 @@ function FarmService:TryUproot(player: Player, instanceId: string): boolean
 	self.Uprooted:Fire(player, instanceId, seedId)
 
 	return true
-end
-
---- Single entry point for a farm prompt. Validates first, acts second.
-function FarmService:_onPromptTriggered(player: Player, farm)
-	local owner = farm.Model:GetAttribute(GameConfig.StructureAttributes.OwnerUserId)
-
-	if owner ~= player.UserId then
-		return
-	end
-
-	local body = farm.Model.PrimaryPart
-	if not body or not isWithinReach(player, body) then
-		return
-	end
-
-	if not self:_consumeInteraction(player) then
-		return
-	end
-
-	local entry = self:_getEntry(player, farm.InstanceId)
-	if not entry then
-		return
-	end
-
-	if entry.SeedId and entry.SeedId ~= "" then
-		if GameConfig.IsHarvestable(entry.SeedId) then
-			self:TryHarvest(player, farm.InstanceId)
-		else
-			self:TryUproot(player, farm.InstanceId)
-		end
-	else
-		self:TryPlant(player, farm.InstanceId)
-	end
 end
 
 --------------------------------------------------------------------------------
@@ -770,16 +729,11 @@ function FarmService:_attach(player: Player, instanceId: string, entry, model: M
 		return
 	end
 
-	local prompt = Instance.new("ProximityPrompt")
-	prompt.Name = PROMPT_NAME
-	prompt.ActionText = "Plant"
-	prompt.ObjectText = "Farm"
-	prompt.HoldDuration = 0
-	prompt.KeyboardKeyCode = Enum.KeyCode.E
-	prompt.MaxActivationDistance = GameConfig.Interaction.MaxActivationDistance
-	prompt.RequiresLineOfSight = false
-	prompt.Parent = body
-
+	--[[
+		The farm's prompt is StructureBuilder's, because every structure has
+		one. This service only writes its ObjectText, so a farm reads as
+		"Farm - Carrot ready" from outside without the panel being open.
+	]]
 	local farm = {
 		InstanceId = instanceId,
 		Model = model,
@@ -793,13 +747,6 @@ function FarmService:_attach(player: Player, instanceId: string, entry, model: M
 		self._farms[player] = farms
 	end
 	farms[instanceId] = farm
-
-	table.insert(
-		farm.Connections,
-		prompt.Triggered:Connect(function(triggering: Player)
-			self:_onPromptTriggered(triggering, farm)
-		end)
-	)
 
 	if entry.SeedId and entry.SeedId ~= "" and GameConfig.GetPlantable(entry.SeedId) then
 		self:_projectCrop(player, farm, entry, os.time())
@@ -872,7 +819,7 @@ local PLANT_REFUSALS = {
 	NoSeeds = "You have no seeds of that kind to plant.",
 	LevelTooLow = "You are not experienced enough to plant that yet.",
 	Occupied = "That square is already planted. Harvest or uproot it first.",
-	NotHarvestable = "That is a defence, not a crop. Hold E to uproot it.",
+	NotHarvestable = "That is a defence, not a crop. Uproot it from its panel instead.",
 	InventoryFull = "Your inventory is full, so the crop stays in the ground.",
 }
 

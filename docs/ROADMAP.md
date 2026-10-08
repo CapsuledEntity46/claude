@@ -316,35 +316,75 @@ Damage flavours: **fire**, **ice**, **poison**, **splash**.
 >   cooldown would round to 2 and become indistinguishable from a 2 second one
 >   — every attack profile would collapse into the same rate.
 
-### 2c. Selection and building menus ⬜
+### 2c. Selection and building menus ✅
 
-Interaction is currently all ProximityPrompts, and it does not scale. Reported
-from play: the harvest prompt is large, repeatedly pressing **E** down a row of
-farms uproots combat plants by accident, and there is no way to *choose* which
-seed to plant — the server picks from a `SelectedSeed` attribute that nothing
-sets.
+Interaction was all ProximityPrompts, and it did not scale. Reported from play:
+the harvest prompt is large, repeatedly pressing **E** down a row of farms
+uproots combat plants by accident, and there is no way to *choose* which seed to
+plant — the server picked from a `SelectedSeed` attribute that nothing set. Then
+husbandry arrived with a building that needed four actions, grew a second prompt
+on a second key, and the two drew on top of each other until a pixel offset
+pulled them apart.
 
-The fix is the one an RTS wants anyway. Roblox gives a free mouse cursor, so:
+Built as `Client.SelectionClient` (the panel), `Shared.BuildingActions` (the
+rules) and `Server.Services.BuildingActionService` (one validated remote).
 
-- **Click a building to select it.** A panel opens with the actions that
-  building actually has.
-- **A farm's panel** lists the player's seeds in tabs — food crops and combat
-  plants — so planting is a choice rather than whatever the server guessed. Plus
-  **Harvest All** and **Uproot**, so a mis-planted square can be cleared without
-  waiting for it to grow.
-- **Other buildings** get their own actions in the same frame: repair, demolish,
-  upgrade, and the per-building technology from the Mill/Barracks model.
+- ✅ **Click a building to select it**, or press E on its one remaining prompt.
+  A panel opens with the actions that building actually has.
+- ✅ **A farm's panel** lists the seeds the player holds, so planting is a
+  choice rather than whatever the server guessed. `SelectedSeed` is no longer
+  an attribute nothing sets — the panel sends an explicit pick, validated
+  server-side like any other client input.
+- ✅ **Other buildings** get their actions in the same frame: a pen's four, and
+  **Repair** and **Demolish** on everything. Upgrade and per-building
+  technology slot into the same list when they exist.
+- ✅ **State bars**: condition on every building, plus growth on a farm and
+  maturity and feed on a pen. Derived from the replicated attributes on a
+  timer, so a countdown ticks without a single remote call.
+
+**A building's actions are data.** `Structures.Coop.Actions` is a list of ids
+into `BuildingActions`, and the panel generates itself from it — so a Barracks
+with `{ "TrainTroop", "Upgrade", "Rally" }` gets three buttons and needs no UI
+code, only a handler. Config asserts that every action a building offers exists,
+that no action is offered twice, that a crop-holder offers Plant and Harvest and
+a pen offers Stock and Feed, and that no action is declared which no building
+offers.
 
 > **Architectural notes.**
 >
-> - Prompts stay for *world* interactions that are not about a building you own
->   (the shop, the practice range, the raid horn). They are wrong for owned
->   buildings, where the action list is long and some of it is irreversible.
-> - Selection is **client-side**; every action it offers goes through the
->   existing validated remotes. Nothing new becomes trustworthy.
-> - 🟡 Partial mitigation already shipped: uprooting now needs a
->   `Interaction.DestructiveHoldDuration` hold rather than a tap, so mashing E
->   cannot destroy a defence. The real fix is the panel.
+> - **The panel and the server reach identical verdicts**, because the rule
+>   lives in `Shared.BuildingActions` and both sides run it — the same
+>   arrangement `Shared.Buildability` already has with the build menu. A greyed
+>   out button is a button the server would refuse, with the same reason code.
+>   It is a *gate*, not the authority: attributes are only as fresh as the last
+>   tick, so the service behind each action still re-derives from timestamps.
+> - **Three rungs, not four.** Rate, ownership, availability — and "does this
+>   building offer this action" was briefly a fourth until it turned out to be
+>   the first thing `IsAvailable` asks, through the same function. A check no
+>   test can make fail independently is a line that only looks like safety.
+> - **Ownership is the boundary; distance is not.** The prompt path re-checked
+>   distance because prompt range is client-enforced. That did not carry over:
+>   every action affects only the caller's own buildings and their own
+>   inventory, so acting from across the base is not an exploit — it is what
+>   selecting a building across the base is *for*. Ownership is read from the
+>   profile, not from an attribute a client could have touched.
+> - **One remote, dispatched by action id.** The alternative is a remote per
+>   verb, each an attack surface to validate separately. Throttling sits on the
+>   remote rather than on the public method, so a villager or an automation
+>   tool calling `Perform` directly is not rationed — and a *refused* action
+>   still costs a token, or spamming a doomed one would be free.
+> - **Destructive actions confirm instead of being held.** `Kind =
+>   "Destructive"` turns the button into "Confirm?" for a few seconds. The hold
+>   gesture existed because an irreversible action sat beside a repeatable one
+>   on the same key; a panel can simply ask. `DestructiveHoldDuration` survives
+>   for the Checkpoint rebuild, which is still a prompt.
+> - **Prompts stay for *world* interactions** that are not about a building you
+>   own — the shop, the practice range, the raid horn. Owned buildings keep
+>   exactly one, which opens the panel and does nothing else: the server
+>   connects nothing to it, because `Triggered` fires on both sides and opening
+>   a menu is a client concern. That was already how the shop worked.
+> - 🟡 The panel is keyboard-less and has no tabs. A farm with twenty seed
+>   types will want them, and so will a Barracks with a research tree.
 
 ### 3. Animal husbandry ✅
 
@@ -452,18 +492,17 @@ looks enforced and is not:
 > - 🟡 Animals are static props. The roadmap's "herdable units" need the unit
 >   command system; writing movement against a pen now would mean writing it
 >   twice.
-> - 🟡 A pen has four actions and a ProximityPrompt has one gesture, so there
->   are two prompts on different keys — the irreversible one held. That is one
->   prompt too many, and the selection panel in §2c is where it belongs. The
->   service is written for it: the prompts are a thin shell over
->   `TryStock`/`TryFeed`/`TryCollect`/`TrySlaughter`.
+> - ✅ **The pen is what forced §2c.** Four actions against a
+>   ProximityPrompt's one gesture meant two prompts on two keys, the
+>   irreversible one held — and reported from play, the two **drew on top of
+>   each other**, because Roblox puts every prompt on a part in the same
+>   screen position. A pixel offset pulled them apart; the selection panel
+>   removed the second prompt and with it the reason for the offset. Even
+>   then, two prompts could not offer a *choice* of animal.
 >
->   Reported from play: the two prompts **drew on top of each other**, because
->   Roblox puts every prompt on a part in the same screen position. They are
->   separated by `Interaction.PromptStackOffset` now. The input was never
->   ambiguous — the keys differ — but the display was, and one of the two
->   destroys a herd. A third action on one building would need the panel
->   rather than a third offset.
+>   The service needed no rework for it: it exposes
+>   `TryStock`/`TryFeed`/`TryCollect`/`TrySlaughter`, each validating its own
+>   rules, and the panel is one of several things that may call them.
 
 ### 4. Fishing ⬜
 
@@ -778,7 +817,7 @@ Each step should be shippable and testable on its own.
 | **Shared damageable system** | Blocks buildings, sieges, repair and combat at once |
 | **Placement service** (prerequisites, free placement, overlap only) | The foundation for farms, drop-off points, defences and base building |
 | **Rework farming onto placement** | Farms become Mill-dependent structures; retires the fixed plot map |
-| **Selection and building menus** ⬜ | Prompts do not scale: no seed picker, and E-spam destroys defences. An RTS wants click-to-select anyway |
+| **Selection and building menus** ✅ | Prompts did not scale: no seed picker, E-spam destroyed defences, and a pen needed two overlapping prompts. Actions are data now, so the next building's menu is a config edit |
 | **Checkpoint and the defeat loop** ✅ | Gives a raid stakes: an anchor that shatters, and two ways back that cost different things |
 | **Combat plants, attacks and raiders** ✅ | Towers and plants shoot, raiders walk in and pick targets; the spatial helper three systems wanted |
 | **Build UX: sticky placement** ✅ | Hold a building and place a row of them; one shared buildability rule for the server and the menu |

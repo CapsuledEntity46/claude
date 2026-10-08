@@ -27,3 +27,4 @@ tests/bundle.luau
 tests/bootstrap_bundle.luau
 tests/luau
 tests/luau.exe
+tests/luau-analyze

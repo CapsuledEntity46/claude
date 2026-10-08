@@ -1271,27 +1271,16 @@ GameConfig.Interaction = {
 	--[[
 		How long an IRREVERSIBLE prompt must be held.
 
-		Harvesting is a tap, and a player mashing E down a row of farms was
-		uprooting combat plants by accident. An action that cannot be undone,
-		sitting next to one meant to be repeated, has to need a different
-		gesture rather than the same one slightly too often.
+		Only the Checkpoint rebuild still uses this. Owned buildings moved to
+		the selection panel, where an irreversible action is guarded by a
+		confirmation step (Selection.ConfirmWindow) rather than a long press -
+		a panel can ask "are you sure" and a prompt cannot.
+
+		There was briefly a PromptStackOffset here too, to stop a pen's two
+		prompts drawing on top of each other. The panel removed the second
+		prompt, so it removed the reason for the offset.
 	]]
 	DestructiveHoldDuration = 1.2,
-
-	--[[
-		Vertical separation, in pixels, for prompts sharing one part.
-
-		Roblox draws every prompt on a part at the same screen position, so a
-		pen's Collect and Slaughter prompts landed on top of each other -
-		reported from play as "the collect and slaughter buttons overlap and
-		it is difficult to select". They are on different keys, so the input
-		was never ambiguous; the DISPLAY was, which is just as bad when one of
-		the two destroys a herd.
-
-		A building wanting more than two actions needs the selection panel in
-		docs/ROADMAP.md rather than a third offset.
-	]]
-	PromptStackOffset = 34,
 }
 
 --------------------------------------------------------------------------------
@@ -2075,6 +2064,17 @@ export type StructureDefinition = {
 	HoldsCrop: boolean?,
 	HousesLivestock: boolean?,
 	LivestockSpace: number?, -- pen space available to animals, see AnimalSizes
+
+	--[[
+		What the selection panel offers on this building, and which state bars
+		it draws. Both are ids into BuildingActions and PanelBars below.
+
+		A building's action list is DATA, which is the whole point of the
+		panel: adding "Train Troop" to a Barracks is a config edit plus one
+		server handler, not a new prompt, a new key and a new offset.
+	]]
+	Actions: { string }?,
+	Bars: { string }?,
 }
 
 --[[
@@ -2108,6 +2108,14 @@ GameConfig.Structures = {
 		Color = Color3.fromRGB(176, 148, 108),
 		MaxPerPlayer = 1,
 		SortOrder = 10,
+		--[[
+			Repair only. Every other building also offers Demolish, but the
+			Town Center is the root of the build tree - tearing it down would
+			orphan everything that required it - so selecting one gets a panel
+			with a single button, which is still better than no panel.
+		]]
+		Actions = { "Repair" },
+		Bars = { "Health" },
 	},
 
 	Checkpoint = {
@@ -2122,6 +2130,8 @@ GameConfig.Structures = {
 		Color = Color3.fromRGB(120, 132, 170),
 		MaxPerPlayer = 1,
 		SortOrder = 20,
+		Actions = { "Repair", "Demolish" },
+		Bars = { "Health" },
 	},
 
 	Mill = {
@@ -2136,6 +2146,8 @@ GameConfig.Structures = {
 		Color = Color3.fromRGB(150, 118, 76),
 		MaxPerPlayer = 4,
 		SortOrder = 30,
+		Actions = { "Repair", "Demolish" },
+		Bars = { "Health" },
 	},
 
 	Farm = {
@@ -2150,9 +2162,11 @@ GameConfig.Structures = {
 		Color = Color3.fromRGB(94, 66, 45),
 		MaxPerPlayer = 20,
 		SortOrder = 40,
-		-- The only structure that grows something, so FarmService attaches a
-		-- plant/harvest prompt to farms and nothing else.
+		-- The only structure that grows something, so FarmService attaches
+		-- its behaviour to farms and nothing else.
 		HoldsCrop = true,
+		Actions = { "Plant", "Harvest", "Uproot", "Repair", "Demolish" },
+		Bars = { "Health", "Growth" },
 	},
 
 	WatchTower = {
@@ -2167,6 +2181,8 @@ GameConfig.Structures = {
 		Color = Color3.fromRGB(142, 146, 152),
 		MaxPerPlayer = 6,
 		SortOrder = 50,
+		Actions = { "Repair", "Demolish" },
+		Bars = { "Health" },
 	},
 
 	--[[
@@ -2194,6 +2210,8 @@ GameConfig.Structures = {
 		Color = Color3.fromRGB(168, 132, 92),
 		MaxPerPlayer = 8,
 		SortOrder = 60,
+		Actions = { "Stock", "Feed", "Collect", "Slaughter", "Repair", "Demolish" },
+		Bars = { "Health", "Maturity", "Feed" },
 		HousesLivestock = true,
 		-- Six Small animals, or two Large ones if a small species is ever
 		-- housed here. See AnimalSizes for why this is space, not a count.
@@ -2214,8 +2232,220 @@ GameConfig.Structures = {
 		SortOrder = 70,
 		HousesLivestock = true,
 		LivestockSpace = 9,
+		Actions = { "Stock", "Feed", "Collect", "Slaughter", "Repair", "Demolish" },
+		Bars = { "Health", "Maturity", "Feed" },
 	},
 } :: { [string]: StructureDefinition }
+
+--------------------------------------------------------------------------------
+-- The selection panel
+--------------------------------------------------------------------------------
+
+export type ActionDefinition = {
+	Id: string,
+	Name: string, -- the button label
+	Description: string, -- the line under it, so a button explains itself
+	Kind: string, -- "Primary" | "Secondary" | "Destructive"
+
+	--[[
+		An item CATEGORY the action picks from, or nil for an action with no
+		choice to make.
+
+		This is how the panel gets a seed picker without knowing what a seed
+		is: "Plant" chooses from Seeds, "Stock" from Livestock, and the panel
+		lists whatever the player holds in that category.
+	]]
+	Choice: string?,
+}
+
+--[[
+	Every action a building can offer, declared once.
+
+	WHY THIS EXISTS
+	---------------
+	Owned buildings used to be operated through ProximityPrompts, and prompts
+	do not scale. A farm had one prompt that guessed which of plant, harvest
+	and uproot you meant. A pen needed FOUR actions, so it ended up with two
+	prompts on two keys, one of them held, separated by a pixel offset because
+	Roblox draws both in the same place - and it still had no way to let the
+	player CHOOSE which seed to plant or which animal to stock, which is why
+	`SelectedSeed` was an attribute that nothing ever set.
+
+	A building's actions are now a list of ids, and the panel generates itself
+	from them. Adding "Train Troop" to a Barracks is an entry here, an id in
+	that structure's Actions, and one server handler.
+
+	DESTRUCTIVE ACTIONS
+	-------------------
+	`Kind = "Destructive"` is the panel's replacement for the hold gesture. An
+	irreversible action next to a repeatable one needs a different gesture, and
+	in a panel that gesture is a confirmation step rather than a long press.
+]]
+GameConfig.ActionKinds = { "Primary", "Secondary", "Destructive" }
+
+GameConfig.BuildingActions = {
+	--------------------------------------------------------------------------
+	-- Farming
+	--------------------------------------------------------------------------
+	Plant = {
+		Id = "Plant",
+		Name = "Plant",
+		Description = "Fill the square with a crop of your choosing.",
+		Kind = "Primary",
+		Choice = "Seeds",
+	},
+	Harvest = {
+		Id = "Harvest",
+		Name = "Harvest",
+		Description = "Pick a ripe crop. Pays the whole stack.",
+		Kind = "Primary",
+	},
+	Uproot = {
+		Id = "Uproot",
+		Name = "Uproot",
+		Description = "Clear a kept plant. Returns nothing.",
+		Kind = "Destructive",
+	},
+
+	--------------------------------------------------------------------------
+	-- Husbandry
+	--------------------------------------------------------------------------
+	Stock = {
+		Id = "Stock",
+		Name = "Stock",
+		Description = "Put young animals in. Fills the pen in one action.",
+		Kind = "Primary",
+		Choice = "Livestock",
+	},
+	Feed = {
+		Id = "Feed",
+		Name = "Feed",
+		Description = "A hungry herd stops growing, stops producing, and starves.",
+		Kind = "Primary",
+	},
+	Collect = {
+		Id = "Collect",
+		Name = "Collect",
+		Description = "Take what the herd has produced.",
+		Kind = "Primary",
+	},
+	Slaughter = {
+		Id = "Slaughter",
+		Name = "Slaughter",
+		Description = "Take the meat. Ends the herd.",
+		Kind = "Destructive",
+	},
+
+	--------------------------------------------------------------------------
+	-- Every building
+	--------------------------------------------------------------------------
+	Repair = {
+		Id = "Repair",
+		Name = "Repair",
+		Description = "Spend resources to mend the building.",
+		Kind = "Secondary",
+	},
+	Demolish = {
+		Id = "Demolish",
+		Name = "Demolish",
+		Description = "Tear it down. Refunds nothing, and takes its contents.",
+		Kind = "Destructive",
+	},
+} :: { [string]: ActionDefinition }
+
+function GameConfig.GetAction(actionId: unknown): ActionDefinition?
+	if type(actionId) ~= "string" then
+		return nil
+	end
+
+	return GameConfig.BuildingActions[actionId]
+end
+
+--[[
+	The state bars a panel can draw.
+
+	`Kind` says where the value comes from, so the client has one function per
+	KIND rather than one per building. Nothing here carries a value: a bar is
+	a question ("how grown is this crop?"), and the answer is derived from the
+	replicated attributes every time it is drawn. Storing numbers in config
+	would be storing state in the one place guaranteed to go stale.
+]]
+--- The readings a bar can take. A Kind with no reader is a bar that is
+--- declared, drawn and never updated, with no error anywhere.
+GameConfig.BarKinds = { "Health", "Growth", "Maturity", "Feed" }
+
+GameConfig.PanelBars = {
+	Health = {
+		Id = "Health",
+		Name = "Condition",
+		Kind = "Health",
+		Colour = Color3.fromRGB(206, 92, 86),
+	},
+	Growth = {
+		Id = "Growth",
+		Name = "Growth",
+		Kind = "Growth",
+		Colour = Color3.fromRGB(126, 196, 112),
+	},
+	Maturity = {
+		Id = "Maturity",
+		Name = "Maturity",
+		Kind = "Maturity",
+		Colour = Color3.fromRGB(126, 196, 112),
+	},
+	Feed = {
+		Id = "Feed",
+		Name = "Feed",
+		Kind = "Feed",
+		Colour = Color3.fromRGB(214, 183, 90),
+	},
+}
+
+GameConfig.Selection = {
+	--[[
+		The single prompt an owned building carries now, and the only thing it
+		does: tell the CLIENT to open the panel.
+
+		Shared so the server that creates it and the client that listens for
+		it cannot drift. The prompt is not wired to anything on the server -
+		opening a menu is a client concern, exactly as the shop's prompt
+		already works.
+	]]
+	PromptName = "Manage",
+	PromptActionText = "Manage",
+
+	-- How far a click may reach to select a building. Generous, because
+	-- selecting a building across your base is the point of a panel.
+	MaxSelectDistance = 300,
+
+	--[[
+		The build menu's placement ghost, named here so two clients cannot
+		drift apart over it.
+
+		Both the build menu and the selection panel act on an unprocessed
+		left click, and neither knows about the other, so confirming a
+		placement would also run the selection path. The ghost's presence in
+		Workspace is what tells the panel to stay out of the way.
+	]]
+	GhostName = "BuildGhost",
+
+	-- Token bucket for the action remote. Burst covers honest double-clicks.
+	RequestsPerSecond = 6,
+	BurstSize = 10,
+
+	--[[
+		How long a destructive button stays armed after the first press.
+
+		The panel's answer to the hold gesture: press Slaughter and it becomes
+		"Confirm?" for this long. Short enough that it cannot be forgotten and
+		pressed by accident later.
+	]]
+	ConfirmWindow = 4,
+
+	-- How often the open panel recomputes its bars and button states. The
+	-- countdowns are the only thing that moves without an attribute changing.
+	RefreshInterval = 0.2,
+}
 
 --[[
 	Raids.
@@ -2682,6 +2912,22 @@ GameConfig.RemoteNames = {
 	AdvanceAge = "AdvanceAge",
 
 	-- RemoteFunctions
+
+	--[[
+		Every action the selection panel offers, on one remote.
+
+		A function rather than an event because the panel genuinely needs the
+		answer: "not grown yet" and "your bag is full" are different captions,
+		and a request/response pair is clearer than an event plus a notice the
+		caller has to correlate.
+
+		ONE remote for all of them, dispatched by action id, because the
+		alternative is a remote per verb and every one of them is an attack
+		surface to validate separately. The shape is
+		`(instanceId, actionId, choice?)`.
+	]]
+	BuildingAction = "BuildingAction",
+
 	ProcessTransaction = "ProcessTransaction",
 	SellAll = "SellAll",
 	TradeResource = "TradeResource",
@@ -3200,6 +3446,137 @@ for id, structure in GameConfig.Structures do
 	for _, prerequisiteId in structure.Prerequisites do
 		assert(GameConfig.Structures[prerequisiteId] ~= nil, `structure {id} requires unknown structure {prerequisiteId}`)
 	end
+
+	--[[
+		The selection panel generates itself from these, so a typo here is a
+		button that never appears or a panel that cannot be opened - both of
+		which look like the UI is broken rather than like a config error.
+
+		Every selectable building must offer SOMETHING, or selecting it opens
+		an empty panel.
+	]]
+	assert(structure.Actions ~= nil, `structure {id} declares no Actions, so its panel would be empty`)
+	assert(#structure.Actions > 0, `structure {id} has an empty Actions list`)
+
+	local seenActions = {}
+
+	for _, actionId in structure.Actions do
+		assert(GameConfig.BuildingActions[actionId] ~= nil, `structure {id} offers unknown action {actionId}`)
+		assert(not seenActions[actionId], `structure {id} offers action {actionId} twice`)
+		seenActions[actionId] = true
+	end
+
+	assert(structure.Bars ~= nil, `structure {id} declares no Bars`)
+
+	for _, barId in structure.Bars do
+		assert(GameConfig.PanelBars[barId] ~= nil, `structure {id} draws unknown bar {barId}`)
+	end
+
+	--[[
+		A building that grows or houses something must offer the actions that
+		operate it. Shipping a Coop whose Actions list forgot "Feed" would be
+		a herd nobody could save, discoverable only by letting one starve.
+	]]
+	local seenBars = {}
+
+	for _, barId in structure.Bars do
+		seenBars[barId] = true
+	end
+
+	if structure.HoldsCrop then
+		for _, required in { "Plant", "Harvest" } do
+			assert(seenActions[required], `structure {id} holds a crop but does not offer {required}`)
+		end
+
+		assert(seenBars.Growth, `structure {id} holds a crop but draws no Growth bar`)
+	end
+
+	--[[
+		A pen must show its feed. "A rule nobody can see is a rule nobody
+		believes" was learned the hard way on husbandry - starvation was real
+		and invisible for two rounds of playtesting - so the readout that
+		makes it visible is asserted rather than remembered.
+	]]
+	if structure.HousesLivestock then
+		for _, required in { "Stock", "Feed" } do
+			assert(seenActions[required], `structure {id} houses livestock but does not offer {required}`)
+		end
+
+		for _, required in { "Maturity", "Feed" } do
+			assert(seenBars[required], `structure {id} houses livestock but draws no {required} bar`)
+		end
+	end
+
+	--[[
+		Offering Repair on a building the registry will not repair is a
+		permanently dead button whose only answer is "NotRepairable".
+	]]
+	if seenActions.Repair then
+		assert(
+			GameConfig.Archetypes[structure.ArchetypeId].Repairable,
+			`structure {id} offers Repair but its archetype is not repairable`
+		)
+	end
+end
+
+for id, action in GameConfig.BuildingActions do
+	assert(action.Id == id, `action {id} has a mismatched Id field`)
+	assert(table.find(GameConfig.ActionKinds, action.Kind) ~= nil, `action {id} has unknown Kind {action.Kind}`)
+	assert(action.Description ~= "", `action {id} needs a description - the panel shows it`)
+
+	if action.Choice ~= nil then
+		assert(GameConfig.IsValidCategory(action.Choice), `action {id} chooses from unknown category {action.Choice}`)
+	end
+
+	--[[
+		Every action must be offered by at least one building. An action
+		nothing offers is dead config that reads as a feature.
+	]]
+	local offered = false
+
+	for _, structure in GameConfig.Structures do
+		if structure.Actions and table.find(structure.Actions, id) then
+			offered = true
+			break
+		end
+	end
+
+	assert(offered, `action {id} is offered by no building`)
+end
+
+for id, bar in GameConfig.PanelBars do
+	assert(bar.Id == id, `panel bar {id} has a mismatched Id field`)
+	assert(bar.Name ~= "", `panel bar {id} needs a name`)
+	assert(table.find(GameConfig.BarKinds, bar.Kind) ~= nil, `panel bar {id} has unknown Kind {tostring(bar.Kind)}`)
+
+	-- The mirror of the action rule: a bar no building draws is dead config
+	-- that reads as a feature.
+	local drawn = false
+
+	for _, structure in GameConfig.Structures do
+		if structure.Bars and table.find(structure.Bars, id) then
+			drawn = true
+			break
+		end
+	end
+
+	assert(drawn, `panel bar {id} is drawn by no building`)
+end
+
+do
+	local selection = GameConfig.Selection
+
+	assert(selection.MaxSelectDistance > 0, "a click must be able to reach something")
+	assert(selection.ConfirmWindow > 0, "a destructive action must stay armed long enough to confirm")
+	assert(selection.RefreshInterval > 0, "the panel must refresh")
+	assert(selection.PromptName ~= "", "the management prompt needs a name")
+	assert(selection.PromptActionText ~= "", "and a label")
+	assert(selection.GhostName ~= "", "the build ghost needs a name the panel can look for")
+
+	-- Checked here rather than left to fail inside RateLimiter.new at
+	-- startup, which reports the symptom a long way from the cause.
+	assert(selection.RequestsPerSecond > 0, "the action remote needs a positive rate")
+	assert(selection.BurstSize >= selection.RequestsPerSecond, "a burst smaller than the rate would throttle normal use")
 end
 
 for id, archetype in GameConfig.Archetypes do

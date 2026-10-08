@@ -1,6 +1,6 @@
 # Tests
 
-A headless test suite for the server and shared code: **1935 assertions**, no
+A headless test suite for the server and shared code: **2035 assertions**, no
 Roblox Studio required.
 
 ## Why this exists
@@ -62,6 +62,13 @@ that a missing module aborts with a named, actionable error rather than
   crowded; `makeFarm` and `makePen` search outward for a free spot rather than
   trusting a fixed offset, which is what stops adding a section from breaking
   an unrelated one further down.
+- **UserIds are shared across the whole suite.** Reusing one is how a rejoin
+  is tested (same id, new Player instance), so a *clashing* id is invisible
+  until some distant section inherits a profile and a set of owned entities it
+  did not build. That cost a confusing failure in the raid tests, hundreds of
+  sections away from the section that caused it. Check
+  `grep -oP 'newPlayer\(\K[0-9]+' tests/tests.luau | sort | uniq -c` before
+  picking one.
 - A replicated attribute is only as fresh as the last tick of the loop that
   publishes it. Crop growth ticks every second but husbandry ticks every five,
   so a test that crosses a threshold and immediately reads the attribute is

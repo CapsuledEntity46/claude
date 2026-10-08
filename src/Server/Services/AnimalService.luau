@@ -35,23 +35,22 @@
 		    ├── Chick1 (Model)   rebuilt per maturity stage
 		    └── Chick2..N        laid out on a grid across the footprint
 		└── Body
-		    ├── Interact         ProximityPrompt - stock / feed / collect
-		    └── Cull             ProximityPrompt - slaughter, held
+		    └── Manage           ProximityPrompt - opens the panel
 
-	TWO PROMPTS, NOT ONE
-	--------------------
-	A pen has four actions and a ProximityPrompt has one gesture, so the
-	contextual prompt offers whichever of stock/feed/collect is useful right
-	now, and slaughtering gets its OWN prompt on a different key that must be
-	HELD. That is the lesson from combat plants being uprooted by players
-	mashing E down a row of farms: an irreversible action next to a repeatable
-	one needs a different gesture, and here it also gets a different key.
+	FOUR ACTIONS, NO PROMPTS
+	------------------------
+	A pen has four actions and a ProximityPrompt has one gesture. This service
+	first tried to live inside that: a contextual prompt offering whichever of
+	stock/feed/collect looked most useful, plus a second prompt on a second
+	key, held rather than tapped, for slaughtering - and the two drew on top of
+	each other until a pixel offset pulled them apart. Even then the pen could
+	not offer a CHOICE of animal.
 
-	It is still two prompts too many. The selection panel in docs/ROADMAP.md is
-	where a building's action list belongs, and this service is written so that
-	panel only has to call TryStock/TryFeed/TryCollect/TrySlaughter - the
-	prompts are a thin shell over four validated public methods, not the place
-	the rules live.
+	The four actions are now buttons in the selection panel, reached through
+	BuildingActionService. This service never hears about the panel: it exposes
+	TryStock/TryFeed/TryCollect/TrySlaughter, each validating its own rules,
+	and the panel is one of several things that may call them. The pen's single
+	remaining prompt opens the menu and does nothing else.
 
 	THE ONE NEW RULE: FEED
 	----------------------
@@ -91,8 +90,6 @@ local StructureBuilder = require(script.Parent.Parent.World.StructureBuilder)
 
 local ANIMAL_ATTR = GameConfig.AnimalAttributes
 local EMPTY_STAGE = GameConfig.Husbandry.EmptyStage
-local PROMPT_NAME = "Interact"
-local CULL_PROMPT_NAME = "Cull"
 local HERD_CONTAINER = "Herd"
 
 --- Fraction of the pen footprint the animals stand across, so the outer ones
@@ -172,18 +169,14 @@ function AnimalService:_consumeInteraction(player: Player): boolean
 	return true
 end
 
---- Re-checks reach on the server. The engine enforces prompt distance on the
---- client, which an exploiter controls.
-local function isWithinReach(player: Player, part: BasePart): boolean
-	local character = player.Character
-	local root = character and character.PrimaryPart
-
-	if not root then
-		return false
-	end
-
-	local limit = GameConfig.Interaction.MaxActivationDistance + GameConfig.Interaction.DistanceTolerance
-	return (root.Position - part.Position).Magnitude <= limit
+--[[
+	Announces a refusal AND returns it, for the same reason FarmService does:
+	the notice turns it into a sentence, the panel captions a button with it,
+	and Signal:Fire is asynchronous so the reason cannot be observed.
+]]
+function AnimalService:_refuse(player: Player, instanceId: string, reason: string): (boolean, string)
+	self.ActionFailed:Fire(player, instanceId, reason)
+	return false, reason
 end
 
 function AnimalService:_getPens(player: Player)
@@ -466,155 +459,22 @@ function AnimalService:_projectEmpty(player: Player, pen)
 end
 
 --------------------------------------------------------------------------------
--- Prompts
+-- What the pen says about itself
 --------------------------------------------------------------------------------
 
---[[
-	What the contextual prompt should say right now, as (enabled, action,
-	object).
-
-	Collecting outranks feeding, because produce waiting is the thing the
-	player came over for and feed can be topped up on the way out. When
-	neither is available the prompt stays visible but DISABLED with the reason
-	in its text - a prompt that vanishes is indistinguishable from a building
-	that has broken.
-]]
-function AnimalService:_describeInteract(player: Player, pen, entry, now: number): (boolean, string, string)
-	if not entry or not entry.AnimalId or entry.AnimalId == "" then
-		local stockId = self:_resolveStockId(player, pen.StructureId)
-		local item = GameConfig.GetItem(stockId)
-
-		local willStock = if stockId
-			then math.min(
-				GameConfig.GetPenCapacity(pen.StructureId, stockId),
-				PlayerDataService:GetItemCount(player, stockId)
-			)
-			else 0
-
-		if item and willStock > 0 then
-			return true, "Stock", `{item.Name} x{willStock}`
-		end
-
-		return true, "Stock", "No livestock"
-	end
-
-	local animal = GameConfig.GetAnimal(entry.AnimalId)
-	if not animal then
-		return false, "Pen", "Unknown livestock"
-	end
-
-	local count = herdCount(entry)
-
-	--[[
-		How much feed is left, in whole minutes, carried on EVERY branch below.
-
-		Computed up here rather than in the feed branch because the prompt
-		shows whichever action is most useful, and collecting outranks
-		feeding - so a starving flock with eggs waiting was advertising
-		"Collect" and saying nothing at all about the hunger. The state the
-		player needs is the same whatever the next action happens to be.
-
-		Quantised to minutes: this text replicates, and a per-second countdown
-		on every pen would be traffic in exchange for precision nobody needs.
-	]]
-	local remaining = Husbandry.GetFeedRemaining(entry.FedUntil, now)
-	local fed = if remaining > 0 then `fed {math.max(math.ceil(remaining / 60), 1)}m` else "HUNGRY"
-
-	local cycles =
-		Husbandry.GetReadyCycles(entry.AnimalId, entry.StockedAt, entry.LastCollectedAt, entry.FedUntil, count, now)
-
-	if cycles > 0 then
-		--[[
-			What would ACTUALLY be collected, not what is waiting.
-
-			The prompt must not advertise a payout the server will refuse.
-			That is how the collection deadlock presented itself to a player:
-			an enabled prompt naming a precise number of eggs, refusing on
-			every press, with nothing to suggest the inventory was the problem.
-		]]
-		local payable = cyclesThatFit(player, entry.AnimalId, cycles, count)
-
-		--[[
-			Named after the produce rather than the animal, and totalled, so
-			the player can see whether the walk over is worth it. A pen with
-			one egg in it and a pen with thirty read differently.
-		]]
-		local totals = Husbandry.GetProduceTotals(entry.AnimalId, math.max(payable, 1), count)
-		local parts = {}
-
-		for _, yield in animal.Produces do
-			local item = GameConfig.GetItem(yield.ItemId)
-			table.insert(parts, `{if item then item.Name else yield.ItemId} x{totals[yield.ItemId] or 0}`)
-		end
-
-		if payable < 1 then
-			return false, "Full", `No room for {table.concat(parts, ", ")} - {fed}`
-		end
-
-		return true, "Collect", `{table.concat(parts, ", ")} - {fed}`
-	end
-
-	local feedItem = GameConfig.GetItem(animal.Feed.ItemId)
-	local feedName = if feedItem then feedItem.Name else animal.Feed.ItemId
-	local cost = Husbandry.GetFeedCost(entry.AnimalId, count)
-
-	--[[
-		Feed can be stacked two windows deep, so a hungry herd that has just
-		been fed is STILL offered Feed - correctly, there is room for another
-		window - and with no countdown on it that looked exactly like a button
-		that had not worked. The number going up is the acknowledgement.
-	]]
-	-- Feed is offered whenever there is room on the clock for another window,
-	-- hungry or not, so a player can stock up before logging off.
-	if remaining <= animal.FeedDuration * (GameConfig.Husbandry.MaxFedWindows - 1) then
-		if PlayerDataService:HasItem(player, animal.Feed.ItemId, cost) then
-			return true, "Feed", `{feedName} x{cost} - {fed}`
-		end
-
-		return true, "Feed", `Needs {feedName} x{cost} - {fed}`
-	end
-
-	-- Fed as far ahead as allowed, so the only thing left is to wait. Say
-	-- what for: growing up, or the next batch.
-	if not Husbandry.IsGrown(Husbandry.GetStage(entry.AnimalId, entry.StockedAt, now)) then
-		local toGrown = Husbandry.GetTimeToGrown(entry.AnimalId, entry.StockedAt, now)
-		return false, "Growing", `{animal.Name} x{count} - {Growth.FormatTimeRemaining(toGrown)}, {fed}`
-	end
-
-	if not GameConfig.HasProduce(entry.AnimalId) then
-		-- A slaughter-only animal that is grown and fed: there is nothing to
-		-- tap for, and the cull prompt is the action.
-		return false, "Ready", `{animal.Name} x{count} - {fed}`
-	end
-
-	return false, "Fed", `{animal.Name} x{count} - {fed}`
-end
-
---[[
-	Refreshes both prompts, but only writes to them when the text would
-	change.
-
-	The tick runs over every pen of every player, and a ProximityPrompt
-	property write replicates. An idle pen must therefore cost a string
-	comparison, not a round of replication - the same discipline as rebuilding
-	a crop's visual only on a stage transition.
-]]
 --[[
 	Puts the herd's state on the pen's name plate.
 
 	Reported from play as "the animals only get hungry and fed once, after
 	that there is no starvation, but the feed button still appears". The
-	mechanic was working - a test now runs three hunger/feed cycles and
-	checks each one announces itself and costs health - but there was no way
-	to SEE it. Feed can be stacked two windows deep, so pressing E on a
-	hungry herd leaves the prompt still offering Feed, which reads as a
-	button that did nothing, and then nothing visibly happens for the ten
-	minutes the feed lasts.
+	mechanic was working - a test runs three hunger/feed cycles and checks
+	each one announces itself and costs health - but there was no way to SEE
+	it, and a rule nobody can see is a rule nobody believes.
 
-	So the pen says how it is doing from across the base, and the countdown
-	is the acknowledgement that feeding worked. Quantised to whole minutes:
-	the text is replicated, and a per-second countdown on every pen would be
-	traffic in exchange for precision nobody needs.
+	The plate survived the move to the selection panel because it answers a
+	question the panel cannot: "which of my six pens needs me?", from across
+	the base, without selecting anything. Quantised to whole minutes, since
+	this text replicates.
 ]]
 function AnimalService:_refreshLabel(pen, entry, now: number)
 	local body = pen.Model.PrimaryPart
@@ -642,70 +502,53 @@ function AnimalService:_refreshLabel(pen, entry, now: number)
 	end
 end
 
-function AnimalService:_refreshPrompts(player: Player, pen)
-	local body = pen.Model.PrimaryPart
-	if not body then
-		return
-	end
+--[[
+	Refreshes the name plate and the pen's single prompt.
 
+	The prompt no longer DOES anything - it opens the panel - so its text is
+	a glanceable summary rather than an offer. What used to live here was the
+	contextual logic that decided between stock, feed and collect, plus a
+	second prompt on a second key for slaughtering, plus the pixel offset that
+	stopped the two drawing on top of each other. All of it is now the panel's
+	job, and the panel can show four actions at once instead of guessing which
+	one you meant.
+]]
+function AnimalService:_refreshPrompts(player: Player, pen)
 	local entry = self:_getEntry(player, pen.InstanceId)
 	local now = os.time()
 
 	self:_refreshLabel(pen, entry, now)
 
-	local enabled, action, object = self:_describeInteract(player, pen, entry, now)
-	local key = `{enabled}|{action}|{object}`
+	local body = pen.Model.PrimaryPart
+	local prompt = body and body:FindFirstChild(GameConfig.Selection.PromptName)
 
-	local prompt = body:FindFirstChild(PROMPT_NAME)
-
-	if prompt and key ~= pen.PromptKey then
-		pen.PromptKey = key
-		prompt.Enabled = enabled
-		prompt.ActionText = action
-		prompt.ObjectText = object
-	end
-
-	local cull = body:FindFirstChild(CULL_PROMPT_NAME)
-	if not cull then
+	if not prompt then
 		return
 	end
 
-	--[[
-		Slaughtering is offered only once the herd is GROWN. Culling juveniles
-		would be a trap rather than a choice: the yields are not scaled down
-		for a half-grown animal, so allowing it would either pay full price
-		for an animal that was not raised or quietly pay less than the prompt
-		said.
-	]]
-	local cullEnabled = false
-	local cullObject = ""
+	local structure = GameConfig.GetStructure(pen.StructureId)
+	local text = if structure then structure.Name else pen.StructureId
 
 	if entry and entry.AnimalId and entry.AnimalId ~= "" then
 		local animal = GameConfig.GetAnimal(entry.AnimalId)
 		local count = herdCount(entry)
-		local grown = Husbandry.IsGrown(Husbandry.GetStage(entry.AnimalId, entry.StockedAt, now))
+		local name = if animal then animal.Name else entry.AnimalId
 
-		if animal and grown and #animal.Slaughter > 0 then
-			local totals = Husbandry.GetSlaughterTotals(entry.AnimalId, count)
-			local parts = {}
-
-			for _, yield in animal.Slaughter do
-				local item = GameConfig.GetItem(yield.ItemId)
-				table.insert(parts, `{if item then item.Name else yield.ItemId} x{totals[yield.ItemId] or 0}`)
-			end
-
-			cullEnabled = true
-			cullObject = table.concat(parts, ", ")
+		if not Husbandry.IsFed(entry.FedUntil, now) then
+			text = `{name} x{count} - HUNGRY`
+		elseif Husbandry.IsGrown(Husbandry.GetStage(entry.AnimalId, entry.StockedAt, now)) then
+			text = `{name} x{count} - grown`
+		else
+			text = `{name} x{count} - growing`
 		end
+	else
+		text = `{text} - empty`
 	end
 
-	local cullKey = `{cullEnabled}|{cullObject}`
-
-	if cullKey ~= pen.CullPromptKey then
-		pen.CullPromptKey = cullKey
-		cull.Enabled = cullEnabled
-		cull.ActionText = "Slaughter"
-		cull.ObjectText = cullObject
+	-- Only written when it changes: the tick walks every pen of every player,
+	-- and a prompt property write replicates.
+	if prompt.ObjectText ~= text then
+		prompt.ObjectText = text
 	end
 end
 
@@ -728,8 +571,24 @@ end
 	never depends on inventory key order - and filters on the PEN, so pressing
 	E on a coop can never try to put a cow in it.
 ]]
-function AnimalService:_resolveStockId(player: Player, structureId: string): string?
+function AnimalService:_resolveStockId(player: Player, structureId: string, chosenStockId: string?): string?
 	local level = PlayerDataService:GetLevel(player)
+
+	--[[
+		An explicit choice outranks the stored selection, held to the same
+		three conditions: housed in THIS pen, past the level gate, and owned.
+	]]
+	local chosen = GameConfig.GetAnimal(chosenStockId)
+
+	if
+		chosen
+		and chosen.HousedIn == structureId
+		and level >= chosen.RequiredLevel
+		and PlayerDataService:HasItem(player, chosen.StockId, 1)
+	then
+		return chosen.StockId
+	end
+
 	local selected = player:GetAttribute(GameConfig.Attributes.SelectedStock)
 	local selectedAnimal = GameConfig.GetAnimal(selected)
 
@@ -783,7 +642,9 @@ end
 	prevent. The grace is now a short fixed span, asserted in config to be
 	shorter than the fastest animal's MatureTime.
 ]]
-function AnimalService:TryStock(player: Player, instanceId: string): boolean
+--- `chosenStockId` is the selection panel's explicit pick. Nil means "decide
+--- for me", which is what the prompt used to do.
+function AnimalService:TryStock(player: Player, instanceId: string, chosenStockId: string?): boolean
 	local entry = self:_getEntry(player, instanceId)
 	local pen = self:GetPen(player, instanceId)
 
@@ -792,26 +653,24 @@ function AnimalService:TryStock(player: Player, instanceId: string): boolean
 	end
 
 	if entry.AnimalId and entry.AnimalId ~= "" then
-		self.ActionFailed:Fire(player, instanceId, "Occupied")
-		return false
+		return self:_refuse(player, instanceId, "Occupied")
 	end
 
-	local stockId = self:_resolveStockId(player, pen.StructureId)
+	-- An explicit pick is still validated here; "the panel offered it" is not
+	-- a validation, and it takes the same path as a resolved one.
+	local stockId = self:_resolveStockId(player, pen.StructureId, chosenStockId)
 	if not stockId then
-		self.ActionFailed:Fire(player, instanceId, "NoLivestock")
-		return false
+		return self:_refuse(player, instanceId, "NoLivestock")
 	end
 
 	local animal = GameConfig.GetAnimal(stockId)
 	if not animal or PlayerDataService:GetLevel(player) < animal.RequiredLevel then
-		self.ActionFailed:Fire(player, instanceId, "LevelTooLow")
-		return false
+		return self:_refuse(player, instanceId, "LevelTooLow")
 	end
 
 	local capacity = GameConfig.GetPenCapacity(pen.StructureId, stockId)
 	if capacity < 1 then
-		self.ActionFailed:Fire(player, instanceId, "WrongPen")
-		return false
+		return self:_refuse(player, instanceId, "WrongPen")
 	end
 
 	-- As many as fit, or as many as are held. Stocking a part-full pen is
@@ -819,15 +678,13 @@ function AnimalService:TryStock(player: Player, instanceId: string): boolean
 	local count = math.min(capacity, PlayerDataService:GetItemCount(player, stockId))
 
 	if count < 1 then
-		self.ActionFailed:Fire(player, instanceId, "NoLivestock")
-		return false
+		return self:_refuse(player, instanceId, "NoLivestock")
 	end
 
 	-- Atomic: the livestock is consumed before the herd exists, so a spammed
 	-- prompt cannot stock two pens from one batch.
 	if not PlayerDataService:RemoveItem(player, stockId, count) then
-		self.ActionFailed:Fire(player, instanceId, "NoLivestock")
-		return false
+		return self:_refuse(player, instanceId, "NoLivestock")
 	end
 
 	local now = os.time()
@@ -892,8 +749,7 @@ function AnimalService:TryFeed(player: Player, instanceId: string): boolean
 	local count = herdCount(entry)
 
 	if Husbandry.GetFeedRemaining(fedUntil, now) > animal.FeedDuration * (GameConfig.Husbandry.MaxFedWindows - 1) then
-		self.ActionFailed:Fire(player, instanceId, "FeedFull")
-		return false
+		return self:_refuse(player, instanceId, "FeedFull")
 	end
 
 	local cost = Husbandry.GetFeedCost(entry.AnimalId, count)
@@ -901,8 +757,7 @@ function AnimalService:TryFeed(player: Player, instanceId: string): boolean
 	-- Atomic, and before any timestamp moves: a refused feed must leave the
 	-- pen exactly as it was.
 	if not PlayerDataService:RemoveItem(player, animal.Feed.ItemId, cost) then
-		self.ActionFailed:Fire(player, instanceId, "NotEnoughFeed")
-		return false
+		return self:_refuse(player, instanceId, "NotEnoughFeed")
 	end
 
 	--[[
@@ -969,8 +824,7 @@ function AnimalService:TryCollect(player: Player, instanceId: string): boolean
 	end
 
 	if not GameConfig.HasProduce(entry.AnimalId) then
-		self.ActionFailed:Fire(player, instanceId, "NoProduce")
-		return false
+		return self:_refuse(player, instanceId, "NoProduce")
 	end
 
 	local now = os.time()
@@ -1006,8 +860,7 @@ function AnimalService:TryCollect(player: Player, instanceId: string): boolean
 	local payable = cyclesThatFit(player, entry.AnimalId, cycles, count)
 
 	if payable < 1 then
-		self.ActionFailed:Fire(player, instanceId, "InventoryFull")
-		return false
+		return self:_refuse(player, instanceId, "InventoryFull")
 	end
 
 	local totals = Husbandry.GetProduceTotals(entry.AnimalId, payable, count)
@@ -1050,15 +903,13 @@ function AnimalService:TrySlaughter(player: Player, instanceId: string): boolean
 
 	local animal = GameConfig.GetAnimal(entry.AnimalId)
 	if not animal or #animal.Slaughter < 1 then
-		self.ActionFailed:Fire(player, instanceId, "NotSlaughterable")
-		return false
+		return self:_refuse(player, instanceId, "NotSlaughterable")
 	end
 
 	local now = os.time()
 
 	if not Husbandry.IsGrown(Husbandry.GetStage(entry.AnimalId, entry.StockedAt, now)) then
-		self.ActionFailed:Fire(player, instanceId, "NotGrown")
-		return false
+		return self:_refuse(player, instanceId, "NotGrown")
 	end
 
 	local stockId = entry.AnimalId
@@ -1090,8 +941,7 @@ function AnimalService:TrySlaughter(player: Player, instanceId: string): boolean
 	end
 
 	if not canHoldAll(player, combined) then
-		self.ActionFailed:Fire(player, instanceId, "InventoryFull")
-		return false
+		return self:_refuse(player, instanceId, "InventoryFull")
 	end
 
 	-- Guaranteed to pay every cycle, because the combined total fits.
@@ -1117,68 +967,6 @@ function AnimalService:TrySlaughter(player: Player, instanceId: string): boolean
 end
 
 --------------------------------------------------------------------------------
--- Prompt entry points
---------------------------------------------------------------------------------
-
---- Validates ownership, reach and cooldown once for both prompts.
-function AnimalService:_authorise(player: Player, pen): boolean
-	local owner = pen.Model:GetAttribute(GameConfig.StructureAttributes.OwnerUserId)
-
-	if owner ~= player.UserId then
-		return false
-	end
-
-	local body = pen.Model.PrimaryPart
-	if not body or not isWithinReach(player, body) then
-		return false
-	end
-
-	return self:_consumeInteraction(player)
-end
-
---- The contextual prompt. Mirrors _describeInteract exactly, so the action
---- taken is always the action the prompt offered.
-function AnimalService:_onPromptTriggered(player: Player, pen)
-	if not self:_authorise(player, pen) then
-		return
-	end
-
-	local entry = self:_getEntry(player, pen.InstanceId)
-	if not entry then
-		return
-	end
-
-	if not entry.AnimalId or entry.AnimalId == "" then
-		self:TryStock(player, pen.InstanceId)
-		return
-	end
-
-	local now = os.time()
-	local cycles = Husbandry.GetReadyCycles(
-		entry.AnimalId,
-		entry.StockedAt,
-		entry.LastCollectedAt,
-		entry.FedUntil,
-		herdCount(entry),
-		now
-	)
-
-	if cycles > 0 then
-		self:TryCollect(player, pen.InstanceId)
-	else
-		self:TryFeed(player, pen.InstanceId)
-	end
-end
-
-function AnimalService:_onCullTriggered(player: Player, pen)
-	if not self:_authorise(player, pen) then
-		return
-	end
-
-	self:TrySlaughter(player, pen.InstanceId)
-end
-
---------------------------------------------------------------------------------
 -- Pen lifecycle, driven by the placement service
 --------------------------------------------------------------------------------
 
@@ -1194,48 +982,21 @@ function AnimalService:_attach(player: Player, instanceId: string, entry, model:
 		return
 	end
 
-	local prompt = Instance.new("ProximityPrompt")
-	prompt.Name = PROMPT_NAME
-	prompt.ActionText = "Stock"
-	prompt.ObjectText = structure.Name
-	prompt.HoldDuration = 0
-	prompt.KeyboardKeyCode = Enum.KeyCode.E
-	prompt.MaxActivationDistance = GameConfig.Interaction.MaxActivationDistance
-	prompt.RequiresLineOfSight = false
 	--[[
-		Nudged up, because the cull prompt shares this part and Roblox draws
-		every prompt on a part in the same place. Without the offsets the two
-		sat on top of each other and neither was readable.
-	]]
-	prompt.UIOffset = Vector2.new(0, -GameConfig.Interaction.PromptStackOffset)
-	prompt.Parent = body
+		The pen's prompt is StructureBuilder's, because every structure has
+		one. This service only writes its ObjectText.
 
-	--[[
-		A different key AND a hold. Slaughtering is irreversible and sits on a
-		building the player will walk up to dozens of times to collect eggs,
-		so it must not share a gesture with collecting them.
+		This building is why the panel exists: four actions against a prompt's
+		one gesture meant two prompts on two keys, the destructive one held,
+		drawn on top of each other until a pixel offset pulled them apart -
+		and even then the pen could not offer a CHOICE of animal.
 	]]
-	local cull = Instance.new("ProximityPrompt")
-	cull.Name = CULL_PROMPT_NAME
-	cull.ActionText = "Slaughter"
-	cull.ObjectText = ""
-	cull.Enabled = false
-	cull.HoldDuration = GameConfig.Interaction.DestructiveHoldDuration
-	cull.KeyboardKeyCode = Enum.KeyCode.X
-	cull.MaxActivationDistance = GameConfig.Interaction.MaxActivationDistance
-	cull.RequiresLineOfSight = false
-	cull.UIOffset = Vector2.new(0, GameConfig.Interaction.PromptStackOffset)
-	cull.Parent = body
-
 	local pen = {
 		InstanceId = instanceId,
 		StructureId = entry.StructureId,
 		Model = model,
 		Connections = {},
 		HerdEntityId = nil,
-		-- Deliberately nil, so the first refresh always writes.
-		PromptKey = nil,
-		CullPromptKey = nil,
 		-- Whether this hungry spell has already been announced.
 		HungryNoticed = false,
 	}
@@ -1246,20 +1007,6 @@ function AnimalService:_attach(player: Player, instanceId: string, entry, model:
 		self._pens[player] = pens
 	end
 	pens[instanceId] = pen
-
-	table.insert(
-		pen.Connections,
-		prompt.Triggered:Connect(function(triggering: Player)
-			self:_onPromptTriggered(triggering, pen)
-		end)
-	)
-
-	table.insert(
-		pen.Connections,
-		cull.Triggered:Connect(function(triggering: Player)
-			self:_onCullTriggered(triggering, pen)
-		end)
-	)
 
 	if entry.AnimalId and entry.AnimalId ~= "" and GameConfig.GetAnimal(entry.AnimalId) then
 		local now = os.time()

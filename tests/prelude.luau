@@ -885,6 +885,7 @@ moduleScript("TableUtil", "src/Shared/TableUtil.luau", Shared)
 moduleScript("Types", "src/Shared/Types.luau", Shared)
 moduleScript("Growth", "src/Shared/Growth.luau", Shared)
 HusbandryModule = moduleScript("Husbandry", "src/Shared/Husbandry.luau", Shared)
+BuildingActionsModule = moduleScript("BuildingActions", "src/Shared/BuildingActions.luau", Shared)
 moduleScript("Remotes", "src/Shared/Remotes.luau", Shared)
 moduleScript("RateLimiter", "src/Shared/RateLimiter.luau", Shared)
 BuildabilityModule = moduleScript("Buildability", "src/Shared/Buildability.luau", Shared)
@@ -908,6 +909,8 @@ AnimalFactoryModule = moduleScript("AnimalFactory", "src/Server/Pens/AnimalFacto
 PlayerDataServiceModule = moduleScript("PlayerDataService", "src/Server/Services/PlayerDataService.luau", ServicesFolder)
 FarmServiceModule = moduleScript("FarmService", "src/Server/Services/FarmService.luau", ServicesFolder)
 AnimalServiceModule = moduleScript("AnimalService", "src/Server/Services/AnimalService.luau", ServicesFolder)
+BuildingActionServiceModule =
+	moduleScript("BuildingActionService", "src/Server/Services/BuildingActionService.luau", ServicesFolder)
 MarketplaceServiceModule =
 	moduleScript("MarketplaceService", "src/Server/Services/MarketplaceService.luau", ServicesFolder)
 ShopServiceModule = moduleScript("ShopService", "src/Server/Services/ShopService.luau", ServicesFolder)

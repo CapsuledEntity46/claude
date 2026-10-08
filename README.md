@@ -15,6 +15,7 @@ src/
 │   ├── Growth.luau               Pure crop stage math, used by both server and client
 │   ├── Husbandry.luau            Pure maturity and produce math, likewise
 │   ├── Buildability.luau         One build-tree verdict for the server and the build menu
+│   ├── BuildingActions.luau      One action verdict for the panel and the server
 │   ├── Spatial.luau              Reach, splash falloff and blocking queries
 │   ├── Combat.luau               Health derivation and the damage/armour table
 │   ├── StatusEffects.luau        Pure burn/chill/poison derivation
@@ -47,6 +48,7 @@ src/
         ├── PlayerDataService.luau   The only module permitted to mutate player data
         ├── FarmService.luau         Planting, harvesting and boosting on placed farms
         ├── AnimalService.luau       Stocking, feeding, collecting and slaughtering in placed pens
+        ├── BuildingActionService.luau  One validated entry point for every action on a building
         ├── ShopService.luau         ProcessTransaction: buying and selling any item
         └── MarketplaceService.luau  Developer Product receipt processing
 
@@ -54,6 +56,7 @@ src/Client/                       → StarterPlayer.StarterPlayerScripts.Client
 ├── HudClient.client.luau         Resource strip, Level/XP, Inventory panel, Robux store
 ├── ShopClient.client.luau        Builds ShopGui; opens it from the ShopNPC prompt
 ├── BuildClient.client.luau       The build menu and the placement ghost
+├── SelectionClient.client.luau   Click a building: the panel of actions it has
 ├── CombatClient.client.luau      Health bars and target feedback
 ├── DefeatClient.client.luau      The defeat panel
 ├── EffectsClient.client.luau     Draws shots, which have no state to derive from
@@ -253,15 +256,16 @@ crops, timers and lock states with **zero remote traffic**:
 Model contract (`PlotBuilder` is the only module that knows this shape):
 
 ```
-Workspace/Gardens/Garden_<slot>   (Model, PrimaryPart = Base)
-├── Base   (Part)
-└── Plots  (Folder)
-    ├── Plot_1 (Model, PrimaryPart = Soil, carries the attributes above)
-    │   ├── Soil (Part)
-    │   │   └── Interact (ProximityPrompt)
-    │   └── Crop (Model, created/destroyed by PlotService)
-    └── Plot_2 ...
+Workspace/Structures/Farm_<instanceId>   (Model, PrimaryPart = Body)
+├── Body (Part, carries the attributes above)
+│   ├── Label  (BillboardGui -> Title)
+│   └── Manage (ProximityPrompt, opens the selection panel)
+└── Crop (Model, created/destroyed by FarmService)
 ```
+
+> The fixed six-slot garden is gone: a farm is a placed structure, and the one
+> prompt it carries opens its panel rather than acting. See §2c in
+> [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ### Interaction security
 

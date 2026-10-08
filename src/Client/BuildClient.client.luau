@@ -449,7 +449,7 @@ local function beginPlacing(structure)
 	selected = structure
 
 	ghost = Instance.new("Model")
-	ghost.Name = "BuildGhost"
+	ghost.Name = GameConfig.Selection.GhostName
 
 	local body = Instance.new("Part")
 	body.Name = "Body"

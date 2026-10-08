@@ -4649,6 +4649,144 @@ local function runTests()
 		end
 
 		------------------------------------------------------------------------
+		section("Husbandry: a hungry herd does not grow")
+		------------------------------------------------------------------------
+
+		--[[
+			Reported from play: "the chickens grow without feeding and I didn't
+			notice starvation; cows and pigs had starvation and died if not
+			fed". Both halves were true, and the arithmetic says why.
+
+			Maturity used to be derived from the stocking time alone, so the
+			question of whether an animal could be raised unfed came down to
+			an accident of two unrelated numbers - whether it matured faster
+			than it starved. A chicken matures in 120s and starves in 133; a
+			pig needs 300s and dies in 120. So feeding was mandatory for
+			livestock and optional for poultry, which is worse than it being
+			either, because the rule looked enforced.
+
+			A herd now only AGES while it is fed.
+		]]
+		do
+			local AnimalService = HUSBANDRY
+			local Husbandry = require(HusbandryModule)
+
+			--[[
+				First the thing that made this a lottery: for every animal,
+				being left alone must not be a viable way to raise it.
+			]]
+			for stockId, animal in GameConfig.Animals do
+				local archetype = GameConfig.GetArchetype(animal.ArchetypeId)
+				local net = archetype.MaxHealth * GameConfig.Husbandry.StarvationFractionPerSecond
+					- archetype.RegenPerSecond
+				local secondsToStarve = archetype.MaxHealth / net
+
+				check(
+					secondsToStarve < animal.MatureTime + GameConfig.Husbandry.StockingGrace,
+					`{stockId} starves in {math.floor(secondsToStarve)}s, inside the `
+						.. `{animal.MatureTime + GameConfig.Husbandry.StockingGrace}s it needs to be raised - `
+						.. `so neglect cannot outlast the raise`
+				)
+			end
+
+			local idler = newPlayer(5959, "Idler")
+			giveCharacter(idler, Vector3.new(0, 3, 0))
+			PlayersService.PlayerAdded:Fire(idler)
+			PDS:AddXP(idler, 100000)
+
+			local coop = makePen(idler, "Coop", -40, 40)
+			local chick = GameConfig.GetAnimal("Chick")
+			local count = GameConfig.GetPenCapacity("Coop", "Chick")
+
+			PDS:AddItem(idler, "Chick", count)
+			advance(1)
+			pokePen(idler, coop)
+
+			local stockedAt = PDS:GetData(idler).Structures[coop].StockedAt
+
+			--[[
+				Run past the grace and well past the maturity time, feeding
+				nothing. This is the exact case that used to produce a grown
+				flock: 120s of maturity against 133s of starvation.
+			]]
+			local hungry = nil
+			local listener = AnimalService.HerdHungry:Connect(function()
+				hungry = true
+			end)
+
+			--[[
+				Past the grace first. The grace is real fed time, so the herd
+				legitimately ages through it - for a chicken that is half its
+				maturity - and then the clock should stop.
+			]]
+			advance(GameConfig.Husbandry.StockingGrace + GameConfig.Husbandry.TickInterval * 2)
+
+			check(hungry == true, "going hungry is announced rather than left to be discovered")
+
+			local frozenAt = penOf(idler, coop):GetAttribute("AnimalStage")
+			check(not Husbandry.IsGrown(frozenAt), `the flock is not grown when the grace runs out ({frozenAt})`)
+
+			--[[
+				Now past its whole maturity time again, still unfed - but not
+				so far that they starve, because the point here is the frozen
+				clock rather than the death. The span is derived from the
+				starvation rate so that retuning a herd's health cannot
+				silently turn this into a test about a dead flock.
+			]]
+			local birdArchetype = GameConfig.GetArchetype(chick.ArchetypeId)
+			local netLoss = birdArchetype.MaxHealth * GameConfig.Husbandry.StarvationFractionPerSecond
+				- birdArchetype.RegenPerSecond
+			local safeHungrySpan = math.floor(birdArchetype.MaxHealth / netLoss / 2)
+
+			check(
+				safeHungrySpan > chick.MatureTime // 2,
+				"a flock can go hungry for a good part of its maturity time without dying"
+			)
+
+			advance(safeHungrySpan)
+
+			checkEqual(
+				penOf(idler, coop):GetAttribute("AnimalStage"),
+				frozenAt,
+				"and a maturity time's worth of hunger later, it has not aged a day"
+			)
+			check(
+				not Husbandry.IsGrown(penOf(idler, coop):GetAttribute("AnimalStage")),
+				"so a flock cannot be raised by neglect"
+			)
+
+			--[[
+				Because the stocking time was pushed forward by the hungry
+				span: the herd is no older than the fed time it has had, which
+				is none.
+			]]
+			check(
+				PDS:GetData(idler).Structures[coop].StockedAt > stockedAt,
+				"the age clock was held rather than allowed to run while hungry"
+			)
+			checkEqual(
+				AnimalService:TrySlaughter(idler, coop),
+				false,
+				"so it cannot be slaughtered either - neglect raises nothing"
+			)
+
+			-- Feeding restarts the clock, and then it does grow.
+			PDS:AddItem(idler, chick.Feed.ItemId, Husbandry.GetFeedCost("Chick", count) * 20)
+			checkEqual(AnimalService:TryFeed(idler, coop), true, "feeding them restarts the clock")
+
+			advance(chick.MatureTime + GameConfig.Husbandry.TickInterval + 1)
+			checkEqual(
+				penOf(idler, coop):GetAttribute("AnimalStage"),
+				"Grown",
+				"and a fed flock grows up in its maturity time"
+			)
+
+			listener:Disconnect()
+			PlayersService.PlayerRemoving:Fire(idler)
+			idler.Parent = nil
+		end
+
+		------------------------------------------------------------------------
 		section("Husbandry: neglect is not undone by logging out")
 		------------------------------------------------------------------------
 

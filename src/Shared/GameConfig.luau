@@ -1277,6 +1277,21 @@ GameConfig.Interaction = {
 		gesture rather than the same one slightly too often.
 	]]
 	DestructiveHoldDuration = 1.2,
+
+	--[[
+		Vertical separation, in pixels, for prompts sharing one part.
+
+		Roblox draws every prompt on a part at the same screen position, so a
+		pen's Collect and Slaughter prompts landed on top of each other -
+		reported from play as "the collect and slaughter buttons overlap and
+		it is difficult to select". They are on different keys, so the input
+		was never ambiguous; the DISPLAY was, which is just as bad when one of
+		the two destroys a herd.
+
+		A building wanting more than two actions needs the selection panel in
+		docs/ROADMAP.md rather than a third offset.
+	]]
+	PromptStackOffset = 34,
 }
 
 --------------------------------------------------------------------------------

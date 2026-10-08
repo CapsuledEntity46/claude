@@ -572,6 +572,19 @@ function DataSchema.Normalize(data: { [string]: any }): { [string]: any }
 				local collected = math.floor(toFiniteNumber(entry.LastCollectedAt) or entry.StockedAt)
 				entry.LastCollectedAt = math.clamp(collected, math.min(earliest, now), now)
 
+				--[[
+					How far the hungry-time charge has been taken.
+
+					Dropped rather than clamped when it is in the future,
+					because it is a "already billed up to here" marker: a
+					value ahead of the clock would suppress the next charge
+					entirely, which is the one failure mode worth avoiding -
+					the herd would stop ageing and never starve. Nil simply
+					means the charge restarts from when the feed ran out.
+				]]
+				local charged = toFiniteNumber(entry.HungryChargedTo)
+				entry.HungryChargedTo = if charged then math.min(math.floor(charged), now) else nil
+
 				local herdMax = GameConfig.Archetypes[animal.ArchetypeId].MaxHealth
 				local herdHealth = toFiniteNumber(entry.HerdHealth)
 

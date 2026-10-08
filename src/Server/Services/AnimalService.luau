@@ -139,8 +139,6 @@ AnimalService.FrameworkVersion = 15
 AnimalService._started = false
 AnimalService._pens = {} :: { [Player]: any }
 AnimalService._lastInteraction = {} :: { [Player]: number }
---- When the husbandry loop last ran, so starvation bills real elapsed time.
-AnimalService._lastTickAt = nil :: number?
 
 --- (player, instanceId, stockId, count)
 AnimalService.Stocked = Signal.new()
@@ -150,6 +148,8 @@ AnimalService.Fed = Signal.new()
 AnimalService.Collected = Signal.new()
 --- (player, instanceId, stockId, totals, count)
 AnimalService.Slaughtered = Signal.new()
+--- (player, instanceId, stockId) - the feed ran out; fires once per spell
+AnimalService.HerdHungry = Signal.new()
 --- (player, instanceId, stockId) - the herd died, by starvation or by raid
 AnimalService.HerdLost = Signal.new()
 --- (player, instanceId, reason)
@@ -295,6 +295,7 @@ local function clearHerd(entry)
 	entry.AnimalCount = nil
 	entry.FedUntil = nil
 	entry.LastCollectedAt = nil
+	entry.HungryChargedTo = nil
 	entry.HerdHealth = nil
 	entry.HerdDamagedAt = nil
 end
@@ -540,14 +541,21 @@ function AnimalService:_describeInteract(player: Player, pen, entry, now: number
 	local feedName = if feedItem then feedItem.Name else animal.Feed.ItemId
 	local cost = Husbandry.GetFeedCost(entry.AnimalId, count)
 
+	--[[
+		Hunger is said out loud, because nothing else shows it: a hungry herd
+		stops growing, stops laying and starts dying, and all three are
+		invisible until the animals are gone.
+	]]
+	local prefix = if Husbandry.IsFed(entry.FedUntil, now) then "" else "HUNGRY - "
+
 	-- Feed is offered whenever there is room on the clock for another window,
 	-- hungry or not, so a player can stock up before logging off.
 	if Husbandry.GetFeedRemaining(entry.FedUntil, now) <= animal.FeedDuration * (GameConfig.Husbandry.MaxFedWindows - 1) then
 		if PlayerDataService:HasItem(player, animal.Feed.ItemId, cost) then
-			return true, "Feed", `{feedName} x{cost}`
+			return true, "Feed", `{prefix}{feedName} x{cost}`
 		end
 
-		return true, "Feed", `Needs {feedName} x{cost}`
+		return true, "Feed", `{prefix}Needs {feedName} x{cost}`
 	end
 
 	-- Fed as far ahead as allowed, so the only thing left is to wait. Say
@@ -768,10 +776,13 @@ function AnimalService:TryStock(player: Player, instanceId: string): boolean
 	entry.AnimalCount = count
 	entry.FedUntil = now + GameConfig.Husbandry.StockingGrace
 	entry.LastCollectedAt = now
+	entry.HungryChargedTo = nil
 	entry.HerdHealth = nil
 	entry.HerdDamagedAt = nil
 
 	PlayerDataService:IncrementStat(player, "TotalAnimalsRaised", count)
+
+	pen.HungryNoticed = false
 
 	self:_projectHerd(player, pen, entry, now)
 	self.Stocked:Fire(player, instanceId, stockId, count)
@@ -800,6 +811,22 @@ function AnimalService:TryFeed(player: Player, instanceId: string): boolean
 	end
 
 	local now = os.time()
+
+	--[[
+		Settle whatever they have already gone hungry for, before anything
+		else. It is time that passed whether or not this feeding succeeds, and
+		charging it here rather than afterwards is what stops a feeding from
+		retroactively paying for the gap.
+
+		It can also kill them - a herd left long enough does not get to be
+		rescued - in which case there is nothing left to feed.
+	]]
+	self:_settleHunger(player, pen, entry, now)
+
+	if not entry.AnimalId or entry.AnimalId == "" then
+		return false
+	end
+
 	local fedUntil = tonumber(entry.FedUntil) or 0
 	local count = herdCount(entry)
 
@@ -818,32 +845,22 @@ function AnimalService:TryFeed(player: Player, instanceId: string): boolean
 	end
 
 	--[[
-		Settle the hungry stretch before extending the clock.
+		Push the produce clock past the hungry stretch, BEFORE extending the
+		feed window.
 
-		The gap between the feed running out and now produced nothing, so the
-		produce clock is pushed forward by exactly its length. Resetting it to
-		`now` instead would be simpler and wrong: it would also throw away
-		batches the herd legitimately earned BEFORE the feed ran out. Leaving
-		it alone would be worse - the new fed window would retroactively pay
-		for the whole starved gap, which is a feed-once-a-day exploit.
+		This is the one moment it is needed. While the herd was hungry the
+		window ended at the old FedUntil, so the gap paid nothing on its own -
+		but extending FedUntil past `now` makes the whole span productive
+		again, gap included, which is a feed-once-a-day exploit.
 
-		This is the same move as backdating PlantedAt for a growth boost:
-		adjust the timestamp the state derives from, never the derived value.
+		Pushed from the EFFECTIVE window start rather than the raw
+		LastCollectedAt, because the two differ whenever maturity is the later
+		of the pair, and pushing the raw value would be absorbed by that clamp
+		and credit the gap after all.
 	]]
 	local starved = math.max(now - fedUntil, 0)
 
 	if starved > 0 then
-		--[[
-			Pushed from the EFFECTIVE window start, not from the raw
-			LastCollectedAt.
-
-			Those differ whenever the herd has not finished growing, because
-			the window start is clamped forward to the maturity time - and
-			pushing the raw value would then be absorbed by that clamp and do
-			nothing at all, crediting the whole starved gap. That was a real
-			bug, found by writing the test for the gap before trusting the
-			arithmetic.
-		]]
 		local clock = Husbandry.GetWindowStart(entry.AnimalId, entry.StockedAt, entry.LastCollectedAt)
 		entry.LastCollectedAt = math.min(clock + starved, now)
 	end
@@ -852,6 +869,10 @@ function AnimalService:TryFeed(player: Player, instanceId: string): boolean
 		math.max(now, fedUntil) + animal.FeedDuration,
 		Husbandry.GetFeedCeiling(entry.AnimalId, now)
 	)
+
+	-- The hungry spell is over, so the next one is worth announcing again.
+	pen.HungryNoticed = false
+	entry.HungryChargedTo = nil
 
 	self:_projectHerd(player, pen, entry, now)
 	self.Fed:Fire(player, instanceId, entry.AnimalId, entry.FedUntil)
@@ -1120,6 +1141,12 @@ function AnimalService:_attach(player: Player, instanceId: string, entry, model:
 	prompt.KeyboardKeyCode = Enum.KeyCode.E
 	prompt.MaxActivationDistance = GameConfig.Interaction.MaxActivationDistance
 	prompt.RequiresLineOfSight = false
+	--[[
+		Nudged up, because the cull prompt shares this part and Roblox draws
+		every prompt on a part in the same place. Without the offsets the two
+		sat on top of each other and neither was readable.
+	]]
+	prompt.UIOffset = Vector2.new(0, -GameConfig.Interaction.PromptStackOffset)
 	prompt.Parent = body
 
 	--[[
@@ -1136,6 +1163,7 @@ function AnimalService:_attach(player: Player, instanceId: string, entry, model:
 	cull.KeyboardKeyCode = Enum.KeyCode.X
 	cull.MaxActivationDistance = GameConfig.Interaction.MaxActivationDistance
 	cull.RequiresLineOfSight = false
+	cull.UIOffset = Vector2.new(0, GameConfig.Interaction.PromptStackOffset)
 	cull.Parent = body
 
 	local pen = {
@@ -1147,6 +1175,8 @@ function AnimalService:_attach(player: Player, instanceId: string, entry, model:
 		-- Deliberately nil, so the first refresh always writes.
 		PromptKey = nil,
 		CullPromptKey = nil,
+		-- Whether this hungry spell has already been announced.
+		HungryNoticed = false,
 	}
 
 	local pens = self._pens[player]
@@ -1179,9 +1209,12 @@ function AnimalService:_attach(player: Player, instanceId: string, entry, model:
 			After the projection, because settling needs the herd entity the
 			projection registers - and the herd may not survive it, which is
 			the point: a flock left hungry over a long logout is dead when
-			its owner comes back.
+			its owner comes back, rather than healed by the absence.
 		]]
-		self:_settleNeglect(pen, entry, now)
+		if self:_settleHunger(player, pen, entry, now) > 0 and entry.AnimalId ~= "" then
+			-- The timestamps moved, so the projection is now stale.
+			self:_projectHerd(player, pen, entry, now)
+		end
 	else
 		clearHerd(entry)
 		self:_projectEmpty(player, pen)
@@ -1251,39 +1284,88 @@ function AnimalService:_starve(pen, elapsed: number)
 end
 
 --[[
-	Charges starvation for time that passed while nobody was here.
+	Settles a span the herd spent hungry: it ages no further, earns nothing,
+	and loses health for it.
 
-	The tick only walks pens belonging to an online player, but health
-	REGENERATES from elapsed time whether or not anyone is watching - the
-	registry derives it from HealthBase and the time since DamagedAt, both of
-	which are persisted. So without this, logging out HEALED a starving herd,
-	and neglect could be reset indefinitely by taking a break: the only cost
-	of never feeding was forgone produce, which for a pig is nothing at all.
+	ONE function for three callers - the tick, a rejoin, and the moment before
+	a feeding - because "what does hungry time cost" must not have three
+	different answers. Idempotent through `HungryChargedTo`, which records how
+	far the charge has been taken, so no span is billed twice however often
+	this runs.
 
-	Offline time has to cost what online time costs. The produce clock already
-	gets this right by refusing to pay for the unfed gap; starvation was the
-	one part of the mechanic treating offline time asymmetrically.
+	FREEZING THE AGE IS THE POINT, and it is the fix for a rule that was real
+	for cattle and absent for poultry. Reported from play: "the chickens grow
+	without feeding, and I didn't notice starvation; cows and pigs starved and
+	died". Both halves were true and the arithmetic says why - a chicken
+	matures in 120s and takes 133s to starve, so an unfed flock grew up with
+	thirteen seconds to spare, while a pig needs 300s to mature and dies in
+	120. Feeding was mandatory for livestock and optional for birds, which is
+	worse than it being either.
 
-	Charged from the later of the feed running out and the damage already
-	taken, so no span is ever billed twice.
+	So the herd's age advances only while it is fed. Maturity is still derived
+	from StockedAt and nothing accumulates - the hungry span is simply pushed
+	into the timestamp the derivation already reads, exactly as a growth boost
+	backdates PlantedAt rather than writing a stage. The produce clock moves
+	with it for the same reason, which also makes the clock correct the whole
+	time a herd is hungry instead of only after the next feeding.
+
+	Offline spans go through here too. The tick only walks pens of an online
+	player, but health REGENERATES from elapsed time whether or not anyone is
+	watching, so without charging the absence, logging out HEALED a starving
+	herd and neglect could be reset by taking a break.
 ]]
-function AnimalService:_settleNeglect(pen, entry, now: number)
-	if not pen.HerdEntityId then
-		return
-	end
-
+function AnimalService:_settleHunger(player: Player, pen, entry, now: number): number
 	local fedUntil = tonumber(entry.FedUntil) or 0
 
 	if now <= fedUntil then
-		return
+		return 0
 	end
 
-	local chargedTo = math.max(fedUntil, tonumber(entry.HerdDamagedAt) or 0)
-	local unpaid = now - chargedTo
+	local chargedTo = math.max(fedUntil, tonumber(entry.HungryChargedTo) or 0)
+	local hungry = now - chargedTo
 
-	if unpaid > 0 then
-		self:_starve(pen, unpaid)
+	if hungry <= 0 then
+		return 0
 	end
+
+	entry.HungryChargedTo = now
+
+	--[[
+		Hungry time does not count toward growing up - but only WHILE the herd
+		is still growing.
+
+		Once it is grown, StockedAt's remaining job is to say when that
+		happened, and pushing it would drag GrownAt forward past the produce
+		clock and quietly confiscate batches the herd had already earned while
+		fed. A test caught exactly that: a flock that banked four batches and
+		then went hungry was down to three.
+
+		The produce clock is NOT touched here. It needs no protection from the
+		gap, because the produce window already ends at `min(now, FedUntil)` -
+		hungry time contributes nothing by construction. It only needs
+		adjusting at the moment feeding EXTENDS that window, which is where
+		TryFeed does it.
+	]]
+	if not Husbandry.IsGrown(Husbandry.GetStage(entry.AnimalId, entry.StockedAt, now)) then
+		entry.StockedAt = math.min((tonumber(entry.StockedAt) or now) + hungry, now)
+	end
+
+	--[[
+		Said once per hungry spell, not once per tick.
+
+		"I didn't notice starvation" was the other half of the report, and it
+		is the same bug as a prompt that declines silently: the herd stops
+		growing, stops laying and starts dying, and every one of those is
+		invisible until the animals are gone.
+	]]
+	if not pen.HungryNoticed then
+		pen.HungryNoticed = true
+		self.HerdHungry:Fire(player, pen.InstanceId, entry.AnimalId)
+	end
+
+	self:_starve(pen, hungry)
+
+	return hungry
 end
 
 --[[
@@ -1296,28 +1378,22 @@ end
 function AnimalService:_tick()
 	local now = os.time()
 
-	--[[
-		REAL elapsed time, not the configured interval.
-
-		A late tick must bill what actually passed. GameConfig.StatusEffects
-		states this rule in prose about exactly this arithmetic - never
-		`PerSecond * TickInterval`, because a server that stutters would heal
-		your enemies for free - and the asymmetry is sharper here, because
-		regeneration on the same entity IS derived from real elapsed time. A
-		tick late by more than about twenty seconds would be a net heal for a
-		starving flock, and sustained stutter would make one immortal.
-	]]
-	local interval = if self._lastTickAt
-		then math.max(now - self._lastTickAt, 0)
-		else GameConfig.Husbandry.TickInterval
-
-	self._lastTickAt = now
-
 	for player, pens in self._pens do
 		for instanceId, pen in pens do
 			local entry = self:_getEntry(player, instanceId)
 
 			if entry and entry.AnimalId and entry.AnimalId ~= "" then
+				--[[
+					Hunger first, because it moves the very timestamps the
+					stage is derived from - and because it can kill the herd,
+					after which there is nothing left to project.
+				]]
+				self:_settleHunger(player, pen, entry, now)
+
+				if not entry.AnimalId or entry.AnimalId == "" then
+					continue
+				end
+
 				local stage = Husbandry.GetStage(entry.AnimalId, entry.StockedAt, now)
 
 				if stage ~= pen.Model:GetAttribute(ANIMAL_ATTR.Stage) then
@@ -1334,12 +1410,7 @@ function AnimalService:_tick()
 					self:_refreshPrompts(player, pen)
 				end
 
-				if not Husbandry.IsFed(entry.FedUntil, now) then
-					-- Only the part of the interval the herd was actually
-					-- hungry for, so the tick the feed lapses in is not
-					-- billed in full.
-					self:_starve(pen, math.min(interval, now - (tonumber(entry.FedUntil) or 0)))
-				end
+
 			elseif entry then
 				--[[
 					An EMPTY pen needs refreshing too, and forgetting it was a
@@ -1379,6 +1450,7 @@ local ACTION_REFUSALS = {
 	InventoryFull = "Your inventory is full, so the animals stay in the pen.",
 }
 
+local HERD_HUNGRY_NOTICE = "Your herd is hungry. They stop growing and laying while unfed, and will starve if left."
 local HERD_LOST_NOTICE = "Your herd has died. A hungry herd starves, and a raided one does not come back."
 
 function AnimalService:Start()
@@ -1480,6 +1552,17 @@ function AnimalService:Start()
 		if message then
 			notice:FireClient(player, message)
 		end
+	end)
+
+	--[[
+		Hunger is announced, because every consequence of it is invisible:
+		the herd stops growing, stops laying and starts dying, and none of
+		those shows up until the animals are gone. Reported from play as "I
+		didn't notice starvation", which is the same class of bug as a prompt
+		that declines without saying why.
+	]]
+	self.HerdHungry:Connect(function(player: Player)
+		notice:FireClient(player, HERD_HUNGRY_NOTICE)
 	end)
 
 	-- Losing a herd is the kind of thing a player must not have to infer from

@@ -385,6 +385,21 @@ looks enforced and is not:
   whole raise and a barn could be taken to slaughter having never been fed.
   The grace is now a short fixed `StockingGrace`, asserted to be shorter than
   the fastest animal's maturity.
+- **Maturity ignored the feed entirely**, which made "can this be raised
+  unfed?" an accident of two unrelated numbers — whether the animal matured
+  faster than it starved. Reported from play: *"the chickens grow without
+  feeding and I didn't notice starvation; cows and pigs had starvation and
+  died."* Both halves were true. A chicken matures in 120s and starves in 133,
+  so an unfed flock grew up with thirteen seconds to spare; a pig needs 300s
+  and dies in 120. Feeding was mandatory for livestock and optional for
+  poultry, which is worse than it being either, because the rule looked
+  enforced. **A herd now only ages while it is fed** — the hungry span is
+  pushed into `StockedAt`, so maturity stays derived from one timestamp and
+  nothing accumulates. A test now asserts, for every animal, that starvation
+  arrives before the raise could finish.
+- **Going hungry was silent.** A hungry herd stops growing, stops laying and
+  starts dying, and all three were invisible until the animals were gone. It
+  now fires a notice once per spell and the prompt reads `HUNGRY`.
 - Starvation was applied only by the tick, which runs for online players,
   while health **regenerates from elapsed time** whether or not anyone is
   watching. Logging out healed a starving herd, so neglect could be reset by
@@ -426,6 +441,13 @@ looks enforced and is not:
 >   prompt too many, and the selection panel in §2c is where it belongs. The
 >   service is written for it: the prompts are a thin shell over
 >   `TryStock`/`TryFeed`/`TryCollect`/`TrySlaughter`.
+>
+>   Reported from play: the two prompts **drew on top of each other**, because
+>   Roblox puts every prompt on a part in the same screen position. They are
+>   separated by `Interaction.PromptStackOffset` now. The input was never
+>   ambiguous — the keys differ — but the display was, and one of the two
+>   destroys a herd. A third action on one building would need the panel
+>   rather than a third offset.
 
 ### 4. Fishing ⬜
 

@@ -1,6 +1,6 @@
 # Tests
 
-A headless test suite for the server and shared code: **1910 assertions**, no
+A headless test suite for the server and shared code: **1935 assertions**, no
 Roblox Studio required.
 
 ## Why this exists

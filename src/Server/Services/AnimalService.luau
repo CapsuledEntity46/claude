@@ -87,6 +87,7 @@ local DamageableService = require(script.Parent.Parent.Combat.DamageableService)
 local PlacementService = require(script.Parent.Parent.World.PlacementService)
 local PlayerDataService = require(script.Parent.PlayerDataService)
 local AnimalFactory = require(script.Parent.Parent.Pens.AnimalFactory)
+local StructureBuilder = require(script.Parent.Parent.World.StructureBuilder)
 
 local ANIMAL_ATTR = GameConfig.AnimalAttributes
 local EMPTY_STAGE = GameConfig.Husbandry.EmptyStage
@@ -503,6 +504,22 @@ function AnimalService:_describeInteract(player: Player, pen, entry, now: number
 	end
 
 	local count = herdCount(entry)
+
+	--[[
+		How much feed is left, in whole minutes, carried on EVERY branch below.
+
+		Computed up here rather than in the feed branch because the prompt
+		shows whichever action is most useful, and collecting outranks
+		feeding - so a starving flock with eggs waiting was advertising
+		"Collect" and saying nothing at all about the hunger. The state the
+		player needs is the same whatever the next action happens to be.
+
+		Quantised to minutes: this text replicates, and a per-second countdown
+		on every pen would be traffic in exchange for precision nobody needs.
+	]]
+	local remaining = Husbandry.GetFeedRemaining(entry.FedUntil, now)
+	local fed = if remaining > 0 then `fed {math.max(math.ceil(remaining / 60), 1)}m` else "HUNGRY"
+
 	local cycles =
 		Husbandry.GetReadyCycles(entry.AnimalId, entry.StockedAt, entry.LastCollectedAt, entry.FedUntil, count, now)
 
@@ -531,10 +548,10 @@ function AnimalService:_describeInteract(player: Player, pen, entry, now: number
 		end
 
 		if payable < 1 then
-			return false, "Full", `No room for {table.concat(parts, ", ")}`
+			return false, "Full", `No room for {table.concat(parts, ", ")} - {fed}`
 		end
 
-		return true, "Collect", table.concat(parts, ", ")
+		return true, "Collect", `{table.concat(parts, ", ")} - {fed}`
 	end
 
 	local feedItem = GameConfig.GetItem(animal.Feed.ItemId)
@@ -542,36 +559,35 @@ function AnimalService:_describeInteract(player: Player, pen, entry, now: number
 	local cost = Husbandry.GetFeedCost(entry.AnimalId, count)
 
 	--[[
-		Hunger is said out loud, because nothing else shows it: a hungry herd
-		stops growing, stops laying and starts dying, and all three are
-		invisible until the animals are gone.
+		Feed can be stacked two windows deep, so a hungry herd that has just
+		been fed is STILL offered Feed - correctly, there is room for another
+		window - and with no countdown on it that looked exactly like a button
+		that had not worked. The number going up is the acknowledgement.
 	]]
-	local prefix = if Husbandry.IsFed(entry.FedUntil, now) then "" else "HUNGRY - "
-
 	-- Feed is offered whenever there is room on the clock for another window,
 	-- hungry or not, so a player can stock up before logging off.
-	if Husbandry.GetFeedRemaining(entry.FedUntil, now) <= animal.FeedDuration * (GameConfig.Husbandry.MaxFedWindows - 1) then
+	if remaining <= animal.FeedDuration * (GameConfig.Husbandry.MaxFedWindows - 1) then
 		if PlayerDataService:HasItem(player, animal.Feed.ItemId, cost) then
-			return true, "Feed", `{prefix}{feedName} x{cost}`
+			return true, "Feed", `{feedName} x{cost} - {fed}`
 		end
 
-		return true, "Feed", `{prefix}Needs {feedName} x{cost}`
+		return true, "Feed", `Needs {feedName} x{cost} - {fed}`
 	end
 
 	-- Fed as far ahead as allowed, so the only thing left is to wait. Say
 	-- what for: growing up, or the next batch.
 	if not Husbandry.IsGrown(Husbandry.GetStage(entry.AnimalId, entry.StockedAt, now)) then
-		local remaining = Husbandry.GetTimeToGrown(entry.AnimalId, entry.StockedAt, now)
-		return false, "Growing", `{animal.Name} x{count} - {Growth.FormatTimeRemaining(remaining)}`
+		local toGrown = Husbandry.GetTimeToGrown(entry.AnimalId, entry.StockedAt, now)
+		return false, "Growing", `{animal.Name} x{count} - {Growth.FormatTimeRemaining(toGrown)}, {fed}`
 	end
 
 	if not GameConfig.HasProduce(entry.AnimalId) then
 		-- A slaughter-only animal that is grown and fed: there is nothing to
 		-- tap for, and the cull prompt is the action.
-		return false, "Ready", `{animal.Name} x{count}`
+		return false, "Ready", `{animal.Name} x{count} - {fed}`
 	end
 
-	return false, "Fed", `{animal.Name} x{count}`
+	return false, "Fed", `{animal.Name} x{count} - {fed}`
 end
 
 --[[
@@ -583,6 +599,49 @@ end
 	comparison, not a round of replication - the same discipline as rebuilding
 	a crop's visual only on a stage transition.
 ]]
+--[[
+	Puts the herd's state on the pen's name plate.
+
+	Reported from play as "the animals only get hungry and fed once, after
+	that there is no starvation, but the feed button still appears". The
+	mechanic was working - a test now runs three hunger/feed cycles and
+	checks each one announces itself and costs health - but there was no way
+	to SEE it. Feed can be stacked two windows deep, so pressing E on a
+	hungry herd leaves the prompt still offering Feed, which reads as a
+	button that did nothing, and then nothing visibly happens for the ten
+	minutes the feed lasts.
+
+	So the pen says how it is doing from across the base, and the countdown
+	is the acknowledgement that feeding worked. Quantised to whole minutes:
+	the text is replicated, and a per-second countdown on every pen would be
+	traffic in exchange for precision nobody needs.
+]]
+function AnimalService:_refreshLabel(pen, entry, now: number)
+	local body = pen.Model.PrimaryPart
+	local billboard = if body then body:FindFirstChild(StructureBuilder.LabelName) else nil
+	local title = if billboard then billboard:FindFirstChild(StructureBuilder.TitleName) else nil
+
+	if not title then
+		return
+	end
+
+	local structure = GameConfig.GetStructure(pen.StructureId)
+	local text = if structure then structure.Name else pen.StructureId
+
+	if entry and entry.AnimalId and entry.AnimalId ~= "" then
+		if Husbandry.IsFed(entry.FedUntil, now) then
+			local minutes = math.max(math.ceil(Husbandry.GetFeedRemaining(entry.FedUntil, now) / 60), 1)
+			text = `{text} - fed {minutes}m`
+		else
+			text = `{text} - HUNGRY`
+		end
+	end
+
+	if title.Text ~= text then
+		title.Text = text
+	end
+end
+
 function AnimalService:_refreshPrompts(player: Player, pen)
 	local body = pen.Model.PrimaryPart
 	if not body then
@@ -591,6 +650,8 @@ function AnimalService:_refreshPrompts(player: Player, pen)
 
 	local entry = self:_getEntry(player, pen.InstanceId)
 	local now = os.time()
+
+	self:_refreshLabel(pen, entry, now)
 
 	local enabled, action, object = self:_describeInteract(player, pen, entry, now)
 	local key = `{enabled}|{action}|{object}`

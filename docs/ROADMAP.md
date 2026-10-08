@@ -399,7 +399,23 @@ looks enforced and is not:
   arrives before the raise could finish.
 - **Going hungry was silent.** A hungry herd stops growing, stops laying and
   starts dying, and all three were invisible until the animals were gone. It
-  now fires a notice once per spell and the prompt reads `HUNGRY`.
+  now fires a notice once per spell.
+- **And feeding looked like it did nothing.** Reported next as *"the animals
+  only get hungry and fed once, after that there is no starvation, but the
+  feed button still appears."* The mechanic was working — a test now runs
+  three hunger/feed cycles and checks each announces itself and costs health —
+  but feed stacks two windows deep, so feeding a hungry herd correctly leaves
+  the prompt still offering Feed, and with nothing else on it that reads as a
+  button that failed. Every pen prompt now carries the feed state on whatever
+  action it is offering (collecting outranks feeding, so a starving flock with
+  eggs waiting was saying nothing about the hunger), and the pen's name plate
+  shows `fed 4m` or `HUNGRY` from across the base. The countdown moving is
+  the acknowledgement that the press worked.
+
+> **The pattern in all of these.** Every husbandry bug so far has been a rule
+> that was real but unobservable, and the fix has been the same shape as the
+> refusal notices on planting: if the player cannot see a rule, they conclude
+> it is not there, and they are not wrong to.
 - Starvation was applied only by the tick, which runs for online players,
   while health **regenerates from elapsed time** whether or not anyone is
   watching. Logging out healed a starving herd, so neglect could be reset by

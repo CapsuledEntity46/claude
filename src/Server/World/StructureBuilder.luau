@@ -16,6 +16,11 @@
 	Nothing else depends on the visual shape. PlacementService cares only about
 	position and footprint; DamageableService cares only that there is a model
 	to publish health attributes on.
+
+	The name plate is the one part of it another service reads: AnimalService
+	appends a pen's herd state to it, so a player can tell a hungry coop from
+	a fed one without walking into prompt range. Hence LabelName and TitleName
+	rather than two string literals in two files.
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -26,6 +31,11 @@ local GameConfig = require(Shared.GameConfig)
 local STRUCT_ATTR = GameConfig.StructureAttributes
 
 local StructureBuilder = {}
+
+--- The name plate, and the text inside it. Named so a service that wants to
+--- write state onto a building does not have to guess.
+StructureBuilder.LabelName = "Label"
+StructureBuilder.TitleName = "Title"
 
 --- World position for a structure's centre, resting its base on the ground.
 function StructureBuilder.GetCentre(structure, x: number, z: number): Vector3
@@ -48,12 +58,13 @@ function StructureBuilder.Build(structure, instanceId: string, ownerUserId: numb
 	body.Parent = model
 
 	local label = Instance.new("BillboardGui")
-	label.Name = "Label"
+	label.Name = StructureBuilder.LabelName
 	label.Size = UDim2.fromScale(12, 2)
 	label.StudsOffsetWorldSpace = Vector3.new(0, structure.Size.Y / 2 + 2, 0)
 	label.AlwaysOnTop = true
 
 	local text = Instance.new("TextLabel")
+	text.Name = StructureBuilder.TitleName
 	text.Size = UDim2.fromScale(1, 1)
 	text.BackgroundTransparency = 1
 	text.Font = Enum.Font.GothamBold

@@ -4787,6 +4787,144 @@ local function runTests()
 		end
 
 		------------------------------------------------------------------------
+		section("Husbandry: hunger returns every time the feed runs out")
+		------------------------------------------------------------------------
+
+		--[[
+			Reported from play: "the animals only get hungry and fed once;
+			after that there is no starvation".
+
+			Hunger is settled through a HungryChargedTo marker, which is
+			exactly the shape of thing that works once and then latches. So
+			this runs the whole cycle three times over and insists that every
+			spell announces itself, costs health, and is endable by feeding.
+		]]
+		do
+			local AnimalService = HUSBANDRY
+			local DamageableService = require(DamageableServiceModule)
+			local Husbandry = require(HusbandryModule)
+			local chick = GameConfig.GetAnimal("Chick")
+
+			local shepherd = newPlayer(6060, "Shepherd")
+			giveCharacter(shepherd, Vector3.new(0, 3, 0))
+			PlayersService.PlayerAdded:Fire(shepherd)
+			PDS:AddXP(shepherd, 100000)
+
+			local coop = makePen(shepherd, "Coop", 120, 40)
+			local count = GameConfig.GetPenCapacity("Coop", "Chick")
+
+			PDS:AddItem(shepherd, "Chick", count)
+			advance(1)
+			pokePen(shepherd, coop)
+			PDS:AddItem(shepherd, chick.Feed.ItemId, Husbandry.GetFeedCost("Chick", count) * 40)
+
+			local spells = 0
+			local listener = AnimalService.HerdHungry:Connect(function()
+				spells += 1
+			end)
+
+			local pen = AnimalService:GetPen(shepherd, coop)
+
+			for round = 1, 3 do
+				checkEqual(AnimalService:TryFeed(shepherd, coop), true, `round {round}: the herd eats`)
+				check(
+					Husbandry.IsFed(PDS:GetData(shepherd).Structures[coop].FedUntil, os.time()),
+					`round {round}: and is fed afterwards`
+				)
+
+				local spellsBefore = spells
+
+				-- Run out the feed, then a little past it.
+				local fedUntil = PDS:GetData(shepherd).Structures[coop].FedUntil
+				advance(fedUntil - os.time() + GameConfig.Husbandry.TickInterval * 3)
+
+				check(
+					not Husbandry.IsFed(PDS:GetData(shepherd).Structures[coop].FedUntil, os.time()),
+					`round {round}: the feed runs out again`
+				)
+				checkEqual(spells, spellsBefore + 1, `round {round}: and going hungry is announced again`)
+
+				--[[
+					And it costs health every time. Measured as a fraction,
+					because the herd heals back up between spells - which it
+					should, being alive and fed.
+				]]
+				check(
+					DamageableService:GetHealthFraction(pen.HerdEntityId) < 1,
+					`round {round}: and the hungry herd is losing health`
+				)
+			end
+
+			checkEqual(spells, 3, "three feeds and three lapses are three hungry spells, not one")
+
+			--------------------------------------------------------------------
+			-- Being able to SEE it, which is what the report was really about.
+			--------------------------------------------------------------------
+
+			--[[
+				Feed stacks two windows deep, so feeding a hungry herd leaves
+				the prompt still offering Feed - correctly, there is room for
+				another window. With nothing else on it, that looked exactly
+				like a button that had not worked.
+			]]
+			local function labelOf()
+				local body = penOf(shepherd, coop).PrimaryPart
+				return body:FindFirstChild("Label"):FindFirstChild("Title").Text
+			end
+
+			advance(GameConfig.Husbandry.TickInterval + 1)
+
+			local hungryPrompt = penPrompt(shepherd, coop, "Interact").ObjectText
+			check(
+				string.find(hungryPrompt, "HUNGRY") ~= nil,
+				`a hungry herd says so on its prompt ({hungryPrompt})`
+			)
+			check(
+				string.find(labelOf(), "HUNGRY") ~= nil,
+				`and on the pen's name plate, readable from across the base ({labelOf()})`
+			)
+
+			checkEqual(AnimalService:TryFeed(shepherd, coop), true, "feeding them")
+			advance(GameConfig.Husbandry.TickInterval + 1)
+
+			local fedPrompt = penPrompt(shepherd, coop, "Interact").ObjectText
+			check(
+				string.find(fedPrompt, "HUNGRY") == nil,
+				`the prompt stops saying HUNGRY the moment they are fed ({fedPrompt})`
+			)
+			check(
+				string.find(fedPrompt, "fed %d+m") ~= nil,
+				"and carries a countdown, so a press that worked looks different from one that did not"
+			)
+			check(
+				string.find(labelOf(), "fed %d+m") ~= nil,
+				`and the name plate shows it too ({labelOf()})`
+			)
+
+			--[[
+				Feeding again must move the number. This is the assertion the
+				whole complaint comes down to: the prompt still offers Feed,
+				and it has to be visibly a different offer.
+			]]
+			local before = labelOf()
+			checkEqual(AnimalService:TryFeed(shepherd, coop), true, "a second feeding is allowed")
+			advance(GameConfig.Husbandry.TickInterval + 1)
+			check(labelOf() ~= before, `and visibly extends the feed ({before} -> {labelOf()})`)
+
+			--[[
+				And the notice does not repeat on every tick of the same
+				spell, which is the other way a reminder becomes useless.
+			]]
+			local spellsBefore = spells
+			advance(GameConfig.Husbandry.TickInterval * 5)
+			checkEqual(spells, spellsBefore, "a spell already announced is not announced again every tick")
+
+			listener:Disconnect()
+			PlayersService.PlayerRemoving:Fire(shepherd)
+			shepherd.Parent = nil
+		end
+
+		------------------------------------------------------------------------
 		section("Husbandry: neglect is not undone by logging out")
 		------------------------------------------------------------------------
 

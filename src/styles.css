@@ -1,0 +1,545 @@
+:root {
+  --ink: #e8e2d4;
+  --panel: rgba(14, 12, 18, 0.86);
+  --edge: #4a4436;
+  --gold: #d8b25a;
+  --hp: #c0392b;
+  --sta: #2e9e5b;
+  --grd: #4a7fc1;
+  --xp: #b06fd0;
+  --mana: #2f7fc8;
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  overflow: hidden;
+  background: #10131a;
+  color: var(--ink);
+  user-select: none;
+}
+
+canvas#game { display: block; width: 100vw; height: 100vh; }
+
+.hidden { display: none !important; }
+
+/* ---------- crosshair ---------- */
+#crosshair {
+  position: fixed;
+  left: 50%; top: 50%;
+  width: 18px; height: 18px;
+  margin: -9px 0 0 -9px;
+  pointer-events: none;
+  opacity: 0.8;
+  z-index: 5;
+}
+#crosshair::before, #crosshair::after {
+  content: ""; position: absolute; background: #fff;
+  box-shadow: 0 0 2px #000;
+}
+#crosshair::before { left: 8px; top: 0; width: 2px; height: 18px; }
+#crosshair::after { top: 8px; left: 0; height: 2px; width: 18px; }
+#crosshair.charging::before, #crosshair.charging::after { background: var(--gold); }
+
+/* ---------- melee gesture indicator ----------
+   Sits on the crosshair and leans towards the stroke the mouse is describing. The
+   arrow is pushed outwards and brightened as the gesture charges, so the player can
+   see both *which* attack and *how close* it is to committing. */
+#gesture {
+  position: fixed;
+  left: 50%; top: 50%;
+  width: 0; height: 0;
+  pointer-events: none;
+  z-index: 6;
+  opacity: 0;
+  transition: opacity 70ms linear;
+}
+#gesture.active { opacity: 1; }
+#gesture-arrow {
+  position: absolute;
+  left: -7px; top: -7px;
+  width: 14px; height: 14px;
+  /* A triangle, so the direction reads without a glyph or an image. */
+  clip-path: polygon(50% 0%, 100% 100%, 0% 100%);
+  background: #fff;
+  box-shadow: 0 0 3px #000;
+  transform-origin: 50% 50%;
+}
+#gesture.committed #gesture-arrow { background: var(--gold); }
+
+/* ---------- vitals ---------- */
+/* Vitals sit top-left: the things you check under pressure belong where the eye
+   already goes for the combat log. */
+#vitals {
+  position: fixed; left: 14px; top: 12px; z-index: 10;
+  display: flex; flex-direction: column; gap: 5px;
+  pointer-events: none;
+}
+.bar-row { display: flex; align-items: center; gap: 6px; }
+.bar-label { font-size: 10px; width: 26px; opacity: 0.65; letter-spacing: 0.5px; }
+.bar {
+  position: relative; width: 210px; height: 15px;
+  background: rgba(0,0,0,0.6);
+  border: 1px solid var(--edge);
+  overflow: hidden;
+}
+.bar .fill { height: 100%; width: 100%; transition: width 90ms linear; }
+.bar.hp .fill { background: linear-gradient(#e05a4a, var(--hp)); }
+.bar.sta { width: 150px; height: 9px; }
+.bar.sta .fill { background: linear-gradient(#49c97c, var(--sta)); }
+.bar.grd { width: 150px; height: 9px; }
+.bar.grd .fill { background: linear-gradient(#6ba3e8, var(--grd)); }
+.bar.mana { width: 180px; height: 12px; }
+.bar.mana .fill { background: linear-gradient(#7fd0ff, var(--mana)); }
+.bar.mana .bar-text { font-size: 9px; line-height: 12px; }
+.bar-text {
+  position: absolute; inset: 0;
+  font-size: 10px; line-height: 15px; text-align: center;
+  text-shadow: 0 1px 2px #000;
+}
+
+#spell-slots { display: flex; gap: 5px; margin-top: 4px; }
+.slot-tier { display: flex; align-items: center; gap: 3px; margin-right: 8px; }
+.slot-tier .tier-label { font-size: 9px; opacity: 0.5; }
+.pip {
+  width: 11px; height: 11px;
+  border: 1px solid #6d5aa0;
+  background: rgba(0,0,0,0.5);
+  transform: rotate(45deg);
+}
+.pip.full { background: #a56fe0; box-shadow: 0 0 6px #a56fe0; }
+
+/* ---------- hotbar ---------- */
+#hotbar-wrap {
+  position: fixed; left: 50%; bottom: 16px; transform: translateX(-50%);
+  z-index: 10; display: flex; flex-direction: column; align-items: center; gap: 5px;
+  pointer-events: none;
+}
+#xp-bar {
+  position: relative; width: 396px; height: 11px;
+  background: rgba(0,0,0,0.6); border: 1px solid var(--edge);
+}
+#xp-bar .fill { height: 100%; background: linear-gradient(#c98ce8, var(--xp)); transition: width 140ms; }
+#xp-bar span {
+  position: absolute; inset: 0; font-size: 9px; line-height: 11px;
+  text-align: center; text-shadow: 0 1px 2px #000;
+}
+#hotbar { display: flex; gap: 4px; }
+.hs {
+  position: relative; width: 46px; height: 46px;
+  background: var(--panel); border: 2px solid var(--edge);
+  display: flex; align-items: center; justify-content: center;
+  font-size: 20px;
+}
+.hs.active { border-color: var(--gold); box-shadow: 0 0 10px rgba(216,178,90,0.5); }
+.hs .key { position: absolute; top: 1px; left: 3px; font-size: 9px; opacity: 0.5; }
+/* Fallback letter codes, used when no colour emoji font is available. */
+.hs .glyph-text, .bag-item.glyph-text {
+  font-size: 13px; letter-spacing: 0.5px; color: var(--gold); font-weight: bold;
+}
+.hs .qty { position: absolute; bottom: 1px; right: 3px; font-size: 10px; color: var(--gold); }
+.hs .cd {
+  position: absolute; inset: 0; background: rgba(0,0,0,0.62);
+  transform-origin: bottom; pointer-events: none;
+}
+#active-info { display: flex; gap: 10px; font-size: 11px; align-items: baseline; }
+#active-name { color: var(--gold); }
+#active-mode { opacity: 0.7; font-size: 10px; }
+
+/* ---------- status ---------- */
+/* The HUD sits over both bright sky and dark caves, so plain text with a shadow
+   is not reliably legible. A translucent panel plus a hard shadow works against
+   any background. */
+/* Status moves bottom-right: reference information, not combat information. */
+#status {
+  position: fixed; right: 10px; bottom: 12px; z-index: 10;
+  text-align: right; font-size: 11px; line-height: 1.65;
+  pointer-events: none;
+  color: #f2ede0;
+  text-shadow: 0 1px 3px #000, 0 0 6px rgba(0, 0, 0, 0.9);
+  background: rgba(10, 9, 14, 0.42);
+  padding: 6px 9px;
+  border: 1px solid rgba(74, 68, 54, 0.5);
+}
+
+/* ---------- combat log ---------- */
+/* The battle log moves bottom-left, below the vitals it used to sit above. */
+#log {
+  position: fixed; left: 16px; bottom: 92px; z-index: 10;
+  width: 340px; font-size: 11px; line-height: 1.55;
+  display: flex; flex-direction: column; justify-content: flex-end;
+  pointer-events: none;
+  text-shadow: 0 1px 3px #000, 0 0 5px rgba(0, 0, 0, 0.95);
+}
+#log div {
+  background: rgba(10, 9, 14, 0.4);
+  padding: 1px 6px;
+  margin-bottom: 2px;
+  width: fit-content;
+  max-width: 100%;
+}
+#log div { opacity: 0; animation: logIn 200ms forwards; }
+#log div.fade { animation: logOut 700ms forwards; }
+@keyframes logIn { to { opacity: 0.9; } }
+@keyframes logOut { from { opacity: 0.9; } to { opacity: 0; } }
+.log-hit { color: #ffd9a0; }
+.log-crit { color: #ff9d5c; font-weight: bold; }
+.log-hurt { color: #ff8a7a; }
+.log-good { color: #9ce8a8; }
+.log-info { color: #b9c6d8; }
+.log-magic { color: #c9a0ff; }
+
+/* ---------- floating numbers ---------- */
+#floaters { position: fixed; inset: 0; pointer-events: none; z-index: 8; overflow: hidden; }
+.floater {
+  position: absolute; font-size: 15px; font-weight: bold;
+  text-shadow: 0 2px 4px #000; animation: floatUp 900ms ease-out forwards;
+  transform: translate(-50%, -50%);
+}
+.floater.crit { font-size: 21px; color: #ff9d5c; }
+.floater.hurt { color: #ff6a5a; }
+.floater.dmg { color: #ffe2b0; }
+.floater.block { color: #8fc0f0; font-size: 13px; }
+.floater.xp { color: #d5a0ff; font-size: 12px; }
+.floater.mana { color: #7fc8ff; font-size: 12px; }
+.floater.heal { color: #8ce89c; }
+@keyframes floatUp {
+  0% { opacity: 1; }
+  100% { opacity: 0; transform: translate(-50%, -230%); }
+}
+
+/* ---------- character sheet ---------- */
+#sheet {
+  position: fixed; inset: 0; z-index: 30;
+  background: rgba(4, 5, 8, 0.9);
+  display: flex; align-items: center; justify-content: center;
+}
+
+/* Active attack mode marker, drawn with borders rather than a glyph so it does
+   not depend on font coverage. */
+.mode-marker {
+  width: 0; height: 0; margin-left: 2px;
+  border-left: 7px solid var(--gold);
+  border-top: 5px solid transparent;
+  border-bottom: 5px solid transparent;
+}
+.sheet-inner {
+  /* Much wider and taller than the old 940px box. With four columns crammed into
+     it the text was at the smallest readable size and still clipped; the sheet is
+     a full-screen overlay, so there is no reason to be shy with the space. */
+  width: min(1480px, 96vw); max-height: 94vh; overflow: auto;
+  /* Opaque on purpose: a translucent panel lets the hotbar and the 3D scene
+     show through behind the text, which reads as visual noise. */
+  background: #14121a;
+  border: 2px solid var(--edge);
+  padding: 18px 20px;
+}
+.sheet-inner header { display: flex; justify-content: space-between; align-items: center; }
+.sheet-inner h1 { font-size: 22px; margin: 0; color: var(--gold); letter-spacing: 1px; }
+#sheet-close {
+  background: none; border: 1px solid var(--edge); color: var(--ink);
+  font-size: 18px; width: 30px; height: 30px; cursor: pointer;
+}
+/* ---- tabs ------------------------------------------------------------- */
+
+.sheet-tabs { display: flex; gap: 6px; }
+.sheet-tab {
+  font-family: inherit; font-size: 12px; letter-spacing: 0.6px;
+  padding: 8px 18px; cursor: pointer;
+  background: rgba(0, 0, 0, 0.35); color: var(--ink);
+  border: 1px solid var(--edge); border-radius: 4px;
+}
+.sheet-tab:hover { border-color: var(--gold); }
+.sheet-tab.active { border-color: var(--gold); color: var(--gold); background: rgba(216, 178, 90, 0.14); }
+
+.gear-cols { display: grid; grid-template-columns: 1fr 1.25fr; gap: 22px; margin-top: 16px; }
+.skills-cols { display: grid; grid-template-columns: 0.62fr 0.7fr 2.1fr; gap: 20px; margin-top: 16px; }
+.sheet-pane h2 {
+  font-size: 13px; text-transform: uppercase; letter-spacing: 1.4px;
+  opacity: 0.65; margin: 0 0 10px; border-bottom: 1px solid var(--edge); padding-bottom: 6px;
+}
+.stat { display: flex; justify-content: space-between; font-size: 13px; padding: 4px 0; }
+.stat span:last-child { color: var(--gold); }
+
+/* ---- ability cards ---------------------------------------------------- */
+
+/* Cards rather than the old one-line rows: the score, its modifier and the
+   spend button all have to be readable at a glance, which they were not when
+   three of them shared a 12px line. */
+.attr {
+  display: grid; grid-template-columns: 1fr auto auto; align-items: center; gap: 10px;
+  font-size: 14px; padding: 9px 11px; margin-bottom: 6px;
+  border: 1px solid var(--edge); border-radius: 4px; background: rgba(0, 0, 0, 0.35);
+}
+.attr .an { font-size: 13px; letter-spacing: 0.8px; opacity: 0.85; }
+.attr .av { color: var(--gold); font-size: 17px; text-align: right; min-width: 64px; }
+.attr button {
+  background: #2a2a1e; border: 1px solid var(--edge); color: var(--gold);
+  width: 28px; height: 28px; cursor: pointer; font-size: 16px; line-height: 1; border-radius: 3px;
+}
+.attr button:disabled { opacity: 0.25; cursor: default; }
+.points { font-size: 12px; color: #9ce8a8; margin: 8px 0; }
+
+/* ---- ability radar ---------------------------------------------------- */
+
+#ability-radar { display: block; margin: 2px auto 10px; }
+#ability-radar .ring { fill: none; stroke: var(--edge); stroke-width: 1; }
+#ability-radar .spoke { stroke: var(--edge); stroke-width: 1; opacity: 0.6; }
+#ability-radar .shape { fill: rgba(110, 140, 240, 0.33); stroke: #8aa2f0; stroke-width: 2; }
+#ability-radar .dot { fill: #8aa2f0; }
+#ability-radar text { fill: var(--ink); font-size: 10px; opacity: 0.75; }
+
+.eq-slot {
+  display: flex; justify-content: space-between; gap: 10px;
+  font-size: 13px; padding: 10px 11px; margin-bottom: 7px;
+  border: 1px solid var(--edge); background: rgba(0,0,0,0.35); border-radius: 4px;
+}
+.eq-slot .eq-label { opacity: 0.55; font-size: 11px; text-transform: uppercase; letter-spacing: 0.8px; }
+.eq-slot .eq-val { color: var(--gold); text-align: right; }
+.eq-slot .eq-sub { display: block; font-size: 11px; opacity: 0.6; color: var(--ink); }
+/* A slot lights up while something droppable is over it, so the target is never
+   in doubt mid-drag. */
+.eq-slot.drop-ok { border-color: var(--gold); background: rgba(216, 178, 90, 0.16); }
+.eq-slot.drop-bad { border-color: #b4555a; background: rgba(180, 85, 90, 0.12); }
+
+/* Tabs keep the panel a fixed size; the grid inside scrolls. */
+.bag-tabs { display: flex; gap: 5px; margin-bottom: 10px; }
+.bag-tab {
+  flex: 1; padding: 7px 6px; font-family: inherit; font-size: 11.5px;
+  background: rgba(0, 0, 0, 0.35); color: var(--ink);
+  border: 1px solid var(--edge); cursor: pointer;
+}
+.bag-tab:hover { border-color: var(--gold); }
+.bag-tab.active { border-color: var(--gold); color: var(--gold); background: rgba(216, 178, 90, 0.12); }
+
+#sheet-bag .bag-scroll {
+  max-height: 46vh; overflow-y: auto; overflow-x: hidden;
+  padding-right: 4px;
+  scrollbar-width: thin;
+  scrollbar-color: var(--edge) transparent;
+}
+#sheet-bag .bag-scroll::-webkit-scrollbar { width: 8px; }
+#sheet-bag .bag-scroll::-webkit-scrollbar-thumb { background: var(--edge); }
+#sheet-bag .bag-grid { display: grid; grid-template-columns: repeat(8, 1fr); gap: 7px; }
+.bag-item {
+  position: relative; aspect-ratio: 1; cursor: grab;
+  border: 1px solid var(--edge); background: rgba(0,0,0,0.35); border-radius: 4px;
+  display: flex; align-items: center; justify-content: center; font-size: 23px;
+}
+.bag-item.dragging { opacity: 0.4; cursor: grabbing; }
+.bag-item:hover { border-color: var(--gold); background: rgba(216,178,90,0.12); }
+.bag-item .qty { position: absolute; bottom: 1px; right: 4px; font-size: 11px; color: var(--gold); }
+.bag-item.empty { cursor: default; opacity: 0.3; }
+.bag-item.empty:hover { border-color: var(--edge); background: rgba(0,0,0,0.35); }
+.sheet-inner footer { margin-top: 14px; }
+.hint { font-size: 11.5px; opacity: 0.5; }
+
+/* ---------- death ---------- */
+#death {
+  position: fixed; inset: 0; z-index: 40;
+  background: rgba(40, 6, 6, 0.82);
+  display: flex; align-items: center; justify-content: center; text-align: center;
+}
+#death h1 { font-size: 44px; margin: 0; color: #e05a4a; letter-spacing: 3px; }
+#death p { opacity: 0.8; font-size: 13px; }
+
+/* ---------- menu ---------- */
+#menu {
+  position: fixed; inset: 0; z-index: 50;
+  background: radial-gradient(circle at 50% 40%, #1d2436, #0a0c12 75%);
+  display: flex; align-items: center; justify-content: center; text-align: center;
+}
+.menu-inner h1 {
+  font-size: 46px; margin: 0; letter-spacing: 5px; color: var(--gold);
+  text-shadow: 0 4px 18px rgba(216,178,90,0.28);
+}
+.menu-inner .tag { opacity: 0.65; font-size: 13px; margin: 6px 0 26px; }
+.controls { margin-top: 26px; font-size: 11px; line-height: 2; opacity: 0.6; }
+.controls b { color: var(--gold); font-weight: normal; }
+
+button#play, button#respawn {
+  background: #1d1a12; border: 2px solid var(--gold); color: var(--gold);
+  padding: 12px 30px; font-size: 14px; letter-spacing: 2px; cursor: pointer;
+  font-family: inherit;
+}
+button#play:hover, button#respawn:hover { background: var(--gold); color: #14110a; }
+
+/* ---------- minimap and compass ---------- */
+#minimap {
+  position: fixed; right: 12px; top: 12px; z-index: 10;
+  display: flex; flex-direction: column; gap: 3px;
+  pointer-events: none;
+}
+.minimap-canvas {
+  width: 148px; height: 148px;
+  border: 2px solid var(--edge);
+  background: #0a0c12;
+  image-rendering: pixelated;
+  box-shadow: 0 3px 10px rgba(0, 0, 0, 0.5);
+}
+.compass-canvas {
+  width: 148px; height: 20px;
+  border: 1px solid var(--edge);
+}
+
+/* ---- skill tree ------------------------------------------------------- */
+
+#sheet-skills { padding-right: 4px; }
+.skill-grove { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; }
+
+/* Each branch is its own positioning context: the connector SVG is absolutely
+   placed over it and the node discs sit on top. */
+.skill-branch {
+  position: relative; padding: 8px 6px 10px;
+  border: 1px solid var(--edge); border-radius: 6px;
+  background: linear-gradient(180deg, rgba(255,255,255,0.025), rgba(0,0,0,0.3));
+}
+.skill-branch > h3 {
+  font-size: 12px; text-transform: uppercase; letter-spacing: 1.2px;
+  margin: 0 0 3px; color: var(--gold); text-align: center;
+}
+.skill-branch > p {
+  margin: 0 0 10px; font-size: 10.5px; opacity: 0.45;
+  line-height: 1.35; text-align: center; min-height: 28px;
+}
+
+/* The connectors. Behind the nodes, and ignoring pointer events so the discs
+   above stay clickable. */
+.branch-canvas { position: absolute; inset: 0; pointer-events: none; z-index: 0; }
+.branch-canvas path { fill: none; stroke-linecap: round; }
+.branch-canvas path.limb { stroke: #4a4330; stroke-width: 3; stroke-dasharray: 3 4; }
+.branch-canvas path.limb.grown { stroke: var(--gold); stroke-width: 4.5; stroke-dasharray: none; opacity: 0.85; }
+.branch-canvas path.trunk { stroke: #4a4330; stroke-width: 5; }
+.branch-canvas path.trunk.grown { stroke: var(--gold); stroke-width: 6.5; opacity: 0.8; }
+
+.skill-tier-row {
+  position: relative; z-index: 1;
+  display: flex; justify-content: center; gap: 6px; margin-bottom: 14px;
+}
+.skill-tier-row:last-child { margin-bottom: 2px; }
+/* Headroom above the first row so the limbs springing from the root have room
+   to actually curve, rather than being squeezed into a bracket. */
+.skill-tier-row:first-of-type { margin-top: 14px; }
+
+/* A fixed-width column per node, so the caption below it has room of its own
+   and two adjacent captions cannot run into each other. */
+.skill-cell {
+  display: flex; flex-direction: column; align-items: center; gap: 5px;
+  width: 74px;
+}
+
+/* A node is a disc, as in the reference: icon in the middle, rank badge on the
+   shoulder. Round because a tree of rectangles reads as a table. */
+.skill-node {
+  position: relative; width: 50px; height: 50px; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 21px; cursor: pointer;
+  border: 2px solid var(--edge); background: #191620;
+  transition: border-color 0.12s, box-shadow 0.12s, transform 0.12s;
+}
+.skill-node:hover { transform: scale(1.07); }
+.skill-node.available { border-color: #7f7049; }
+.skill-node.available:hover { border-color: var(--gold); box-shadow: 0 0 10px rgba(216, 178, 90, 0.4); }
+.skill-node.owned {
+  border-color: var(--gold); background: radial-gradient(circle at 50% 35%, #3a3016, #191620 72%);
+  box-shadow: 0 0 12px rgba(216, 178, 90, 0.3);
+}
+.skill-node.maxed { box-shadow: 0 0 16px rgba(216, 178, 90, 0.55); }
+.skill-node.locked { opacity: 0.4; cursor: not-allowed; }
+.skill-node .sn { display: none; }
+.skill-node .sr {
+  position: absolute; top: -4px; right: -4px;
+  min-width: 19px; height: 19px; padding: 0 3px;
+  border-radius: 10px; background: #14121a; border: 1px solid var(--edge);
+  color: var(--ink); font-size: 10px; line-height: 17px; text-align: center;
+}
+.skill-node.owned .sr { border-color: var(--gold); color: var(--gold); }
+.skill-cell .sl {
+  font-size: 9.5px; text-align: center; opacity: 0.6; line-height: 1.2;
+  /* Two short lines rather than one clipped one. */
+  min-height: 22px;
+}
+
+#respec {
+  margin-top: 14px; width: 100%; padding: 10px;
+  background: rgba(255, 203, 61, 0.1); color: var(--gold);
+  border: 1px solid var(--gold); border-radius: 4px;
+  cursor: pointer; font-size: 13px; letter-spacing: 0.4px; font-family: inherit;
+}
+#respec:disabled { opacity: 0.35; cursor: default; border-color: var(--edge); color: var(--ink); }
+.skill-mods { margin-top: 12px; font-size: 11.5px; opacity: 0.65; line-height: 1.5; }
+
+/* ---- hotbar strip in the sheet ---------------------------------------- */
+
+/* The hotbar is repeated inside the sheet purely as a drop target. Assigning a
+   hotbar slot used to mean closing the sheet, scrolling to the slot, reopening
+   the sheet and clicking — the slot had to be reachable from where the items are. */
+#sheet-hotbar { margin-top: 18px; }
+.hotbar-strip { display: flex; gap: 8px; }
+.hotbar-slot {
+  position: relative; width: 56px; height: 56px; border-radius: 4px;
+  border: 1px solid var(--edge); background: rgba(0, 0, 0, 0.4);
+  display: flex; align-items: center; justify-content: center; font-size: 24px;
+}
+.hotbar-slot .num { position: absolute; top: 2px; left: 4px; font-size: 10px; opacity: 0.5; }
+.hotbar-slot .qty { position: absolute; bottom: 1px; right: 4px; font-size: 11px; color: var(--gold); }
+.hotbar-slot.selected { border-color: var(--gold); box-shadow: 0 0 8px rgba(216, 178, 90, 0.35); }
+.hotbar-slot.drop-ok { border-color: var(--gold); background: rgba(216, 178, 90, 0.18); }
+
+/* ------------------------------------------------------------------ crafting */
+
+#sheet-crafting .craft-group { margin-bottom: 20px; }
+#sheet-crafting .craft-bench {
+  display: flex; align-items: center; gap: 10px;
+  margin-bottom: 14px; padding: 9px 12px;
+  border: 1px solid var(--edge); border-left: 4px solid var(--edge);
+  background: rgba(255, 255, 255, 0.03);
+  font-size: 13px; color: var(--muted);
+}
+#sheet-crafting .craft-bench.ready { border-left-color: #76b34a; color: #cfe6bb; }
+
+#sheet-crafting .craft-list {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(330px, 1fr)); gap: 9px;
+}
+
+#sheet-crafting .recipe {
+  display: grid; grid-template-columns: 40px 1fr auto; gap: 11px; align-items: center;
+  padding: 9px 11px;
+  border: 1px solid var(--edge);
+  background: rgba(255, 255, 255, 0.02);
+}
+/* Dimmed rather than hidden: knowing what you cannot yet make is most of what a
+   recipe list is for. */
+#sheet-crafting .recipe.blocked { opacity: 0.5; }
+
+#sheet-crafting .recipe .ricon {
+  width: 38px; height: 38px; display: grid; place-items: center;
+  font-size: 21px; border: 1px solid var(--edge); background: #1b1822;
+  /* Clipped and shrunk rather than trusted. Where colour emoji are unavailable the
+     icon falls back to initials, and anything longer than two characters used to
+     spill across the recipe name next to it. */
+  overflow: hidden; flex: none;
+}
+#sheet-crafting .recipe .ricon.glyph-text { font-size: 12px; letter-spacing: 0; }
+
+/* The text column must be allowed to shrink. A grid child defaults to min-content,
+   so a long unbroken word widens the column instead of wrapping inside it. */
+#sheet-crafting .recipe > div:nth-child(2) { min-width: 0; }
+#sheet-crafting .recipe .rname { font-size: 14px; color: var(--ink); overflow-wrap: anywhere; }
+#sheet-crafting .recipe .rname b { color: var(--gold); font-weight: 600; }
+#sheet-crafting .recipe .rnote { font-size: 11.5px; color: var(--muted); margin-top: 2px; line-height: 1.35; overflow-wrap: anywhere; }
+#sheet-crafting .recipe .ring { font-size: 11.5px; margin-top: 4px; }
+#sheet-crafting .recipe .ring .have { color: #9ccf78; }
+#sheet-crafting .recipe .ring .lack { color: #d08a7a; }
+
+#sheet-crafting .recipe button {
+  padding: 7px 14px; font: inherit; font-size: 13px; cursor: pointer;
+  color: var(--gold); background: rgba(216, 178, 90, 0.1);
+  border: 1px solid var(--edge);
+}
+#sheet-crafting .recipe button:hover:not(:disabled) { border-color: var(--gold); background: rgba(216, 178, 90, 0.2); }
+#sheet-crafting .recipe button:disabled { color: var(--muted); cursor: default; background: none; }

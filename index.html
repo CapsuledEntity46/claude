@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>VoxelQuest</title>
+    <link rel="stylesheet" href="/src/styles.css" />
+  </head>
+  <body>
+    <canvas id="game"></canvas>
+
+    <!-- Crosshair -->
+    <div id="crosshair"></div>
+    <!-- Melee gesture readout: an arrow that leans the way the mouse is moving, so
+         the stroke about to be thrown is visible before it lands. -->
+    <div id="gesture"><div id="gesture-arrow"></div></div>
+
+    <!-- Floating combat text lives here -->
+    <div id="floaters"></div>
+
+    <!-- Bottom-left vitals -->
+    <div id="vitals">
+      <div class="bar-row">
+        <span class="bar-label">HP</span>
+        <div class="bar hp"><div class="fill" id="hp-fill"></div><span class="bar-text" id="hp-text">20 / 20</span></div>
+      </div>
+      <div class="bar-row">
+        <span class="bar-label">STA</span>
+        <div class="bar sta"><div class="fill" id="sta-fill"></div></div>
+      </div>
+      <div class="bar-row">
+        <span class="bar-label">MP</span>
+        <div class="bar mana"><div class="fill" id="mana-fill"></div><span class="bar-text" id="mana-text">60 / 60</span></div>
+      </div>
+      <div class="bar-row">
+        <span class="bar-label">GRD</span>
+        <div class="bar grd"><div class="fill" id="grd-fill"></div></div>
+      </div>
+      <div id="spell-slots"></div>
+    </div>
+
+    <!-- Bottom-center hotbar + xp -->
+    <div id="hotbar-wrap">
+      <div id="xp-bar"><div class="fill" id="xp-fill"></div><span id="xp-text">Lv 1</span></div>
+      <div id="hotbar"></div>
+      <div id="active-info"><span id="active-name">—</span><span id="active-mode"></span></div>
+    </div>
+
+    <!-- Top-right minimap and compass -->
+    <div id="minimap"></div>
+
+    <!-- Bottom-right status -->
+    <div id="status">
+      <div id="armor-line"></div>
+      <div id="pos-line"></div>
+      <div id="perf-line"></div>
+    </div>
+
+    <!-- Combat log -->
+    <div id="log"></div>
+
+    <!-- Character sheet / inventory overlay -->
+    <div id="sheet" class="hidden">
+      <div class="sheet-inner">
+        <header>
+          <h1>Character</h1>
+          <nav class="sheet-tabs">
+            <button id="tab-gear" class="sheet-tab active">Equipment &amp; Inventory</button>
+            <button id="tab-skills" class="sheet-tab">Skills and Stats</button>
+            <button id="tab-crafting" class="sheet-tab">Crafting</button>
+          </nav>
+          <button id="sheet-close" title="Close (Tab)">&times;</button>
+        </header>
+
+        <div id="pane-gear" class="sheet-pane">
+          <div class="gear-cols">
+            <section id="sheet-equip"></section>
+            <section id="sheet-bag"></section>
+          </div>
+          <section id="sheet-hotbar"></section>
+        </div>
+
+        <div id="pane-crafting" class="sheet-pane hidden">
+          <section id="sheet-crafting"></section>
+        </div>
+
+        <div id="pane-skills" class="sheet-pane hidden">
+          <div class="skills-cols">
+            <section id="sheet-stats"></section>
+            <section id="sheet-abilities"></section>
+            <section id="sheet-skills"></section>
+          </div>
+        </div>
+
+        <footer>
+          <span class="hint">Drag an item onto an equipment slot or a hotbar slot. Click to equip, shift-click to drop.</span>
+        </footer>
+      </div>
+    </div>
+
+    <!-- Death screen -->
+    <div id="death" class="hidden">
+      <div>
+        <h1>You Died</h1>
+        <p id="death-detail"></p>
+        <button id="respawn">Respawn</button>
+      </div>
+    </div>
+
+    <!-- Start / pause overlay -->
+    <div id="menu">
+      <div class="menu-inner">
+        <h1>VoxelQuest</h1>
+        <p class="tag">Mine it. Build it. Then fight whatever comes out of the dark.</p>
+        <button id="play">Click to Play</button>
+        <div class="controls">
+          <div><b>WASD</b> move &middot; <b>Space</b> jump &middot; <b>Shift</b> sprint</div>
+          <div><b>LMB</b> hold and move the mouse to attack &middot; <b>RMB</b> block, aim, or place</div>
+          <div><b>R</b> reload</div>
+          <div><b>1–8</b> hotbar &middot; <b>Wheel</b> cycle &middot; <b>Tab</b> character sheet</div>
+          <div><b>F5</b> save &middot; <b>F9</b> load &middot; <b>Esc</b> pause</div>
+        </div>
+      </div>
+    </div>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

@@ -1,0 +1,33 @@
+{
+  "name": "voxelquest",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "A browser voxel action-RPG: build, mine, and fight in real time with swing/thrust melee, firearms, and spells.",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit",
+    "test": "npm run typecheck && npm run test:unit",
+    "test:unit": "esbuild scripts/unit.ts --bundle --platform=node --format=esm --outfile=node_modules/.cache/unit.mjs --log-level=error && node node_modules/.cache/unit.mjs",
+    "test:smoke": "npm run build && node scripts/smoke.mjs",
+    "tiles": "node scripts/glb-tiles.mjs",
+    "trees": "esbuild scripts/treeprofile.ts --bundle --platform=node --format=esm --outfile=node_modules/.cache/treeprofile.mjs --log-level=error && node node_modules/.cache/treeprofile.mjs",
+    "geom": "esbuild scripts/trigeom.ts --bundle --platform=node --format=esm --outfile=node_modules/.cache/trigeom.mjs --log-level=error && node node_modules/.cache/trigeom.mjs",
+    "survey": "esbuild scripts/terrain.ts --bundle --platform=node --format=esm --outfile=node_modules/.cache/terrain.mjs --log-level=error && node node_modules/.cache/terrain.mjs",
+    "shots:terrain": "npm run build && node scripts/terrainshots.mjs",
+    "shots:craft": "npm run build && node scripts/craftshot.mjs",
+    "perf": "esbuild scripts/perf.ts --bundle --platform=node --format=esm --outfile=node_modules/.cache/perf.mjs --log-level=error && node node_modules/.cache/perf.mjs"
+  },
+  "dependencies": {
+    "three": "^0.180.0"
+  },
+  "devDependencies": {
+    "@types/three": "^0.180.0",
+    "playwright": "^1.63.0",
+    "pngjs": "^7.0.0",
+    "typescript": "^5.9.2",
+    "vite": "^7.1.5"
+  }
+}

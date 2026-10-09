@@ -1,0 +1,2329 @@
+import * as THREE from 'three';
+import { AudioEngine } from '../audio/Audio';
+import { CombatSystem } from '../combat/CombatSystem';
+import { blockCollisionBoxes, blockDef, isTargetable } from '../world/blocks';
+import { CHUNK_SY } from '../world/Chunk';
+import { makeMeta, shapeBoxes } from '../world/shapes';
+import { ITEMS, item, tryItem } from '../combat/items';
+import { availableModes, type AttackDirection } from '../combat/types';
+import { EntityManager } from '../entities/EntityManager';
+import { PickupManager } from '../entities/Pickups';
+import { ProjectileManager } from '../entities/Projectile';
+import { BlockHighlight } from '../fx/BlockHighlight';
+import { LightManager } from '../fx/LightManager';
+import { Particles } from '../fx/Particles';
+import { Rain } from '../fx/Rain';
+import { Celestial } from '../fx/Celestial';
+import { Starfield } from '../fx/Starfield';
+import { Trail } from '../fx/Trail';
+import { TrajectoryArc } from '../fx/TrajectoryArc';
+import { ViewModel } from '../fx/ViewModel';
+import { Inventory, type Stack } from '../player/Inventory';
+import { Player } from '../player/Player';
+import { ABILITY_KEYS, type AbilityKey } from '../player/PointBuy';
+import { xpToReach } from '../player/Stats';
+import { pointsSpentOnSkills, respecCost, totalSkillPoints } from '../player/Skills';
+import { readSave, writeSave, type SaveData, SAVE_VERSION } from '../save/Save';
+import { Hud } from '../ui/Hud';
+import { Screens, type SheetPane } from '../ui/Screens';
+import { Block } from '../world/blocks';
+import { Biome, SEA_LEVEL } from '../world/TerrainGen';
+import { TimeOfDay } from '../world/TimeOfDay';
+import { Weather } from '../world/Weather';
+import { World } from '../world/World';
+import type { GameContext, LogClass, FloaterClass, ProjectileRequest } from './Context';
+import { Input } from './Input';
+
+const SKY_COLOR = 0x8fb6d8;
+/** Stepped ember palette for torch flames. */
+const EMBER_COLORS = [0xfff0c0, 0xffc050, 0xff8a28, 0xd8541a] as const;
+
+/**
+ * View radius in chunks.
+ *
+ * Raised from 6 once the terrain gained real relief. At 6 chunks the far plane
+ * sat around 75 blocks, which is less than the height of a single mountain —
+ * ranges were something you stood on rather than something you saw, and the
+ * whole point of the taller world was lost to fog. The mesher's sky-skipping
+ * pays for most of the extra chunks.
+ */
+/**
+ * View radius in chunks, as an aspiration rather than a promise.
+ *
+ * Nine is what the taller world needs: at six the far plane sat around 75 blocks,
+ * less than the height of one mountain, so ranges were something you stood on
+ * rather than something you saw. But nine chunks is about 1.35 million triangles of
+ * real surface in view, roughly half of it cave wall underground, and that is more
+ * than a modest GPU can push at 60fps. So this is the ceiling the governor below
+ * starts from and climbs back towards, not a fixed setting.
+ */
+const RENDER_DISTANCE = 9;
+
+/**
+ * Floor for the frame-rate governor. The old view distance, and the point below
+ * which the world stops reading as a landscape.
+ */
+const MIN_RENDER_DISTANCE = 6;
+
+/**
+ * Smoothed frame time, in milliseconds, that counts as distress.
+ *
+ * Above a 60Hz frame's 16.7ms with room to spare, so ordinary jitter does not
+ * trigger it. 19ms is about 53fps.
+ */
+const GOVERNOR_DISTRESS_MS = 19;
+
+/**
+ * Smoothed frame time that counts as having slack.
+ *
+ * This has to sit just *above* the vsync period, not below it, and that is the
+ * whole subtlety of the governor: a machine with enormous headroom still reports
+ * 16.7ms, because it spends the surplus blocked on the display. Frame time can
+ * therefore reveal distress but never reveal comfort — the only observable
+ * difference between "coping" and "coping easily" is that the former drifts above
+ * the vsync period and the latter sits exactly on it.
+ */
+const GOVERNOR_SLACK_MS = 17.4;
+
+/** How long distress must persist before giving up a chunk of view distance. */
+const GOVERNOR_DISTRESS_SECONDS = 2.5;
+
+/** How long slack must persist before trying to win one back. */
+const GOVERNOR_SLACK_SECONDS = 10;
+
+/** Quiet period after any change, so the governor cannot react to its own churn. */
+const GOVERNOR_COOLDOWN_SECONDS = 3;
+const MAX_FRAME_DT = 1 / 20;
+
+type Mode = 'menu' | 'playing' | 'sheet' | 'dead';
+
+/**
+ * Terrain features the screenshot and diagnostic harnesses can fly to.
+ *
+ * Named rather than repeated inline because `debugFindTerrain` and
+ * `debugViewFeature` both take it and have to stay in step. Extending one of two
+ * duplicated unions compiles perfectly well and then misses the predicate switch.
+ */
+export type TerrainTarget =
+  | 'mountain'
+  | 'canyon'
+  | 'deep-ocean'
+  | 'island'
+  | 'plateau'
+  | 'jungle'
+  | 'desert'
+  | 'forest'
+  | 'tundra';
+
+export class Game {
+  private renderer: THREE.WebGLRenderer;
+  private scene = new THREE.Scene();
+  private camera: THREE.PerspectiveCamera;
+  private clock = new THREE.Clock();
+  private input: Input;
+
+  private world: World;
+  private player: Player;
+  private particles = new Particles();
+  private audio = new AudioEngine();
+  private pickups: PickupManager;
+  private entities: EntityManager;
+  private projectiles = new ProjectileManager();
+  private combat = new CombatSystem();
+  private hud = new Hud();
+  private screens: Screens;
+
+  private time = new TimeOfDay();
+  private weather = new Weather();
+  private rain = new Rain();
+  private stars = new Starfield();
+  private celestial = new Celestial();
+  private lights = new LightManager();
+  private highlight = new BlockHighlight();
+  private trails = new Trail();
+  private arc = new TrajectoryArc();
+  private viewModel: ViewModel;
+  /** Base camera field of view, restored when not aiming. */
+  private readonly baseFov = 78;
+
+  /** Reused colour scratch, so the render loop allocates nothing. */
+  private readonly skyColor = new THREE.Color();
+  private readonly fogColorScratch = new THREE.Color();
+  private readonly lightColorScratch = new THREE.Color();
+  private readonly sunDirection = new THREE.Vector3();
+  private underwater = false;
+
+  private ctx: GameContext;
+  private mode: Mode = 'menu';
+  private elapsed = 0;
+
+  private frameCount = 0;
+  private fpsTimer = 0;
+  private fps = 0;
+
+  /**
+   * Frame-rate governor state.
+   *
+   * `ceiling` is the highest view distance that has not yet proved too expensive.
+   * It only ever falls, which is what makes the search converge: without it a
+   * machine that cannot sustain nine would drop to eight, see the frame time
+   * return to vsync, climb back to nine, stutter, and repeat for the whole
+   * session. Lowering the ceiling on distress means the cost is paid once.
+   */
+  /** Scratch basis vectors for the audio listener. Reused, not allocated per frame. */
+  private audioRight = new THREE.Vector3();
+  private audioUp = new THREE.Vector3();
+  private audioForward = new THREE.Vector3();
+  private thunderTimer = 6;
+
+  private governorCeiling = RENDER_DISTANCE;
+  private smoothedFrameMs = 16.7;
+  private governorDistressFor = 0;
+  private governorSlackFor = 0;
+  private governorCooldown = 0;
+  /** Render distances the governor has given up on, for the diagnostics. */
+  private governorSteps: number[] = [];
+  /** Set once a test or diagnostic pins the view distance by hand. */
+  private governorSuspended = false;
+
+  /**
+   * Render stats for the world pass only.
+   *
+   * three.js resets `renderer.info` at the start of every render call, so after
+   * the view model draws, `info.render` describes just the held weapon. Anything
+   * reporting world geometry has to snapshot the counters in between.
+   */
+  private worldRenderStats = { triangles: 0, calls: 0 };
+
+  constructor(canvas: HTMLCanvasElement) {
+    this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' });
+    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    this.renderer.setSize(window.innerWidth, window.innerHeight);
+    this.renderer.setClearColor(SKY_COLOR);
+
+    this.camera = new THREE.PerspectiveCamera(78, window.innerWidth / window.innerHeight, 0.1, 600);
+    this.camera.rotation.order = 'YXZ';
+
+    this.input = new Input(canvas);
+    this.hud.setCamera(this.camera);
+    this.screens = new Screens(
+      () => this.closeSheet(),
+      (id) => this.audio.play(id),
+    );
+    // Asked afresh on every sheet refresh, not cached: the player can walk away
+    // from the bench with the sheet open.
+    this.screens.benchNearby = () => this.benchNearby();
+
+    this.scene.background = new THREE.Color(SKY_COLOR);
+    // Fog hides chunk pop-in at the streaming frontier.
+    const viewDistance = RENDER_DISTANCE * 16;
+    this.scene.fog = new THREE.Fog(SKY_COLOR, viewDistance * 0.34, viewDistance * 0.97);
+
+    this.viewModel = new ViewModel(78, window.innerWidth / window.innerHeight);
+    this.setupLights();
+    this.scene.add(
+      this.stars.points,
+      this.celestial.group,
+      this.rain.lines,
+      this.lights.group,
+      this.highlight.group,
+      this.trails.mesh,
+      this.arc.group,
+    );
+
+    // Rain kicks up a little spray where it lands.
+    this.rain.onSplash = (x, y, z) => {
+      if (Math.random() > 0.06) return;
+      this.particles.spawn(
+        new THREE.Vector3(x, y + 0.05, z),
+        new THREE.Vector3((Math.random() - 0.5) * 1.2, 1 + Math.random(), (Math.random() - 0.5) * 1.2),
+        { color: 0xa8c0d4, size: 0.05, life: 0.28, gravity: 16 },
+      );
+    };
+
+    this.world = new World(randomSeed(), RENDER_DISTANCE);
+    this.scene.add(this.world.group);
+
+    this.player = new Player(Inventory.startingKit());
+
+    this.pickups = new PickupManager({
+      onXp: (amount) => {
+        this.audio.play('orbXp');
+        this.grantXp(amount);
+      },
+      onMana: (amount) => {
+        const restored = this.player.stats.restoreMana(amount);
+        this.audio.play('orbMana');
+        if (restored > 0) this.hud.log(`Absorbed ${Math.round(restored)} mana.`, 'magic');
+      },
+      onGold: (amount) => {
+        this.player.stats.addGold(amount);
+        this.audio.play('orbGold');
+        this.hud.log(`Picked up ${Math.round(amount)} gold.`, 'good');
+      },
+      onItem: (stack) => this.collectItem(stack),
+    });
+    this.entities = new EntityManager(this.pickups);
+
+    this.scene.add(this.particles.points, this.projectiles.group, this.pickups.group, this.entities.group);
+
+    this.ctx = this.buildContext();
+    this.entities.attach(this.ctx);
+    this.combat.onPlayerDeath = (source) => this.onPlayerDeath(source);
+    // Routed through the context rather than straight into the combat system, so
+    // it passes the same guards as every other damage source. Calling the combat
+    // system directly meant falling ignored invulnerability entirely.
+    this.player.onFallDamage = (amount) =>
+      this.ctx.damagePlayer({ amount, type: 'blunt', canCrit: false }, this.player.position, 'The fall');
+    // Routed through the context like every other damage source, so lava
+    // respects invulnerability, armour and the death path rather than being a
+    // second way to subtract health.
+    this.player.onLavaDamage = (amount) =>
+      this.ctx.damagePlayer({ amount, type: 'fire', canCrit: false }, this.player.position, 'Lava');
+
+    this.bindUi();
+    this.spawnPlayer();
+
+    window.addEventListener('resize', () => this.onResize());
+    this.hud.log('You wake at the edge of somewhere unmapped.', 'info');
+    this.hud.log('Left-click to attack, X to change how you strike, Tab for your sheet.', 'info');
+  }
+
+  // ---------------------------------------------------------------- setup
+
+  private ambient!: THREE.AmbientLight;
+  private hemisphere!: THREE.HemisphereLight;
+  private sun!: THREE.DirectionalLight;
+
+  private setupLights(): void {
+    // Baked AO handles contact shadows, so simple global lighting is enough.
+    // Intensities and colours are driven by the day/night cycle each frame.
+    this.ambient = new THREE.AmbientLight(0xffffff, 0.55);
+    this.hemisphere = new THREE.HemisphereLight(0xbcd8f0, 0x4a4034, 0.7);
+    this.sun = new THREE.DirectionalLight(0xfff2d8, 1.15);
+    this.sun.position.set(0.45, 1, 0.28);
+    this.scene.add(this.ambient, this.hemisphere, this.sun);
+  }
+
+  /**
+   * Applies the time of day and current weather to sky, fog, and lighting.
+   * Also handles the underwater case, which overrides everything else.
+   */
+  private updateEnvironment(dt: number): void {
+    this.time.update(dt);
+    this.weather.update(dt);
+
+    const daylight = this.time.daylight;
+    // Published here rather than in step() so that anything reading the context
+    // — spawn caps, enemy sight — sees the current time even when the
+    // environment is updated outside the normal simulation tick.
+    this.ctx.daylight = daylight;
+    this.ctx.raining = this.weather.isRaining;
+    const dim = this.weather.dim;
+
+    this.time.skyColor(this.skyColor).multiplyScalar(1 - dim * 0.72);
+    this.time.fogColor(this.fogColorScratch).multiplyScalar(1 - dim * 0.45);
+    this.time.lightColor(this.lightColorScratch);
+
+    this.sun.position.copy(this.time.lightDirection(this.sunDirection)).multiplyScalar(100);
+    this.sun.color.copy(this.lightColorScratch);
+    this.sun.intensity = this.time.sunIntensity * (1 - dim * 0.7);
+    this.ambient.intensity = this.time.ambientIntensity * (1 - dim * 0.3);
+    this.hemisphere.intensity = this.time.hemisphereIntensity * (1 - dim * 0.4);
+
+    const eye = this.player.eyePosition;
+    this.underwater = this.world.getBlock(
+      Math.floor(eye.x),
+      Math.floor(eye.y),
+      Math.floor(eye.z),
+    ) === Block.Water;
+
+    const fog = this.scene.fog as THREE.Fog;
+    // The live view distance, not the ceiling. Fog is what hides the streaming
+    // frontier, so when the governor pulls the view in the haze has to come with
+    // it — otherwise chunks wink out in clear air at the new boundary, which is
+    // far more noticeable than the shorter view itself.
+    const viewDistance = this.world.renderDistance * 16;
+
+    if (this.underwater) {
+      // Murky and close: being submerged should feel like a different place.
+      this.skyColor.setRGB(0.06, 0.18, 0.3);
+      fog.color.setRGB(0.05, 0.16, 0.28);
+      fog.near = 0.4;
+      fog.far = 16;
+      this.ambient.intensity = 0.32 + daylight * 0.28;
+    } else {
+      fog.color.copy(this.fogColorScratch);
+      // Weather pulls the fog plane in; fog weather does it hardest.
+      const tighten = this.weather.fogTighten;
+      // Base haze, before weather. Brought in from 0.45/0.95 of the view distance:
+      // at that range fog only ever touched the streaming frontier, so it read as a
+      // way of hiding chunk pop-in rather than as atmosphere. Starting it closer gives
+      // hills and treelines real aerial perspective.
+      //
+      // Night is hazier than day, which is both atmospheric and useful: it shortens
+      // how far you can see trouble coming once it gets dark.
+      const nightHaze = 1 - daylight;
+      fog.near = viewDistance * (0.34 - tighten * 0.28 - nightHaze * 0.12);
+      fog.far = viewDistance * (0.97 - tighten * 0.7 - nightHaze * 0.2);
+    }
+
+    // Apply blindness: darken the sky and fog, and reduce visibility
+    const blindness = this.player.stats.getBlindnessIntensity();
+    if (blindness > 0) {
+      // Darken sky and fog colors
+      this.skyColor.multiplyScalar(1 - blindness * 0.5);
+      fog.color.multiplyScalar(1 - blindness * 0.5);
+      // Reduce visible distance by making fog closer
+      fog.near *= 1 - blindness * 0.5;
+      fog.far *= 1 - blindness * 0.5;
+    }
+
+    (this.scene.background as THREE.Color).copy(this.skyColor);
+    this.renderer.setClearColor(this.skyColor);
+
+    this.stars.update(eye, this.underwater ? 0 : this.time.starOpacity * (1 - dim));
+    // Sun and moon ride the same shell as the stars. Hidden underwater, where the
+    // surface should be all you can see looking up.
+    this.celestial.group.visible = !this.underwater;
+    if (!this.underwater) {
+      this.celestial.update(eye, this.time.sunDirection(), this.time.daylight * (1 - dim));
+    }
+
+    // Rain, and the lights that matter once it gets dark.
+    this.rain.setBrightness(0.35 + daylight * 0.65);
+    this.rain.update(dt, this.world, this.player.position, this.underwater ? 0 : this.weather.rainRate);
+    const torchPosition = this.worldTorchPosition();
+    this.lights.update(this.world, eye, torchPosition, 1 - daylight);
+    this.updateTorchEmbers(dt, torchPosition);
+  }
+
+  private emberTimer = 0;
+
+  /**
+   * Embers rising from live flames: the one in your hand, and any planted torches
+   * close enough to notice. Emission is throttled rather than per-frame, so a
+   * corridor lined with torches does not flood the particle pool.
+   */
+  private updateTorchEmbers(dt: number, handPosition: THREE.Vector3 | null): void {
+    this.emberTimer -= dt;
+    if (this.emberTimer > 0) return;
+    this.emberTimer = 0.07;
+
+    const spawnEmber = (x: number, y: number, z: number, scale: number, life: number) => {
+      this.particles.spawn(
+        new THREE.Vector3(x + (Math.random() - 0.5) * 0.12 * scale, y, z + (Math.random() - 0.5) * 0.12 * scale),
+        new THREE.Vector3(
+          (Math.random() - 0.5) * 0.35 * scale,
+          (0.7 + Math.random() * 0.9) * scale,
+          (Math.random() - 0.5) * 0.35 * scale,
+        ),
+        {
+          // A stepped flame palette rather than a blend, to match the blocky look.
+          color: EMBER_COLORS[Math.floor(Math.random() * EMBER_COLORS.length)],
+          size: (0.055 + Math.random() * 0.035) * scale,
+          life,
+          gravity: -1.8 * scale,
+          drag: 1.6,
+        },
+      );
+    };
+
+    // The held torch's own embers are *not* emitted here. They live in the view
+    // model's scene, which is rendered through a narrower camera — a point shared
+    // between the two spaces lands on two different pixels, so world-space sparks
+    // visibly drifted away from the flame throwing them. Scaling them by distance
+    // (an earlier attempt at the same problem) only fixed their size, not the
+    // offset, and overshot into specks.
+    void handPosition;
+
+    // Planted torches: only the nearest few, and only some of the time.
+    const nearby = this.world.nearestLightSources(this.player.eyePosition, 18, 5);
+    for (const light of nearby) {
+      if (this.world.getBlock(light.x, light.y, light.z) !== Block.Torch) continue;
+      if (Math.random() > 0.45) continue;
+      spawnEmber(light.x + 0.5, light.y + 0.72, light.z + 0.5, 1, 0.5 + Math.random() * 0.35);
+    }
+  }
+
+  /**
+   * Where the held torch's flame sits in world space.
+   *
+   * The view model lives in camera space, so its flame position has to be
+   * transformed out to the world before a light can be placed there.
+   */
+  private worldTorchPosition(): THREE.Vector3 | null {
+    if (!this.viewModel.hasTorch) return null;
+    const local = this.viewModel.torchFlameLocalPosition;
+    if (!local) return null;
+    return local.clone().applyMatrix4(this.camera.matrixWorld);
+  }
+
+  private buildContext(): GameContext {
+    return {
+      world: this.world,
+      player: this.player,
+      particles: this.particles,
+      enemies: this.entities,
+      time: 0,
+      daylight: 1,
+      raining: false,
+      damagePlayer: (input, from, sourceName) => {
+        if (this.invulnerable) return;
+        this.combat.damagePlayer(this.ctx, input, from, sourceName);
+      },
+      spawnProjectile: (req: ProjectileRequest) => this.projectiles.spawn(req, this.trails),
+      alert: (position, radius) => this.entities.alert(position, radius),
+      explode: (position, radius, damage, type, pierce, blockDamage, hostile, sourceName) =>
+        this.combat.explode(this.ctx, position, radius, damage, type, pierce, blockDamage, hostile, sourceName),
+      log: (message, cls: LogClass = 'info') => this.hud.log(message, cls),
+      floater: (worldPosition, text, cls: FloaterClass) => this.hud.floater(worldPosition, text, cls),
+      sound: (id, options) => this.audio.play(id, options),
+      dropItem: (position, itemId, qty = 1) => this.pickups.spawnLoot(position, [{ itemId, qty }]),
+    };
+  }
+
+  private bindUi(): void {
+    document.getElementById('play')?.addEventListener('click', () => this.startPlaying());
+    document.getElementById('respawn')?.addEventListener('click', () => this.respawn());
+
+    document.addEventListener('pointerlockchange', () => {
+      // Losing the pointer (usually Esc) pauses, unless an overlay owns the mouse.
+      if (!this.input.locked && this.mode === 'playing') {
+        this.mode = 'menu';
+        this.hud.setMenuVisible(true);
+      }
+    });
+  }
+
+  /** Finds a habitable spawn column: dry land, above sea level. */
+  private spawnPlayer(): void {
+    let spawnX = 0;
+    let spawnZ = 0;
+    search: for (let radius = 0; radius < 40; radius += 4) {
+      for (let angle = 0; angle < 8; angle++) {
+        const x = Math.round(Math.cos((angle / 8) * Math.PI * 2) * radius);
+        const z = Math.round(Math.sin((angle / 8) * Math.PI * 2) * radius);
+        const height = this.world.gen.surfaceHeight(x, z);
+        // Relative to the waterline, not an absolute height. Hard-coding "below
+        // 50" meant nothing could match once the sea rose to 62, so the search
+        // silently fell through to the origin every time.
+        if (height > SEA_LEVEL + 2 && height < SEA_LEVEL + 26) {
+          spawnX = x;
+          spawnZ = z;
+          break search;
+        }
+      }
+    }
+
+    // Generate the immediate area up front so the player does not fall through.
+    this.world.ensureLoadedAround(spawnX, spawnZ, 2);
+    this.player.spawnAt(this.world, spawnX, spawnZ);
+    this.player.applyToCamera(this.camera);
+  }
+
+  // ---------------------------------------------------------------- modes
+
+  start(): void {
+    this.renderer.setAnimationLoop(() => this.frame());
+  }
+
+  private startPlaying(): void {
+    this.mode = 'playing';
+    this.hud.setMenuVisible(false);
+    this.input.requestLock();
+    // Must happen inside the click handler. A browser will not start an
+    // AudioContext without a user gesture, and one created outside a gesture lands
+    // in `suspended` and stays there with no error — silent audio that looks like
+    // working audio.
+    this.audio.resume();
+
+    // `?loadout=all` fills the bags with everything, for looking at the models and
+    // trying the weapons without grinding for drops. Applied once, not on every
+    // unpause, or reopening the menu would keep topping the bags up.
+    if (!this.loadoutApplied && typeof location !== 'undefined') {
+      this.loadoutApplied = true;
+      if (new URLSearchParams(location.search).get('loadout') === 'all') this.debugGiveAll();
+    }
+  }
+
+  private loadoutApplied = false;
+
+  private openSheet(pane?: SheetPane): void {
+    this.mode = 'sheet';
+    this.input.releaseLock();
+    this.screens.open(this.player, pane);
+    this.audio.play('uiOpen');
+  }
+
+  private closeSheet(): void {
+    if (this.mode !== 'sheet') return;
+    this.mode = 'playing';
+    this.input.requestLock();
+    this.audio.play('uiClose');
+  }
+
+  private onPlayerDeath(sourceName: string): void {
+    this.mode = 'dead';
+    this.input.releaseLock();
+    this.audio.play('death');
+    this.audio.clearAmbience();
+    this.hud.showDeath(sourceName, this.player.stats.level);
+    this.hud.log(`You were slain by ${sourceName}.`, 'hurt');
+  }
+
+  /**
+   * Turns this frame's movement events into sound.
+   *
+   * `Player` records them rather than playing them, because it is pure physics and
+   * is built in tests with no game around it. Drained immediately after its update
+   * so nothing can accumulate across frames.
+   */
+  private drainMovementSounds(): void {
+    const events = this.player.moveEvents;
+    if (events.jumped) this.audio.play('jump');
+    events.jumped = false;
+  }
+
+  private respawn(): void {
+    this.hud.hideDeath();
+    this.player.dead = false;
+    this.player.stats.resetForRespawn();
+    // Death costs progress toward the next level, but never a whole level.
+    const penalty = Math.floor((this.player.stats.xp - 0) * 0.05);
+    this.player.stats.xp = Math.max(0, this.player.stats.xp - penalty);
+
+    this.entities.clear();
+    this.projectiles.clear();
+    this.combat.reset();
+    this.spawnPlayer();
+
+    this.mode = 'playing';
+    this.input.requestLock();
+    this.hud.log('You come to, bruised but breathing.', 'good');
+  }
+
+  // ---------------------------------------------------------------- rewards
+
+  private grantXp(amount: number): void {
+    const levels = this.player.stats.addXp(amount);
+    if (levels > 0) {
+      const stats = this.player.stats;
+      // Both currencies, since they are spent on different screens.
+      const skillPoints = totalSkillPoints(stats.level) - pointsSpentOnSkills(stats.skills);
+      this.hud.log(
+        `Level ${stats.level}! ${stats.unspent} ability point${stats.unspent === 1 ? '' : 's'} and ` +
+          `${skillPoints} skill point${skillPoints === 1 ? '' : 's'} to spend (Tab).`,
+        'good',
+      );
+      stats.syncSkills();
+      this.audio.play('levelUp');
+      this.particles.burst(this.player.center, 40, 4, {
+        color: 0xd5a0ff,
+        size: 0.14,
+        life: 1.1,
+        gravity: -6,
+        drag: 1.2,
+      });
+      this.player.syncEquipmentDerived();
+    }
+  }
+
+  private collectItem(stack: Stack): boolean {
+    const leftover = this.player.inventory.add(stack.itemId, stack.qty);
+    const taken = stack.qty - leftover;
+    if (taken <= 0) {
+      this.hud.log('Your bag is full.', 'info');
+      return false;
+    }
+    const def = item(stack.itemId);
+    this.hud.log(`Picked up ${def.name}${taken > 1 ? ` x${taken}` : ''}.`, 'good');
+
+    // Loot is only exciting if it is obviously an upgrade, so say so.
+    if (def.kind === 'armor' && def.armor) {
+      const current = this.player.inventory.equippedDef('armor');
+      if (!current || (current.armor?.armor ?? 0) < def.armor.armor) {
+        this.hud.log(`${def.name} is better than what you are wearing — equipping it.`, 'good');
+        this.player.inventory.equip(def.id);
+        this.player.syncEquipmentDerived();
+      }
+    }
+    return leftover === 0;
+  }
+
+  // ---------------------------------------------------------------- frame
+
+  /**
+   * Trades view distance for frame rate, and tries to trade back.
+   *
+   * The dial is the only one that moves the dominant cost: a view of radius `r`
+   * holds triangles in proportion to `r²`, so nine chunks down to seven is a 38%
+   * cut. Nothing else available is close — the terrain is already culled face by
+   * face, canopies are hollow, and the half of the geometry that is cave wall is
+   * hidden by occlusion rather than by the frustum, which a renderer this simple
+   * has no cheap way to exploit.
+   *
+   * Three details carry the whole thing:
+   *
+   * - **Frames spent filling the streaming queue are ignored.** Chunk work is
+   *   budgeted per frame and the budget widens while the world is still filling
+   *   in, so the frames just after a spawn, a teleport or a view-distance change
+   *   are legitimately slow. Sampling them means the governor reads its own churn
+   *   as evidence and walks itself to the floor.
+   *
+   * - **Distress must persist.** A single expensive frame is a grenade, not a
+   *   verdict.
+   *
+   * - **Recovery is attempted at most once per ceiling.** See `governorCeiling`.
+   */
+  private governView(dt: number): void {
+    if (this.governorSuspended) return;
+
+    // Chunk streaming is allowed to be slow while the world fills in, so those
+    // frames say nothing about whether the view distance is affordable.
+    if (this.world.lastFrameWasFilling) {
+      this.governorDistressFor = 0;
+      this.governorSlackFor = 0;
+      return;
+    }
+
+    // Exponential moving average over roughly the last half second.
+    const frameMs = dt * 1000;
+    this.smoothedFrameMs += (frameMs - this.smoothedFrameMs) * Math.min(1, dt / 0.5);
+
+    if (this.governorCooldown > 0) {
+      this.governorCooldown -= dt;
+      return;
+    }
+
+    const current = this.world.renderDistance;
+
+    if (this.smoothedFrameMs > GOVERNOR_DISTRESS_MS) {
+      this.governorSlackFor = 0;
+      this.governorDistressFor += dt;
+      if (this.governorDistressFor >= GOVERNOR_DISTRESS_SECONDS && current > MIN_RENDER_DISTANCE) {
+        this.governorSteps.push(current);
+        this.governorCeiling = current - 1;
+        this.world.renderDistance = current - 1;
+        this.governorDistressFor = 0;
+        this.governorCooldown = GOVERNOR_COOLDOWN_SECONDS;
+      }
+      return;
+    }
+
+    this.governorDistressFor = 0;
+
+    if (this.smoothedFrameMs <= GOVERNOR_SLACK_MS && current < this.governorCeiling) {
+      this.governorSlackFor += dt;
+      if (this.governorSlackFor >= GOVERNOR_SLACK_SECONDS) {
+        this.world.renderDistance = current + 1;
+        this.governorSlackFor = 0;
+        this.governorCooldown = GOVERNOR_COOLDOWN_SECONDS;
+      }
+    } else {
+      this.governorSlackFor = 0;
+    }
+  }
+
+  private frame(): void {
+    const dt = Math.min(this.clock.getDelta(), MAX_FRAME_DT);
+
+    this.frameCount++;
+    this.fpsTimer += dt;
+    if (this.fpsTimer >= 0.5) {
+      this.fps = Math.round(this.frameCount / this.fpsTimer);
+      this.frameCount = 0;
+      this.fpsTimer = 0;
+    }
+
+    if (this.mode === 'playing') this.governView(dt);
+
+    this.handleGlobalKeys();
+    this.updateAudio(dt);
+
+    if (this.mode === 'playing') {
+      this.step(dt);
+    } else if (this.mode === 'dead') {
+      // Keep the world alive behind the death screen.
+      this.particles.update(dt);
+      this.entities.update(dt, this.ctx);
+      this.projectiles.update(dt, this.ctx);
+      this.updateEnvironment(dt);
+    }
+
+    this.player.applyToCamera(this.camera);
+    this.camera.updateMatrixWorld();
+    this.entities.faceCamera(this.camera);
+    this.pickups.faceCamera(this.camera.quaternion);
+
+    this.updateMinimap(dt);
+    this.hud.update(this.player, this.combat.hudState(this.ctx), {
+      fps: this.fps,
+      chunks: this.world.loadedChunkCount,
+      entities: this.entities.hostileCount,
+      clock: this.time.clockLabel(),
+      phase: this.time.phaseLabel(),
+      weather: this.weather.label(),
+      underwater: this.underwater,
+    });
+
+    this.renderer.render(this.scene, this.camera);
+    this.worldRenderStats.triangles = this.renderer.info.render.triangles;
+    this.worldRenderStats.calls = this.renderer.info.render.calls;
+
+    // The held item is drawn last, over a cleared depth buffer, so it is never
+    // sliced open by a wall the player is standing against.
+    if (!this.viewModelHidden) this.viewModel.render(this.renderer);
+    this.input.endFrame();
+  }
+
+  private step(dt: number): void {
+    this.elapsed += dt;
+    this.ctx.time = this.elapsed;
+
+    this.handleInteract();
+    this.handlePlayKeys();
+
+    // Environment first: spawn pressure and enemy sight both read daylight.
+    this.updateEnvironment(dt);
+
+    this.world.update(this.player.position.x, this.player.position.z);
+    this.combat.update(dt, this.input, this.ctx);
+    this.player.update(dt, this.input, this.world);
+    this.player.stats.updateStatusEffects(dt, this.ctx);
+    this.drainMovementSounds();
+    this.entities.update(dt, this.ctx);
+    this.projectiles.update(dt, this.ctx);
+    this.pickups.update(dt, this.ctx);
+    this.particles.update(dt);
+
+    this.updateBlockHighlight();
+    this.updateViewModel(dt);
+    this.updateAiming(dt);
+    this.updateSwingTrail();
+    this.trails.update(dt, this.player.eyePosition);
+  }
+
+  /** Outlines the block under the crosshair and cracks it as it breaks. */
+  private updateBlockHighlight(): void {
+    const state = this.combat.highlightState();
+    if (!state) {
+      this.highlight.hide();
+      return;
+    }
+    this.highlight.show(state.x, state.y, state.z, state.progress);
+  }
+
+  /**
+   * Aim-down-sights: narrows the field of view and previews the flight path.
+   * The preview is traced with the projectile's own integration, so it cannot
+   * disagree with where the shot actually goes.
+   */
+  private updateAiming(dt: number): void {
+    const aim = this.combat.aimState(this.ctx);
+    const targetFov = aim ? this.baseFov / aim.zoom : this.baseFov;
+
+    if (Math.abs(this.camera.fov - targetFov) > 0.01) {
+      this.camera.fov += (targetFov - this.camera.fov) * Math.min(1, dt * 11);
+      this.camera.updateProjectionMatrix();
+    }
+
+    if (!aim) {
+      this.arc.hide();
+      return;
+    }
+    this.arc.show(this.world, aim.origin, aim.direction, aim.speed, aim.gravityScale);
+  }
+
+  /** Handle of the ribbon currently tracing a melee swing, or -1. */
+  private swingTrailHandle = -1;
+
+  /**
+   * Traces the weapon tip while an attack is in motion.
+   *
+   * Only during the strike itself, not the wind-up: a trail on the wind-up would
+   * imply the blade is already travelling, which misreads the timing the player
+   * is supposed to learn.
+   */
+  private updateSwingTrail(): void {
+    const view = this.combat.viewState(this.ctx);
+    const striking = (view.action === 'swing' || view.action === 'thrust') && view.phase === 'recovery';
+
+    if (!striking) {
+      if (this.swingTrailHandle >= 0) {
+        this.trails.release(this.swingTrailHandle);
+        this.swingTrailHandle = -1;
+      }
+      return;
+    }
+
+    this.viewModel.refreshMatrices();
+    const tip = this.viewModel.weaponTipWorldPosition(this.camera.matrixWorld);
+    if (!tip) return;
+
+    if (this.swingTrailHandle < 0) {
+      const wide = view.action === 'swing';
+      this.swingTrailHandle = this.trails.spawn(wide ? 0xdfe8ff : 0xfff0d0, wide ? 0.3 : 0.16, 0.42);
+    }
+    if (this.swingTrailHandle >= 0) this.trails.push(this.swingTrailHandle, tip);
+  }
+
+  private updateViewModel(dt: number): void {
+    const view = this.combat.viewState(this.ctx);
+    const inventory = this.player.inventory;
+    this.viewModel.update(dt, {
+      action: view.action,
+      phase: view.phase,
+      progress: view.progress,
+      draw: view.draw,
+      blocking: this.player.blocking,
+      mainItemId: inventory.activeItemId ?? inventory.equipped.weapon,
+      shieldItemId: inventory.equipped.shield,
+      torchItemId: inventory.equipped.torch,
+      attackMode: view.attackMode,
+      attackDirection: view.attackDirection,
+      speed: Math.hypot(this.player.velocity.x, this.player.velocity.z),
+      shotCounter: view.shotCounter,
+      daylight: this.time.daylight,
+      lookDx: this.input.mouseDX,
+      lookDy: this.input.mouseDY,
+    });
+  }
+
+  /** Feeds the minimap the terrain and the enemies on it. */
+  private updateMinimap(dt: number): void {
+    const markers: { x: number; z: number; kind: 'enemy' }[] = [];
+    for (const enemy of this.entities.enemies) {
+      if (enemy.dead || enemy.archetype.passive) continue;
+      markers.push({ x: enemy.position.x, z: enemy.position.z, kind: 'enemy' });
+    }
+    this.hud.minimap.update(dt, this.world, this.player.position, this.player.yaw, markers, this.time.daylight);
+  }
+
+  private handleGlobalKeys(): void {
+    if (this.input.wasPressed('Tab')) {
+      if (this.mode === 'playing') this.openSheet();
+      else if (this.mode === 'sheet') this.screens.close();
+    }
+    if (this.input.wasPressed('F5')) void this.save();
+    if (this.input.wasPressed('F9')) void this.load();
+    if (this.input.wasPressed('KeyM')) {
+      const muted = this.audio.toggleMute();
+      if (muted) this.audio.clearAmbience();
+      this.hud.log(muted ? 'Sound off.' : 'Sound on.', 'info');
+    }
+    // Volume, on the bracket keys. There is no options screen to put a slider in,
+    // and a game with no way to turn the sound down is a game people mute at the
+    // tab instead.
+    if (this.input.wasPressed('BracketLeft')) {
+      this.audio.setVolume(this.audio.masterVolume - 0.1);
+      this.hud.log(`Volume ${Math.round(this.audio.masterVolume * 100)}%.`, 'info');
+    }
+    if (this.input.wasPressed('BracketRight')) {
+      this.audio.setVolume(this.audio.masterVolume + 0.1);
+      this.hud.log(`Volume ${Math.round(this.audio.masterVolume * 100)}%.`, 'info');
+    }
+  }
+
+  /**
+   * Keeps the ears on the camera and the weather beds at the right level.
+   *
+   * The right vector comes from the camera matrix rather than from the player's
+   * yaw, because panning is defined against what is actually on screen — and the
+   * view model has its own camera, so deriving it from anything else drifts.
+   */
+  private updateAudio(dt: number): void {
+    this.audio.update(dt);
+    this.camera.matrixWorld.extractBasis(this.audioRight, this.audioUp, this.audioForward);
+    this.audio.setListener(this.camera.position, this.audioRight);
+
+    if (this.mode !== 'playing') {
+      this.audio.clearAmbience();
+      return;
+    }
+
+    // No rain bed. Filtered noise is a convincing *hiss* and an unconvincing
+    // rainfall, and unlike a one-shot it is there continuously for as long as the
+    // weather lasts, so there is nowhere for it to hide.
+    // Submerged, everything above the surface is replaced by a low rumble.
+    this.audio.setAmbient('wind', this.underwater ? 0.33 : 0, 220, 0.8);
+
+    // Thunder, on the storms only, at random intervals.
+    if (this.weather.kind === 'storm') {
+      this.thunderTimer -= dt;
+      if (this.thunderTimer <= 0) {
+        this.thunderTimer = 7 + Math.random() * 16;
+        this.audio.play('thunder', { volume: 0.5 + Math.random() * 0.4 });
+      }
+    } else {
+      this.thunderTimer = 4 + Math.random() * 8;
+    }
+  }
+
+  /**
+   * True when a workbench is within arm's reach.
+   *
+   * Scans the voxels around the player rather than tracking placed benches in a
+   * map. A bench is a block like any other — it can be mined, blown up by a
+   * grenade, or buried — and a cache would have to be invalidated by every one of
+   * those. The scan is a 7x5x7 box of typed-array reads once per interaction,
+   * which is nothing.
+   */
+  benchNearby(): boolean {
+    const p = this.player.position;
+    const px = Math.floor(p.x);
+    const py = Math.floor(p.y);
+    const pz = Math.floor(p.z);
+    for (let dy = -2; dy <= 2; dy++) {
+      for (let dz = -3; dz <= 3; dz++) {
+        for (let dx = -3; dx <= 3; dx++) {
+          if (this.world.getBlock(px + dx, py + dy, pz + dz) === Block.Workbench) return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  /**
+   * `E` — interact with whatever is in front of you.
+   *
+   * Only the workbench answers at the moment. Doors are deliberately left on
+   * right-click: that is already how they work, and moving them here would break
+   * the muscle memory of everyone who has built one.
+   */
+  private handleInteract(): void {
+    if (!this.input.wasPressed('KeyE')) return;
+
+    const hit = this.world.raycast(this.player.eyePosition, this.player.lookDirection, 4.5, isTargetable);
+    const lookingAtBench = hit && this.world.getBlock(hit.x, hit.y, hit.z) === Block.Workbench;
+
+    if (lookingAtBench || this.benchNearby()) {
+      this.openSheet('crafting');
+      return;
+    }
+    this.hud.log('Nothing here to use.', 'info');
+  }
+
+  private handlePlayKeys(): void {
+    const slot = this.input.hotbarPressed();
+    if (slot >= 0) {
+      if (this.player.inventory.selected !== slot) this.audio.play('uiSelect');
+      this.player.inventory.select(slot);
+      this.player.syncEquipmentDerived();
+    }
+    if (this.input.wheelDelta !== 0) {
+      this.player.inventory.cycle(this.input.wheelDelta > 0 ? 1 : -1);
+      this.player.syncEquipmentDerived();
+      this.audio.play('uiSelect');
+    }
+  }
+
+  private onResize(): void {
+    const aspect = window.innerWidth / window.innerHeight;
+    this.camera.aspect = aspect;
+    this.camera.updateProjectionMatrix();
+    this.viewModel.setAspect(aspect);
+    this.renderer.setSize(window.innerWidth, window.innerHeight);
+  }
+
+  /**
+   * A snapshot of engine state, for the browser console and the smoke test.
+   * Handy when something looks wrong and you need to know whether the problem is
+   * the mesher, the streamer, or the spawner.
+   */
+  debugSnapshot(): Record<string, number | string> {
+    return {
+      mode: this.mode,
+      chunks: this.world.loadedChunkCount,
+      pendingChunks: this.world.pendingChunkCount,
+      triangles: this.worldRenderStats.triangles,
+      drawCalls: this.worldRenderStats.calls,
+      enemies: this.entities.count,
+      projectiles: this.projectiles.count,
+      projectilesFired: this.projectiles.spawnedTotal,
+      orbs: this.pickups.orbCount,
+      drops: this.pickups.dropCount,
+      playerX: Number(this.player.position.x.toFixed(2)),
+      playerY: Number(this.player.position.y.toFixed(2)),
+      playerZ: Number(this.player.position.z.toFixed(2)),
+      hp: Number(this.player.stats.hp.toFixed(1)),
+      level: this.player.stats.level,
+      xp: this.player.stats.xp,
+      fps: this.fps,
+      seed: this.world.seed,
+    };
+  }
+
+  /**
+   * Test/debug helper: drops an enemy in front of the player, on the ground.
+   * Returns the resulting centre-to-centre distance, which is what melee reach
+   * is measured against.
+   */
+  debugSpawnEnemy(distance = 6): number {
+    const point = this.player.position.clone().addScaledVector(this.player.facing, distance);
+    const ground = this.world.highestSolidY(Math.floor(point.x), Math.floor(point.z));
+    if (ground < 0) return -1;
+    point.y = ground + 1.05;
+    const enemy = this.entities.spawnAt(point, this.player.stats.level);
+    return enemy ? enemy.center.distanceTo(this.player.center) : -1;
+  }
+
+  /**
+   * Test/debug helper: places an enemy at the player's own elevation so melee
+   * reach is predictable regardless of terrain slope.
+   */
+  /**
+   * Damages the nearest enemy without the player attacking, for testing.
+   *
+   * Goes through the same path a spell or arrow does, so it exercises the real wake-up
+   * behaviour rather than a shortcut.
+   */
+  debugDamageNearestEnemy(amount = 3): boolean {
+    let nearest = null;
+    let best = Infinity;
+    for (const enemy of this.entities.enemies) {
+      const d = enemy.center.distanceTo(this.player.center);
+      if (d < best) {
+        best = d;
+        nearest = enemy;
+      }
+    }
+    if (!nearest) return false;
+    const direction = nearest.center.clone().sub(this.player.center).setY(0).normalize();
+    nearest.applyDamage({ damage: amount, crit: false, mitigated: 0 }, direction, 0, this.ctx);
+    return true;
+  }
+
+  /** Spawns one named archetype ahead of the player, for model screenshots. */
+  debugSpawnArchetype(archetypeId: string, distance = 5): boolean {
+    const point = this.player.position.clone().addScaledVector(this.player.facing, distance);
+    point.y = this.player.position.y;
+    return !!this.entities.spawnArchetypeAt(point, archetypeId, this.player.stats.level);
+  }
+
+  debugSpawnEnemyInReach(distance = 2.2): number {
+    const point = this.player.position.clone().addScaledVector(this.player.facing, distance);
+    point.y = this.player.position.y;
+    const enemy = this.entities.spawnAt(point, this.player.stats.level);
+    return enemy ? enemy.center.distanceTo(this.player.center) : -1;
+  }
+
+  /**
+   * Test/debug helper: lays a flat cobblestone platform around the player and
+   * clears the headroom above it, so tests are not at the mercy of terrain.
+   * Uses `record: false` so the platform is not counted as a player edit.
+   */
+  debugFlattenArena(radius = 7): void {
+    const cx = Math.floor(this.player.position.x);
+    const cy = Math.floor(this.player.position.y);
+    const cz = Math.floor(this.player.position.z);
+    for (let dz = -radius; dz <= radius; dz++) {
+      for (let dx = -radius; dx <= radius; dx++) {
+        if (dx * dx + dz * dz > radius * radius) continue;
+        this.world.setBlock(cx + dx, cy - 1, cz + dz, Block.Cobble, false);
+        for (let dy = 0; dy < 5; dy++) this.world.setBlock(cx + dx, cy + dy, cz + dz, Block.Air, false);
+      }
+    }
+    this.player.position.set(cx + 0.5, cy, cz + 0.5);
+    this.player.velocity.set(0, 0, 0);
+  }
+
+  /**
+   * Test hook: clears the death state and puts the player back in control.
+   *
+   * Debug teleports can drop the player and kill them, and nothing else clears the
+   * overlay — which left every subsequent screenshot with a stale "You Died"
+   * banner across it.
+   */
+  debugRevive(): void {
+    this.player.dead = false;
+    this.player.stats.resetForRespawn();
+    this.hud.hideDeath();
+    if (this.mode === 'dead') this.mode = 'playing';
+  }
+
+  /** Test hook: removes the ground under the player, to exercise falling. */
+  debugDropPlayer(): void {
+    const x = Math.floor(this.player.position.x);
+    const y = Math.floor(this.player.position.y);
+    const z = Math.floor(this.player.position.z);
+    for (let dz = -2; dz <= 2; dz++) {
+      for (let dx = -2; dx <= 2; dx++) this.world.setBlock(x + dx, y - 1, z + dz, Block.Air, false);
+    }
+  }
+
+  /** True while the death overlay is showing. */
+  debugIsDead(): boolean {
+    return this.player.dead || this.mode === 'dead';
+  }
+
+  /** Test hook: freezes enemy AI so attack geometry is deterministic. */
+  debugFreezeEnemies(frozen: boolean): void {
+    this.entities.frozen = frozen;
+  }
+
+  /** Test hook: clears any in-progress block mining. */
+  debugResetMining(): void {
+    this.combat.debugResetMining();
+  }
+
+  /** Test/debug helper: tops up health, stamina, and spell slots. */
+  debugRefill(): void {
+    this.player.stats.hp = this.player.stats.maxHp;
+    this.player.stats.stamina = this.player.stats.maxStamina;
+    this.player.stats.guard = this.player.stats.maxGuard;
+    this.player.stats.slotsUsed = [0, 0, 0];
+  }
+
+  /** Test/debug helper: aims the camera by absolute angles, in radians. */
+  debugLook(yaw: number, pitch: number): void {
+    this.player.yaw = yaw;
+    this.player.pitch = pitch;
+  }
+
+  /**
+   * Test/debug helper: suspends mouse-look while leaving clicks working. Needed
+   * for automation, where synthetic mouse events carry meaningless movement
+   * deltas under pointer lock.
+   */
+  debugSetLookEnabled(on: boolean): void {
+    this.input.setLookEnabled(on);
+  }
+
+  /** Test/debug helper: per-enemy health and distance, for verifying hit logic. */
+  debugEnemyReport(): {
+    name: string;
+    hp: number;
+    maxHp: number;
+    distance: number;
+    state: string;
+    hunting: boolean;
+  }[] {
+    return this.entities.enemies.map((e) => ({
+      name: e.name,
+      hp: Number(e.hp.toFixed(1)),
+      maxHp: e.maxHp,
+      distance: Number(e.center.distanceTo(this.player.center).toFixed(2)),
+      // AI state, so "does it actually attack" can be asserted rather than inferred
+      // from whether the player happened to lose health.
+      state: e.aiState,
+      hunting: e.isHunting,
+    }));
+  }
+
+  debugClearEnemies(): void {
+    this.entities.clear();
+  }
+
+  /** Jumps to a point in the day/night cycle. */
+  debugSetTime(phase: 'dawn' | 'day' | 'dusk' | 'night'): void {
+    this.time.setPhase(phase);
+    this.updateEnvironment(0);
+  }
+
+  /** Forces a weather state immediately. */
+  debugSetWeather(kind: 'clear' | 'fog' | 'rain' | 'storm', intensity = 1): void {
+    this.weather.force(kind, intensity);
+    this.updateEnvironment(0);
+  }
+
+  /** Stops the clock, so screenshots are reproducible. */
+  debugFreezeTime(frozen: boolean): void {
+    this.time.running = !frozen;
+  }
+
+  /** Environment readouts for tests. */
+  debugEnvironment(): Record<string, unknown> {
+    return {
+      clock: this.time.clockLabel(),
+      phase: this.time.phaseLabel(),
+      daylight: Number(this.time.daylight.toFixed(3)),
+      starOpacity: Number(this.time.starOpacity.toFixed(3)),
+      weather: this.weather.label(),
+      rainRate: Math.round(this.weather.rainRate),
+      raining: this.weather.isRaining,
+      underwater: this.underwater,
+      lightSources: this.world.lightSourceCount,
+      hostiles: this.entities.hostileCount,
+      fish: this.entities.fishCount,
+      hostileCap: this.entities.debugHostileCap(this.ctx),
+    };
+  }
+
+  /** View model animation state, for verifying swing/thrust are distinct. */
+  debugViewState(): Record<string, unknown> {
+    const view = this.combat.viewState(this.ctx);
+    return {
+      action: view.action,
+      phase: view.phase,
+      progress: Number(view.progress.toFixed(3)),
+      draw: Number(view.draw.toFixed(3)),
+      attackMode: view.attackMode,
+      // The stroke the mouse gesture chose, and the one the animation is playing.
+      attackDirection: view.attackDirection,
+      activeStroke: this.viewModel.activeStroke,
+      shots: view.shotCounter,
+      mainItem: this.player.inventory.activeItemId,
+      torch: this.player.inventory.equipped.torch,
+      shield: this.player.inventory.equipped.shield,
+      torchEmbers: this.viewModel.emberCount,
+    };
+  }
+
+  /**
+   * How far the held weapon's tip is from the crosshair, in normalised device
+   * coordinates — (0,0) is dead centre, 1 is half the viewport.
+   *
+   * Lets "the thrust points where you are aiming" be measured rather than
+   * approximated. The old proxy (the hand moves towards centre) passed while the
+   * point still sat visibly low and to the right of the crosshair.
+   */
+  debugTipOffset(): { x: number; y: number } | null {
+    return this.viewModel.tipScreenOffset();
+  }
+
+  /** Sun and moon state, for verifying the sky. */
+  debugCelestial(): Record<string, unknown> {
+    return this.celestial.debugState();
+  }
+
+  /**
+   * Whether terrain is actually sampling the block atlas.
+   *
+   * Textures are easy to get wrong in ways that look like "no change": a missing UV
+   * attribute, a null map, or UVs that all land on the blank tile each produce
+   * exactly the flat-coloured world that existed before. This reports the plumbing
+   * instead of leaving it to be judged by eye.
+   */
+  debugTerrainMaterial(): Record<string, unknown> {
+    return this.world.debugMaterialState();
+  }
+
+  /**
+   * Moves the player to the nearest block of open grass.
+   *
+   * Spawn lands on the highest solid block, and leaves are solid — so in a forest the
+   * player can start standing on a canopy. A screenshot of "the ground" taken there
+   * photographs leaves, which is how the grass texture came to be reviewed twice
+   * without anyone actually looking at it.
+   */
+  debugStandOnGrass(radius = 48): boolean {
+    const start = this.player.position.clone();
+    for (let r = 0; r <= radius; r += 2) {
+      for (let step = 0; step < 24; step++) {
+        const angle = (step / 24) * Math.PI * 2;
+        const x = Math.floor(start.x + Math.cos(angle) * r);
+        const z = Math.floor(start.z + Math.sin(angle) * r);
+        this.world.ensureLoadedAround(x, z, 1);
+        const top = this.world.highestSolidY(x, z);
+        if (top < 0) continue;
+        if (this.world.getBlock(x, top, z) !== Block.Grass) continue;
+        this.player.position.set(x + 0.5, top + 1.05, z + 0.5);
+        this.player.velocity.set(0, 0, 0);
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Fills the bags with one of everything and equips a usable loadout.
+   *
+   * For looking at the models and trying the weapons without grinding for drops.
+   * Reachable from the console as `__voxelquest.debugGiveAll()`, or by loading the
+   * page with `?loadout=all`.
+   */
+  debugGiveAll(): Record<string, number> {
+    const inventory = this.player.inventory;
+    let weapons = 0;
+    let other = 0;
+
+    for (const def of ITEMS.values()) {
+      // Stackables come in useful quantities; a weapon only needs to exist once.
+      const count = def.stackable ? Math.min(def.maxStack, def.kind === 'block' ? 256 : 24) : 1;
+      inventory.add(def.id, count);
+      if (def.kind === 'weapon') weapons++;
+      else other++;
+    }
+
+    // A loadout that shows off the view model: shield and lit torch in the off hand
+    // alongside the weapon. Deliberately a *one-handed* weapon — equipping a
+    // two-hander puts the shield away, which is correct behaviour and the opposite of
+    // what this is for.
+    for (const id of ['shortsword', 'iron_plate', 'iron_kite_shield', 'torch']) inventory.equip(id);
+    this.debugSelectHotbarByItem('shortsword');
+
+    this.hud.log(`Loadout: ${weapons} weapons and ${other} other items added.`, 'good');
+    return { weapons, other };
+  }
+
+  /** Per-tile contrast of the block atlas, for telling a flat tile from a missing one. */
+  debugAtlasStats(): Record<string, unknown> {
+    return this.world.debugAtlasStats();
+  }
+
+  /**
+   * Audio engine state, including a play count per sound.
+   *
+   * Sound is the least observable feature in the game: there is no frame to
+   * screenshot and headless Chromium may have no audio device at all. The engine
+   * therefore counts what the game *asked* for independently of whether anything
+   * was audible, which is what makes "swinging a sword makes a noise" assertable.
+   */
+  debugAudio(): Record<string, unknown> {
+    return this.audio.debugState();
+  }
+
+  /** Removes every loose drop, so a test can measure what one action produces. */
+  debugClearDrops(): void {
+    this.pickups.clearDrops();
+  }
+
+  /**
+   * Breaks the block the player is looking at, with the right tool for it.
+   *
+   * A test that wants to prove *dropping* works should not also have to win the
+   * argument about tools: mining the arena floor by hand now correctly yields
+   * nothing, because stone needs a pickaxe. This supplies one.
+   */
+  debugMineFacingBlock(): boolean {
+    const hit = this.world.raycast(this.player.eyePosition, this.player.lookDirection, 5.2, isTargetable);
+    if (!hit) return false;
+    return this.combat.debugBreakBlock(this.ctx, hit.x, hit.y, hit.z, item('iron_pickaxe'));
+  }
+
+  /**
+   * Teleports the player onto the nearest loose item drop.
+   *
+   * Drops do not home in the way experience orbs do — you have to walk over them —
+   * so a test that wants to prove collection works has to close the distance
+   * somehow, and driving the movement keys for an unknown number of frames is far
+   * more fragile than simply standing on it.
+   */
+  debugWalkToNearestDrop(): boolean {
+    const target = this.pickups.nearestDropPosition(this.player.center);
+    if (!target) return false;
+    this.player.position.set(target.x, this.player.position.y, target.z);
+    return true;
+  }
+
+  /** Mutes or unmutes, for tests that would rather not synthesise anything. */
+  debugSetMuted(muted: boolean): boolean {
+    if (this.audio.isMuted !== muted) this.audio.toggleMute();
+    return this.audio.isMuted;
+  }
+
+  /**
+   * Frame-rate governor state.
+   *
+   * `steps` lists the view distances it has given up on, which is the difference
+   * between "this machine never needed to back off" and "it backed off and the
+   * reason is no longer on screen".
+   */
+  debugViewGovernor(): Record<string, unknown> {
+    return {
+      renderDistance: this.world.renderDistance,
+      ceiling: this.governorCeiling,
+      max: RENDER_DISTANCE,
+      min: MIN_RENDER_DISTANCE,
+      smoothedFrameMs: Number(this.smoothedFrameMs.toFixed(2)),
+      steps: [...this.governorSteps],
+    };
+  }
+
+  /**
+   * Forces a view distance and stops the governor touching it again.
+   *
+   * The suspension is the point. On a slow machine the governor has usually
+   * already walked the view down to its floor before a test gets a chance to look,
+   * so a test that merely writes a distance is both fighting the governor and
+   * liable to be asserting against a value it did not set.
+   */
+  debugSetRenderDistance(chunks: number): number {
+    this.governorSuspended = true;
+    this.world.renderDistance = Math.max(MIN_RENDER_DISTANCE, Math.min(RENDER_DISTANCE, Math.round(chunks)));
+    return this.world.renderDistance;
+  }
+
+  /**
+   * How many authored tile sheets made it into the atlas, once they have settled.
+   *
+   * Zero means the procedural fallback is on screen, which looks deliberate and is
+   * therefore worth being able to assert against.
+   */
+  debugAuthoredTiles(): Promise<number> {
+    return this.world.debugAuthoredTiles();
+  }
+
+  /** Block highlight state, for verifying the mining animation advances. */
+  debugHighlight(): Record<string, unknown> | null {
+    const state = this.combat.highlightState();
+    if (!state) return null;
+    return { ...state, progress: Number(state.progress.toFixed(3)), visible: true };
+  }
+
+  /** Spawns fish in the nearest water, for testing the hunting loop. */
+  debugSpawnFish(): number {
+    return this.entities.debugSpawnFishNear(this.ctx);
+  }
+
+  /** Mana readouts for tests. */
+  debugMana(): Record<string, number> {
+    return {
+      mana: Math.round(this.player.stats.mana),
+      maxMana: this.player.stats.maxMana,
+      trails: this.trails.activeCount,
+    };
+  }
+
+  debugSetMana(value: number): void {
+    this.player.stats.mana = Math.max(0, Math.min(this.player.stats.maxMana, value));
+  }
+
+  /** Aim state, for verifying zoom and the arc preview. */
+  debugAim(): Record<string, unknown> {
+    const aim = this.combat.aimState(this.ctx);
+    return {
+      aiming: !!aim,
+      zoom: aim?.zoom ?? 1,
+      fov: Number(this.camera.fov.toFixed(2)),
+      arcVisible: this.arc.group.visible,
+    };
+  }
+
+  /** Shape details of the most recently placed instance of an item's block. */
+  debugPlacedShape(itemId: string): Record<string, unknown> | null {
+    const def = tryItem(itemId);
+    if (!def || def.block === undefined) return null;
+    const centre = this.player.position;
+    // Search the immediate area for the block we just placed.
+    for (let dy = -3; dy <= 3; dy++) {
+      for (let dz = -4; dz <= 4; dz++) {
+        for (let dx = -4; dx <= 4; dx++) {
+          const x = Math.floor(centre.x) + dx;
+          const y = Math.floor(centre.y) + dy;
+          const z = Math.floor(centre.z) + dz;
+          if (this.world.getBlock(x, y, z) !== def.block) continue;
+          const meta = this.world.getMeta(x, y, z);
+          const blockDefinition = blockDef(def.block);
+          const boxes = shapeBoxes(blockDefinition.shape, meta);
+          const fillsVoxel =
+            boxes.length === 1 &&
+            boxes[0].min.every((v) => v === 0) &&
+            boxes[0].max.every((v) => v === 1);
+          this.lastProbedBlock = { x, y, z };
+          return {
+            shape: blockDefinition.shape,
+            meta,
+            boxes: boxes.length,
+            fillsVoxel,
+            blocks: blockCollisionBoxes(def.block, meta).length > 0,
+            at: [x, y, z],
+          };
+        }
+      }
+    }
+    return null;
+  }
+
+  private lastProbedBlock: { x: number; y: number; z: number } | null = null;
+
+  /** Opens the door found by the last debugPlacedShape probe. */
+  debugToggleNearestDoor(): boolean {
+    const at = this.lastProbedBlock;
+    if (!at) return false;
+    return this.world.toggleBlock(at.x, at.y, at.z);
+  }
+
+
+  /** Builds a small structure showing off every shaped material, for screenshots. */
+  debugBuildShowcase(): void {
+    this.debugFlattenArena(16);
+    const ox = Math.floor(this.player.position.x) - 3;
+    const oy = Math.floor(this.player.position.y);
+    const oz = Math.floor(this.player.position.z) - 10;
+    const put = (x: number, y: number, z: number, id: Block, meta = 0) =>
+      this.world.setBlock(x, y, z, id, false, meta);
+
+    const width = 7;
+    const depth = 6;
+
+    // Floor and walls.
+    for (let x = 0; x < width; x++) {
+      for (let z = 0; z < depth; z++) {
+        put(ox + x, oy - 1, oz + z, Block.Planks);
+        const wall = x === 0 || x === width - 1 || z === 0 || z === depth - 1;
+        for (let y = 0; y < 3; y++) {
+          put(ox + x, oy + y, oz + z, wall ? Block.Brick : Block.Air);
+        }
+      }
+    }
+
+    // Doorway in the front wall, with windows either side.
+    const doorX = ox + 3;
+    const frontZ = oz + depth - 1;
+    put(doorX, oy, frontZ, Block.Door, makeMeta(2));
+    put(doorX, oy + 1, frontZ, Block.Door, makeMeta(2));
+    put(ox + 1, oy + 1, frontZ, Block.Window, makeMeta(2));
+    put(ox + 5, oy + 1, frontZ, Block.Window, makeMeta(2));
+    put(ox + 1, oy + 1, oz, Block.Window, makeMeta(0));
+    put(ox + 5, oy + 1, oz, Block.Window, makeMeta(0));
+
+    // A gable roof: each course is a full row of wedges, stepping inward and up,
+    // so the slope is continuous instead of a row of floating flaps.
+    const ridge = Math.floor(width / 2);
+    for (let step = 0; step <= ridge; step++) {
+      for (let z = -1; z <= depth; z++) {
+        const y = oy + 3 + step;
+        if (step < ridge) {
+          // Both slopes, facing outward from the ridge.
+          put(ox + step, y, oz + z, Block.Shingles, makeMeta(3));
+          put(ox + width - 1 - step, y, oz + z, Block.Shingles, makeMeta(1));
+          // Fill the interior of the course so there is no gap to see through.
+          for (let x = step + 1; x < width - 1 - step; x++) {
+            put(ox + x, y, oz + z, step === 0 ? Block.Air : Block.Planks);
+          }
+        } else {
+          put(ox + ridge, y, oz + z, Block.PlankSlab, makeMeta(0));
+        }
+      }
+    }
+
+    // Steps up to the door, each one block higher than the last.
+    for (let i = 0; i < 3; i++) {
+      put(doorX, oy - 1 + i, frontZ + 3 - i, Block.StoneStairs, makeMeta(2));
+    }
+
+    // A fenced porch either side of the steps.
+    for (let x = 0; x < width; x++) {
+      if (ox + x === doorX) continue;
+      put(ox + x, oy, frontZ + 2, Block.Fence, makeMeta(0));
+    }
+
+    // A slab path leading away, laid *on* the ground rather than flush with it.
+    for (let z = 4; z < 10; z++) put(doorX, oy, frontZ + z, Block.PlankSlab, makeMeta(0));
+
+    // Stand back on the path, looking at the front of the house. Forward is
+    // (-sin yaw, 0, -cos yaw), so yaw 0 looks towards smaller Z — which is where
+    // the house is from here.
+    this.player.position.set(doorX + 0.5, oy + 1.05, frontZ + 12.5);
+    this.player.velocity.set(0, 0, 0);
+    this.player.yaw = 0;
+    this.player.pitch = -0.02;
+  }
+
+  /** Which optional visual layers are currently drawing, for diagnosis. */
+  debugLayers(): Record<string, unknown> {
+    return {
+      trails: this.trails.activeCount,
+      trailMeshVisible: this.trails.mesh.visible,
+      arcVisible: this.arc.group.visible,
+      rainDrops: this.rain.dropCount,
+      highlightVisible: this.highlight.group.visible,
+      starsVisible: this.stars.points.visible,
+      particlesVisible: this.particles.points.visible,
+      pickupsInScene: this.pickups.group.children.length,
+    };
+  }
+
+  /** Test hook: hides a visual layer so it can be ruled in or out. */
+  debugHideLayer(layer: 'trails' | 'arc' | 'rain' | 'highlight' | 'stars' | 'viewmodel' | 'particles', hidden: boolean): void {
+    if (layer === 'particles') this.particles.points.visible = !hidden;
+    else if (layer === 'trails') this.trails.mesh.visible = !hidden;
+    else if (layer === 'arc') this.arc.group.visible = !hidden;
+    else if (layer === 'rain') this.rain.lines.visible = !hidden;
+    else if (layer === 'highlight') this.highlight.group.visible = !hidden;
+    else if (layer === 'stars') this.stars.points.visible = !hidden;
+    else this.viewModelHidden = hidden;
+  }
+
+  private viewModelHidden = false;
+
+  /** Live particle count, for verifying bursts. */
+  debugParticleCount(): number {
+    return this.particles.count;
+  }
+
+  /** Number of rain drops currently falling. */
+  debugRainDrops(): number {
+    return this.rain.dropCount;
+  }
+
+  /** Dynamic light state, for verifying the torch actually lights the world. */
+  debugTorchLight(): Record<string, unknown> {
+    return this.lights.debugState();
+  }
+
+  /** World-space transform of the held item, for comparing attack animations. */
+  debugViewPose(): Record<string, number> {
+    return this.viewModel.debugPose();
+  }
+
+  /**
+   * Makes an item active, assigning it to the current hotbar slot if it is not
+   * already on the bar.
+   */
+  debugSelectHotbarByItem(itemId: string): boolean {
+    const inventory = this.player.inventory;
+    let slot = inventory.hotbar.indexOf(itemId);
+    if (slot < 0) {
+      slot = inventory.selected;
+      inventory.assignToHotbar(slot, itemId);
+    }
+    inventory.select(slot);
+    this.player.syncEquipmentDerived();
+    return inventory.activeItemId === itemId;
+  }
+
+  /**
+   * Performs one melee gesture outright, for deterministic tests and screenshots.
+   *
+   * Drives the real path — the same `beginMelee` a mouse gesture reaches — so the
+   * weapon-geometry fallbacks and the direction modifiers all apply. Returns the
+   * stroke actually performed, which is not always the one asked for: a mace handed a
+   * thrust answers with a downcut.
+   */
+  debugMeleeGesture(direction: AttackDirection): string | null {
+    return this.combat.debugPerformGesture(this.ctx, direction);
+  }
+
+  /**
+   * Feeds mouse movement into the frame, for driving melee gestures in tests.
+   *
+   * See `Input.debugFeedMouseDelta`: the browser's own synthetic deltas are unusable
+   * under pointer lock, so a test drag holds the real mouse button and supplies the
+   * movement through here.
+   */
+  debugFeedMouse(dx: number, dy: number): void {
+    this.input.debugFeedMouseDelta(dx, dy);
+  }
+
+  /** The gesture currently being drawn, for tests and the HUD. */
+  debugGestureState(): Record<string, unknown> {
+    const g = this.combat.gestureState(this.ctx);
+    return {
+      active: g.active,
+      direction: g.direction,
+      magnitude: Number(g.magnitude.toFixed(2)),
+      charge: Number(g.charge.toFixed(3)),
+      lastDirection: g.lastDirection,
+    };
+  }
+
+  /** Equips an item directly, bypassing the hotbar. */
+  debugEquip(itemId: string): boolean {
+    const ok = this.player.inventory.equip(itemId);
+    this.player.syncEquipmentDerived();
+    return ok;
+  }
+
+  debugGiveItem(itemId: string, qty = 1): void {
+    this.player.inventory.add(itemId, qty);
+  }
+
+  /** Remaining spell slots per tier. */
+  debugSpellSlots(): number[] {
+    return [1, 2, 3].map((tier) => this.player.stats.slotsAvailable(tier as 1 | 2 | 3));
+  }
+
+  /** Abilities, skills, gold and the derived values they feed, for tests. */
+  debugCharacter(): Record<string, unknown> {
+    const stats = this.player.stats;
+    return {
+      abilities: { ...stats.abilities },
+      modifiers: Object.fromEntries(ABILITY_KEYS.map((key) => [key, stats.modifier(key)])),
+      level: stats.level,
+      abilityPoints: stats.unspent,
+      skills: { ...stats.skills },
+      skillPoints: totalSkillPoints(stats.level) - pointsSpentOnSkills(stats.skills),
+      gold: stats.gold,
+      maxHp: stats.maxHp,
+      maxMana: stats.maxMana,
+      maxStamina: stats.maxStamina,
+      melee: Number(stats.meleeMultiplier.toFixed(3)),
+      ranged: Number(stats.rangedMultiplier.toFixed(3)),
+      spell: Number(stats.spellMultiplier.toFixed(3)),
+      slots: stats.maxSlots(),
+      respecCost: respecCost(stats.level),
+    };
+  }
+
+  /** Grants gold, so the respec button can be exercised. */
+  debugGiveGold(amount: number): number {
+    this.player.stats.addGold(amount);
+    return this.player.stats.gold;
+  }
+
+  /** Sets ability scores directly, bypassing creation. */
+  debugSetAbilities(scores: Partial<Record<AbilityKey, number>>): Record<string, unknown> {
+    const stats = this.player.stats;
+    for (const key of ABILITY_KEYS) {
+      const value = scores[key];
+      if (typeof value === 'number') stats.abilities[key] = Math.max(1, Math.min(20, Math.round(value)));
+    }
+    // Pruning matters here: dropping an ability must take the skills it gated.
+    stats.syncSkills();
+    this.player.syncEquipmentDerived();
+    return this.debugCharacter();
+  }
+
+  /** Buys a skill rank through the same path the sheet uses. */
+  debugBuySkill(id: string): boolean {
+    return this.player.buySkill(id);
+  }
+
+  /** Grants levels outright, for reaching the deeper tiers in a test. */
+  debugGrantLevels(count: number): number {
+    this.player.stats.addXp(xpToReach(this.player.stats.level + Math.max(1, count)));
+    this.player.stats.syncSkills();
+    return this.player.stats.level;
+  }
+
+  /**
+   * Kills the nearest enemy outright, through the normal damage path.
+   *
+   * Routed through `damageEnemy` rather than setting hp to zero, so the kill pays
+   * out XP, mana and gold exactly as a real one does — which is the whole point
+   * when the thing under test is the drop.
+   */
+  debugKillNearestEnemy(): boolean {
+    let nearest = null;
+    let best = Infinity;
+    for (const enemy of this.entities.enemies) {
+      if (enemy.dead) continue;
+      const d = enemy.center.distanceTo(this.player.center);
+      if (d < best) {
+        best = d;
+        nearest = enemy;
+      }
+    }
+    if (!nearest) return false;
+    this.entities.damageEnemy(
+      nearest,
+      { amount: nearest.maxHp * 10, type: 'slash', canCrit: false },
+      this.player.center,
+      0,
+    );
+    return true;
+  }
+
+  /**
+   * Finds a column matching a terrain predicate and stands the player on it.
+   *
+   * Searches outward in a spiral from the origin rather than scanning a block at
+   * a time, so a feature that occupies a few percent of the world is found in
+   * well under a second. Returns where it landed, or null if nothing matched.
+   */
+  debugFindTerrain(
+    want: TerrainTarget,
+    maxRadius = 4000,
+  ): { x: number; y: number; z: number; biome: number; height: number } | null {
+    const gen = this.world.gen;
+    const matches = (x: number, z: number): boolean => {
+      const h = gen.surfaceHeight(x, z);
+      const biome = gen.biomeAt(x, z);
+      switch (want) {
+        case 'mountain':
+          // A broad massif, not merely a tall column: without the neighbour
+          // tests this happily matched a lone badlands spire and photographed a
+          // canyon while claiming to have found a mountain range.
+          return (
+            h > 120 &&
+            gen.surfaceHeight(x + 60, z) > 96 &&
+            gen.surfaceHeight(x, z + 60) > 96 &&
+            gen.biomeAt(x, z) === Biome.Mountains
+          );
+        case 'canyon':
+          // A canyon is badlands next to a big drop, not merely badlands.
+          return biome === Biome.Badlands && Math.abs(h - gen.surfaceHeight(x + 24, z)) > 26;
+        case 'deep-ocean':
+          return h < SEA_LEVEL - 30;
+        case 'island':
+          return gen.isOceanRegion(x, z) && h > SEA_LEVEL + 4;
+        case 'plateau':
+          return (
+            h > SEA_LEVEL + 14 &&
+            gen.surfaceHeight(x + 12, z) === h &&
+            gen.surfaceHeight(x, z + 12) === h &&
+            Math.abs(h - gen.surfaceHeight(x + 40, z)) > 9
+          );
+        case 'jungle':
+          return biome === Biome.Jungle && h > SEA_LEVEL + 20;
+        case 'desert':
+          return biome === Biome.Desert;
+        case 'forest':
+          // A stand of trees, not a single forest column on a biome border — the
+          // neighbour tests are what stop this photographing a meadow with one
+          // oak at the edge of frame.
+          return (
+            biome === Biome.Forest &&
+            h > SEA_LEVEL + 4 &&
+            h < 88 &&
+            gen.biomeAt(x + 20, z) === Biome.Forest &&
+            gen.biomeAt(x, z + 20) === Biome.Forest
+          );
+        case 'tundra':
+          // Where the conifers grow.
+          return (
+            biome === Biome.Tundra && h > SEA_LEVEL + 3 && gen.biomeAt(x + 20, z) === Biome.Tundra
+          );
+      }
+    };
+
+    for (let radius = 0; radius <= maxRadius; radius += 24) {
+      const steps = Math.max(8, Math.floor(radius / 12));
+      for (let i = 0; i < steps; i++) {
+        const angle = (i / steps) * Math.PI * 2;
+        const x = Math.round(Math.cos(angle) * radius);
+        const z = Math.round(Math.sin(angle) * radius);
+        if (!matches(x, z)) continue;
+        this.world.ensureLoadedAround(x, z, 2);
+        this.player.spawnAt(this.world, x, z);
+        this.player.applyToCamera(this.camera);
+        return {
+          x,
+          y: Math.round(this.player.position.y),
+          z,
+          biome: gen.biomeAt(x, z),
+          height: gen.surfaceHeight(x, z),
+        };
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Finds a feature, then stands back from it and looks at it.
+   *
+   * Standing *on* a mountain shows you a rock face at arm's length, which is how
+   * the first set of terrain screenshots came out. A landscape has to be viewed
+   * from outside itself, so this backs off around the feature until it finds a
+   * vantage point that is both lower than the target and not inside it, then
+   * aims the camera back.
+   */
+  debugViewFeature(
+    want: TerrainTarget,
+    distance = 90,
+    rise = 8,
+  ): { x: number; z: number; height: number; fromX: number; fromZ: number; drop: number } | null {
+    const found = this.debugFindTerrain(want, 5000);
+    if (!found) return null;
+
+    const gen = this.world.gen;
+    let best: { x: number; z: number; drop: number } | null = null;
+    // Try a ring of vantage points and keep the one with the best drop to the
+    // target, so the feature stands above the horizon rather than level with it.
+    for (let i = 0; i < 16; i++) {
+      const angle = (i / 16) * Math.PI * 2;
+      const vx = Math.round(found.x + Math.cos(angle) * distance);
+      const vz = Math.round(found.z + Math.sin(angle) * distance);
+      const vh = gen.surfaceHeight(vx, vz);
+      // A vantage point under water is no use: the camera would be submerged.
+      if (vh <= SEA_LEVEL) continue;
+      const drop = found.height - vh;
+      if (!best || drop > best.drop) best = { x: vx, z: vz, drop };
+    }
+    // Nowhere dry to stand: shoot from above the target instead of giving up.
+    const from = best ?? { x: found.x, z: found.z, drop: 0 };
+
+    this.world.ensureLoadedAround(from.x, from.z, 2);
+    this.player.spawnAt(this.world, from.x, from.z);
+    this.player.position.y += rise;
+    this.player.velocity.set(0, 0, 0);
+
+    // Forward is (-sin yaw, 0, -cos yaw), so this yaw points at the feature.
+    this.player.yaw = Math.atan2(-(found.x - from.x), -(found.z - from.z));
+    // Pitch from the actual geometry: the angle to the top of the feature.
+    const horizontal = Math.max(1, Math.hypot(found.x - from.x, found.z - from.z));
+    this.player.pitch = Math.atan2(found.height - this.player.position.y, horizontal) * 0.7;
+    this.player.applyToCamera(this.camera);
+
+    return { x: found.x, z: found.z, height: found.height, fromX: from.x, fromZ: from.z, drop: from.drop };
+  }
+
+  /**
+   * Puts the game back into play if it has slipped out of it.
+   *
+   * Losing the pointer lock pauses to the menu, which is right for a player
+   * pressing Esc but ruinous for a test: `step` stops running, so combat,
+   * mining and aiming all go silently dead while debug readouts that do not
+   * depend on the mode carry on answering. A browser can drop the lock on its
+   * own after a long run of synthetic input, which made whole sections of the
+   * suite fail in a cluster with no obvious cause.
+   */
+  debugEnsurePlaying(): string {
+    if (this.mode === 'menu' || this.mode === 'dead') {
+      this.debugRevive();
+      // Deliberately not `startPlaying()`. That requests the pointer lock, and a
+      // refused request fires `pointerlockchange` with the lock absent — which
+      // the handler answers by pausing back to the menu. Going through it made
+      // this guard capable of causing the very stall it exists to clear.
+      // Mouse buttons and keys arrive through document listeners regardless of
+      // the lock; only mouse *movement* needs it, and no test relies on that.
+      this.mode = 'playing';
+      this.hud.setMenuVisible(false);
+    }
+    return this.mode;
+  }
+
+  /** What fluid the player is standing in, for diagnosing the lava path. */
+  debugPlayerFluid(): Record<string, unknown> {
+    return {
+      inWater: this.player.inWater,
+      inLava: this.player.inLava,
+      dead: this.player.dead,
+      mode: this.mode,
+      invulnerable: this.invulnerable,
+      y: Number(this.player.position.y.toFixed(2)),
+      feet: this.world.getBlock(
+        Math.floor(this.player.position.x),
+        Math.floor(this.player.position.y + 0.4),
+        Math.floor(this.player.position.z),
+      ),
+    };
+  }
+
+  /** Returns the player to open ground above sea level, after a test dropped them. */
+  debugReturnToSurface(): number {
+    const x = Math.floor(this.player.position.x);
+    const z = Math.floor(this.player.position.z);
+    this.world.ensureLoadedAround(x, z, 2);
+    this.player.spawnAt(this.world, x, z);
+    this.player.applyToCamera(this.camera);
+    return Math.round(this.player.position.y);
+  }
+
+  /** Chunk streaming cost, for asserting the per-frame budget holds. */
+  debugChunkCost(): Record<string, number> {
+    return {
+      genCostMs: Number(this.world.genCost.toFixed(2)),
+      meshCostMs: Number(this.world.meshCost.toFixed(2)),
+      genCostHighMs: Number(this.world.genCostPeak.toFixed(2)),
+      meshCostHighMs: Number(this.world.meshCostPeak.toFixed(2)),
+      budgetMs: this.world.budgetMs,
+      lastFrameMs: Number(this.world.lastChunkFrameMs.toFixed(2)),
+      maxFrameMs: Number(this.world.maxChunkFrameMs.toFixed(2)),
+      maxFillFrameMs: Number(this.world.maxFillFrameMs.toFixed(2)),
+      maxFrameBoundMs: Number(this.world.maxChunkFrameBoundMs.toFixed(2)),
+      filling: this.world.lastFrameWasFilling ? 1 : 0,
+      // Queue depth, so a test can tell the initial fill apart from steady
+      // state: the two run on deliberately different budgets.
+      queued: this.world.pendingChunks,
+    };
+  }
+
+  /** Clears the worst-frame watermark, so a test can measure a fresh window. */
+  debugResetChunkCost(): void {
+    this.world.maxChunkFrameMs = 0;
+    this.world.maxFillFrameMs = 0;
+    this.world.maxChunkFrameBoundMs = 0;
+  }
+
+  /** The current top-level mode, for diagnosing a stalled suite. */
+  debugMode(): string {
+    return this.mode;
+  }
+
+  /** Terrain shape around the player, for tests. */
+  debugTerrainReport(): Record<string, unknown> {
+    const gen = this.world.gen;
+    let low = Infinity;
+    let high = -Infinity;
+    const biomes = new Set<number>();
+    for (let dz = -300; dz <= 300; dz += 20) {
+      for (let dx = -300; dx <= 300; dx += 20) {
+        const x = Math.floor(this.player.position.x) + dx;
+        const z = Math.floor(this.player.position.z) + dz;
+        const h = gen.surfaceHeight(x, z);
+        if (h < low) low = h;
+        if (h > high) high = h;
+        biomes.add(gen.biomeAt(x, z));
+      }
+    }
+    return {
+      worldHeight: CHUNK_SY,
+      seaLevel: SEA_LEVEL,
+      low,
+      high,
+      relief: high - low,
+      biomes: biomes.size,
+      playerY: Math.round(this.player.position.y),
+    };
+  }
+
+  /**
+   * Drops the player into the nearest lava, to prove it burns.
+   *
+   * Searches the loaded world rather than the generator, so it only succeeds
+   * where lava has actually been meshed into the chunk the player is standing
+   * over — which is the state the damage path has to work in.
+   */
+  debugStandInLava(): boolean {
+    const px = Math.floor(this.player.position.x);
+    const pz = Math.floor(this.player.position.z);
+    for (let radius = 0; radius < 60; radius += 2) {
+      for (let angle = 0; angle < 16; angle++) {
+        const x = px + Math.round(Math.cos((angle / 16) * Math.PI * 2) * radius);
+        const z = pz + Math.round(Math.sin((angle / 16) * Math.PI * 2) * radius);
+        for (let y = 6; y < 20; y++) {
+          if (this.world.getBlock(x, y, z) !== Block.Lava) continue;
+          this.player.position.set(x + 0.5, y + 0.1, z + 0.5);
+          this.player.velocity.set(0, 0, 0);
+          this.player.applyToCamera(this.camera);
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  /** Lifts the player straight up, for a wide view of the terrain below. */
+  debugRise(blocks: number): number {
+    this.player.position.y += blocks;
+    this.player.velocity.set(0, 0, 0);
+    this.player.applyToCamera(this.camera);
+    return Math.round(this.player.position.y);
+  }
+
+  /** Opens the character sheet, for inspecting what it renders. */
+  debugOpenSheet(): void {
+    this.openSheet();
+  }
+
+  /** What is currently equipped, by slot. */
+  debugEquipped(): Record<string, string | null> {
+    return { ...this.player.inventory.equipped };
+  }
+
+  /** The hotbar's item ids, for verifying an assignment landed. */
+  debugHotbar(): (string | null)[] {
+    return [...this.player.inventory.hotbar];
+  }
+
+  debugCloseSheet(): void {
+    this.screens.close();
+  }
+
+  /** Respecs for gold, returning whether it went through. */
+  debugRespec(): boolean {
+    const stats = this.player.stats;
+    const done = stats.respecSkills(respecCost(stats.level));
+    if (done) this.player.syncEquipmentDerived();
+    return done;
+  }
+
+  /** Points the camera at the ground a few blocks ahead. */
+  debugLookDown(): void {
+    this.player.pitch = -0.6;
+  }
+
+  /** Sets pitch alone, leaving whatever the camera is facing intact. */
+  debugPitch(pitch: number): void {
+    this.player.pitch = pitch;
+  }
+
+  /** Current stamina, for tests that need to know whether an action can fire. */
+  debugStamina(): number {
+    return Math.round(this.player.stats.stamina);
+  }
+
+  /**
+   * Rebuilds every loaded chunk from scratch. Diagnostic: if a shading artifact
+   * disappears after this, it was stale geometry meshed against not-yet-loaded
+   * neighbours rather than a fault in the mesher itself.
+   */
+  debugRemeshAll(): number {
+    this.world.remeshAll();
+    return this.world.flushDirty();
+  }
+
+  /** Lifts the player straight up onto a small platform, for overview shots. */
+  debugTeleportUp(height: number): void {
+    const x = Math.floor(this.player.position.x);
+    const z = Math.floor(this.player.position.z);
+    const y = Math.floor(this.player.position.y) + height;
+    for (let dz = -1; dz <= 1; dz++) {
+      for (let dx = -1; dx <= 1; dx++) this.world.setBlock(x + dx, y - 1, z + dz, Block.Planks, false);
+    }
+    this.player.position.set(x + 0.5, y, z + 0.5);
+    this.player.velocity.set(0, 0, 0);
+  }
+
+  /**
+   * Builds an inside corner of stone next to the player and aims at it. Ambient
+   * occlusion is only visible where surfaces meet, so a flat field of grass
+   * cannot tell you whether the mesher's AO is working.
+   */
+  debugBuildAoProbe(): void {
+    this.debugFlattenArena(9);
+    const x = Math.floor(this.player.position.x);
+    const y = Math.floor(this.player.position.y);
+    const z = Math.floor(this.player.position.z);
+
+    // Two walls meeting at a right angle, plus a floor, four blocks ahead.
+    const ox = x + 1;
+    const oz = z - 5;
+    for (let h = 0; h < 4; h++) {
+      for (let i = -4; i <= 4; i++) {
+        this.world.setBlock(ox + i, y + h, oz, Block.Stone, false);
+        this.world.setBlock(ox - 4, y + h, oz + i + 4, Block.Stone, false);
+      }
+    }
+    // A few isolated blocks and a step, so AO shows on convex edges too.
+    this.world.setBlock(ox, y, oz + 3, Block.Planks, false);
+    this.world.setBlock(ox + 1, y, oz + 3, Block.Planks, false);
+    this.world.setBlock(ox, y + 1, oz + 3, Block.Planks, false);
+    this.world.setBlock(ox + 2, y, oz + 2, Block.Brick, false);
+    this.world.setBlock(ox - 2, y, oz + 2, Block.Torchstone, false);
+
+    this.player.pitch = -0.12;
+    this.player.yaw = 0;
+  }
+
+  /**
+   * Per-enemy health bar state. `facing` is 1.0 when the bar squarely faces the
+   * camera; anything materially lower means the billboard is being skewed by a
+   * parent transform and the bar will look wrong or vanish edge-on.
+   */
+  debugHealthBars(): { visible: boolean; facing: number }[] {
+    const cameraForward = new THREE.Vector3(0, 0, -1).applyQuaternion(
+      this.camera.getWorldQuaternion(new THREE.Quaternion()),
+    );
+    return this.entities.enemies.map((enemy) => {
+      const { visible, worldQuaternion } = enemy.healthBarDebug;
+      const barNormal = new THREE.Vector3(0, 0, 1).applyQuaternion(worldQuaternion);
+      return { visible, facing: Number(barNormal.dot(cameraForward.clone().negate()).toFixed(3)) };
+    });
+  }
+
+  /** Combat counters plus the last reason an action was refused. */
+  debugCombatDiag(): Record<string, unknown> {
+    const active = this.player.inventory.activeItem;
+    const modeCount = availableModes(active?.weapon?.melee).length;
+    return {
+      ...this.combat.diag,
+      activeItem: this.player.inventory.activeItemId,
+      modeCount,
+      stamina: Math.round(this.player.stats.stamina),
+      pitch: Number(this.player.pitch.toFixed(2)),
+      yaw: Number(this.player.yaw.toFixed(2)),
+      mode: this.mode,
+      combatState: this.combat.debugState(),
+      useCooldown: Number(this.combat.debugUseCooldown().toFixed(3)),
+      input: { ...this.input.counters },
+    };
+  }
+
+  /** The block currently under the crosshair, if any. */
+  debugTargetBlock(): { x: number; y: number; z: number; block: number } | null {
+    const hit = this.world.raycast(this.player.eyePosition, this.player.lookDirection, 6);
+    return hit ? { x: hit.x, y: hit.y, z: hit.z, block: hit.block } : null;
+  }
+
+  /** Total number of player-edited voxels, across all chunks. */
+  debugEditedBlockCount(): number {
+    return this.world.collectEdits().reduce((sum, record) => sum + record.edits.length / 2, 0);
+  }
+
+  debugItemCount(itemId: string): number {
+    return this.player.inventory.count(itemId);
+  }
+
+  /** Test/debug helper: keeps the player alive while exercising other systems. */
+  debugSetInvulnerable(on: boolean): void {
+    this.invulnerable = on;
+  }
+
+  private invulnerable = false;
+
+  get godMode(): boolean {
+    return this.invulnerable;
+  }
+
+  // ---------------------------------------------------------------- persistence
+
+  private async save(): Promise<void> {
+    if (this.player.dead) {
+      this.hud.log('Cannot save while dead — respawn first.', 'info');
+      return;
+    }
+    try {
+      const data: SaveData = {
+        version: SAVE_VERSION,
+        savedAt: Date.now(),
+        seed: this.world.seed,
+        timeOfDay: this.time.fraction,
+        player: {
+          x: this.player.position.x,
+          y: this.player.position.y,
+          z: this.player.position.z,
+          yaw: this.player.yaw,
+          pitch: this.player.pitch,
+        },
+        stats: this.player.stats.snapshot(),
+        inventory: this.player.inventory.snapshot(),
+        edits: this.world.collectEdits(),
+      };
+      await writeSave(data);
+      this.hud.log(`Saved. (${data.edits.length} edited chunks)`, 'good');
+    } catch (error) {
+      this.hud.log(`Save failed: ${(error as Error).message}`, 'hurt');
+    }
+  }
+
+  private async load(): Promise<void> {
+    try {
+      const data = await readSave();
+      if (!data) {
+        this.hud.log('No save found. Press F5 to make one.', 'info');
+        return;
+      }
+
+      // A different seed means a different world, so rebuild it from scratch.
+      if (data.seed !== this.world.seed) {
+        this.scene.remove(this.world.group);
+        this.world.clear();
+        this.world = new World(data.seed, RENDER_DISTANCE);
+        this.scene.add(this.world.group);
+        this.ctx.world = this.world;
+      }
+
+      this.world.applyEdits(data.edits);
+      if (typeof data.timeOfDay === 'number') this.time.fraction = data.timeOfDay;
+
+      this.player.stats.restore(data.stats);
+      this.player.inventory.restore(data.inventory);
+      this.player.syncEquipmentDerived();
+      this.player.dead = false;
+      this.player.position.set(data.player.x, data.player.y, data.player.z);
+      this.player.velocity.set(0, 0, 0);
+      this.player.yaw = data.player.yaw;
+      this.player.pitch = data.player.pitch;
+
+      this.world.ensureLoadedAround(Math.floor(data.player.x), Math.floor(data.player.z), 2);
+
+      this.entities.clear();
+      this.projectiles.clear();
+      this.pickups.clear();
+      this.particles.clear();
+      this.rain.clear();
+      this.highlight.hide();
+      this.trails.clear();
+      this.arc.hide();
+      this.combat.reset();
+      this.hud.hideDeath();
+      if (this.mode === 'dead') {
+        this.mode = 'playing';
+        this.input.requestLock();
+      }
+
+      this.hud.log('Loaded your last save.', 'good');
+    } catch (error) {
+      this.hud.log(`Load failed: ${(error as Error).message}`, 'hurt');
+    }
+  }
+}
+
+function randomSeed(): number {
+  return Math.floor(Math.random() * 0x7fffffff);
+}

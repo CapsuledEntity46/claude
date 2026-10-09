@@ -98,6 +98,9 @@ export interface StatsSnapshot {
   gold?: number;
 }
 
+/**
+ * Player stats: health, stamina, mana, and derived values.
+ */
 export class PlayerStats {
   level = 1;
   /** Cumulative XP across the whole run. */
@@ -159,6 +162,9 @@ export class PlayerStats {
   weight = 0;
   /** Max guard from the equipped shield, set by the Player each frame. */
   shieldGuard = 0;
+
+  // Status effect manager
+  private statusEffectManager = require('../combat/StatusEffectSystem').default;
 
   // ------------------------------------------------------------ derived values
 
@@ -269,7 +275,9 @@ export class PlayerStats {
   get moveSpeed(): number {
     const base = 4.6 * (1 + this.modifier('dex') * 0.025 + this.mods.moveSpeed);
     const encumbered = base * Math.max(0.55, 1 - this.weight * 0.055);
-    return this.slowTimer > 0 ? encumbered * 0.55 : encumbered;
+    // Apply status effect speed modifier (e.g., from SLOW)
+    const speedMultiplier = this.getSpeedMultiplier();
+    return this.slowTimer > 0 ? encumbered * 0.55 * speedMultiplier : encumbered * speedMultiplier;
   }
 
   /**
@@ -455,6 +463,17 @@ export class PlayerStats {
     } else {
       this.slotRegenTimer = 0;
     }
+
+    // Update status effects (DoT damage, etc.)
+    // Note: We need to pass the GameContext to the status effect manager update.
+    // However, PlayerStats does not have access to GameContext.
+    // We will call this method from Player.update or Game.update instead.
+    // For now, we'll leave it empty and call it externally.
+  }
+
+  /** Update status effects - to be called from Player or Game with context */
+  updateStatusEffects(dt: number, ctx: any): void {
+    this.statusEffectManager.update(dt, ctx);
   }
 
   spendStamina(amount: number): boolean {
@@ -515,4 +534,38 @@ export class PlayerStats {
     this.mana = Math.min(s.mana ?? this.maxMana, this.maxMana);
     this.timeSinceDamage = REGEN_DELAY;
   }
+
+  /**
+   * Get the current speed multiplier from active status effects (e.g., SLOW).
+   * @returns Multiplier (0.5 to 1.0, where 1 is normal speed)
+   */
+  getSpeedMultiplier(): number {
+    return this.statusEffectManager.getSpeedMultiplier();
+  }
+
+  /**
+   * Get the current armor multiplier from active status effects (e.g., SUNDER).
+   * @returns Multiplier (0 to 1, where 1 is normal armor)
+   */
+  getArmorMultiplier(): number {
+    return this.statusEffectManager.getArmorMultiplier();
+  }
+
+  /**
+   * Get the stagger chance from active SHOCK effect.
+   * @returns Probability (0 to 1) of stagger per second
+   */
+  getStaggerChance(): number {
+    return this.statusEffectManager.getStaggerChance();
+  }
+
+  /**
+   * Get the intensity of active BLINDNESS effect.
+   * @returns Intensity (0 to 1) of blindness
+   */
+  getBlindnessIntensity(): number {
+    return this.statusEffectManager.getBlindnessIntensity();
+  }
 }
+
+export default PlayerStats;

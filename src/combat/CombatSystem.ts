@@ -158,6 +158,16 @@ export class CombatSystem {
       return;
     }
 
+    // Check for stagger from SHOCK effect
+    const staggerChance = player.stats.getStaggerChance();
+    if (staggerChance > 0 && Math.random() < staggerChance * dt) {
+      // Stagger occurs: cancel any pending action and reset to idle
+      this.reset();
+      ctx.log('You staggered!', 'info');
+      // Skip the rest of the update for this frame
+      return;
+    }
+
     this.useCooldown = Math.max(0, this.useCooldown - dt);
     this.placeTimer = Math.max(0, this.placeTimer - dt);
     this.updateTarget(ctx);

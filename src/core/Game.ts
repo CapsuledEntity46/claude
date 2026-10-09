@@ -368,6 +368,17 @@ export class Game {
       fog.far = viewDistance * (0.97 - tighten * 0.7 - nightHaze * 0.2);
     }
 
+    // Apply blindness: darken the sky and fog, and reduce visibility
+    const blindness = this.player.stats.getBlindnessIntensity();
+    if (blindness > 0) {
+      // Darken sky and fog colors
+      this.skyColor.multiplyScalar(1 - blindness * 0.5);
+      fog.color.multiplyScalar(1 - blindness * 0.5);
+      // Reduce visible distance by making fog closer
+      fog.near *= 1 - blindness * 0.5;
+      fog.far *= 1 - blindness * 0.5;
+    }
+
     (this.scene.background as THREE.Color).copy(this.skyColor);
     this.renderer.setClearColor(this.skyColor);
 
@@ -779,6 +790,7 @@ export class Game {
     this.world.update(this.player.position.x, this.player.position.z);
     this.combat.update(dt, this.input, this.ctx);
     this.player.update(dt, this.input, this.world);
+    this.player.stats.updateStatusEffects(dt, this.ctx);
     this.drainMovementSounds();
     this.entities.update(dt, this.ctx);
     this.projectiles.update(dt, this.ctx);

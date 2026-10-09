@@ -1,4 +1,5 @@
 import type { DamageType, DefenseProfile } from '../combat/types';
+import { StatusEffectType } from '../combat/StatusEffectSystem';
 
 export interface EnemyMelee {
   damage: number;
@@ -62,6 +63,8 @@ export interface EnemyArchetype {
   aquatic?: boolean;
   /** Never attacks; flees when approached. Prey rather than a threat. */
   passive?: boolean;
+  /** Possible status effect types this enemy can inflict (for flying enemies) */
+  statusEffectTypes?: StatusEffectType[];
 }
 
 export const ARCHETYPES: readonly EnemyArchetype[] = [
@@ -225,6 +228,80 @@ export const ARCHETYPES: readonly EnemyArchetype[] = [
       { itemId: 'healing_draught', chance: 0.5, min: 1, max: 2 },
     ],
     hint: 'It will send you flying. Keep a wall behind you or you will land badly.',
+  },
+  // Flying enemies: Swooper (Melee Flyer) and Kiter (Ranged Flyer)
+  {
+    id: 'swooper',
+    name: 'Swooper',
+    minLevel: 3,
+    weight: 10,
+    baseHp: 22,
+    hpPerLevel: 5,
+    speed: 0, // Speed is handled by flying behavior, not ground movement
+    aggroRange: 18,
+    xp: 25,
+    look: { body: 0xa05050, head: 0xc07070, accent: 0xe09090, scale: 1.2 },
+    defense: { armor: 1, resist: { slash: 0, pierce: 0, blunt: 0, magic: 0.1 } },
+    armorPerTier: 0,
+    melee: {
+      damage: 10,
+      type: 'magic',
+      reach: 3.0,
+      windup: 1.5, // Telegraphed wind-up
+      recovery: 0.5, // Recovery will be handled by our custom logic
+      cooldown: 3.0,
+      armorPierce: 0.1,
+      knockback: 4
+    },
+    // Define possible status effects for this archetype
+    statusEffectTypes: [
+      StatusEffectType.BURN,
+      StatusEffectType.POISON,
+      StatusEffectType.BLEED,
+      StatusEffectType.SLOW,
+      StatusEffectType.SHOCK,
+      StatusEffectType.KNOCKBACK,
+      StatusEffectType.BLINDNESS,
+      StatusEffectType.SUNDER
+    ],
+  },
+  {
+    id: 'kiter',
+    name: 'Kiter',
+    minLevel: 4,
+    weight: 8,
+    baseHp: 18,
+    hpPerLevel: 4,
+    speed: 0, // Speed is handled by flying behavior
+    aggroRange: 20,
+    xp: 30,
+    look: { body: 0x5050a0, head: 0x7070c0, accent: 0x9090e0, scale: 1.2 },
+    defense: { armor: 1, resist: { slash: 0, pierce: 0, blunt: 0, magic: 0.1 } },
+    armorPerTier: 0,
+    ranged: {
+      damage: 8,
+      type: 'magic',
+      speed: 25,
+      gravity: 0.2,
+      windup: 1.0, // Telegraphed wind-up for ranged
+      cooldown: 4.0,
+      armorPierce: 0.2,
+      spreadDeg: 10.0, // Wide spread for burst? We'll handle burst in the class
+      look: 'magic',
+      color: 0x8080ff,
+      standoff: 8, // Preferred standoff distance
+    },
+    // Define possible status effects for this archetype
+    statusEffectTypes: [
+      StatusEffectType.BURN,
+      StatusEffectType.POISON,
+      StatusEffectType.BLEED,
+      StatusEffectType.SLOW,
+      StatusEffectType.SHOCK,
+      StatusEffectType.KNOCKBACK,
+      StatusEffectType.BLINDNESS,
+      StatusEffectType.SUNDER
+    ],
   },
 ];
 

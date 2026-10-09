@@ -2,8 +2,10 @@ import * as THREE from 'three';
 import type { EnemyWorld, GameContext } from '../core/Context';
 import { computeDamage, type DamageInput } from '../combat/types';
 import { mulberry32 } from '../world/noise';
-import { archetypeById, FISH, pickArchetype } from './archetypes';
+import { archetypeById, FISH, pickArchetype, type EnemyArchetype } from './archetypes';
 import { Enemy } from './Enemy';
+import Swooper from './Swooper';
+import Kiter from './Kiter';
 import { rollLoot, xpForKill, rollGold} from './loot';
 import type { PickupManager } from './Pickups';
 
@@ -27,7 +29,7 @@ const SEPARATION_RADIUS = 1.1;
  */
 export class EntityManager implements EnemyWorld {
   readonly group = new THREE.Group();
-  private list: Enemy[] = [];
+  private list: (Enemy | Swooper | Kiter)[] = [];
   private ctx!: GameContext;
   private pickups: PickupManager;
   private rng = mulberry32(0xbeef);
@@ -46,7 +48,7 @@ export class EntityManager implements EnemyWorld {
     this.ctx = ctx;
   }
 
-  get enemies(): readonly Enemy[] {
+  get enemies(): readonly (Enemy | Swooper | Kiter)[] {
     return this.list;
   }
 
@@ -55,8 +57,9 @@ export class EntityManager implements EnemyWorld {
   }
 
   /** Fish are never worth alerting, and never chase. */
-  private static isThreat(enemy: Enemy): boolean {
-    return !enemy.archetype.passive;
+  private static isThreat(enemy: Enemy | Swooper | Kiter): boolean {
+    // Fish are passive, others are not
+    return !(enemy as Enemy).archetype.passive;
   }
 
   /** Test hook: the current hostile population ceiling. */
@@ -73,21 +76,21 @@ export class EntityManager implements EnemyWorld {
 
   // ---------------------------------------------------------------- queries
 
-  enemiesInSphere(center: THREE.Vector3, radius: number): Enemy[] {
-    const out: Enemy[] = [];
+  enemiesInSphere(center: THREE.Vector3, radius: number): (Enemy | Swooper | Kiter)[] {
+    const out: (Enemy | Swooper | Kiter)[] = [];
     const r2 = radius * radius;
     for (const e of this.list) {
-      if (e.dead) continue;
+      if ((e as Enemy).dead) continue;
       if (e.center.distanceToSquared(center) <= r2) out.push(e);
     }
     return out;
   }
 
-  nearestEnemy(from: THREE.Vector3, maxDistance: number, exclude?: ReadonlySet<Enemy>): Enemy | null {
-    let best: Enemy | null = null;
+  nearestEnemy(from: THREE.Vector3, maxDistance: number, exclude?: ReadonlySet<Enemy | Swooper | Kiter>): Enemy | Swooper | Kiter | null {
+    let best: Enemy | Swooper | Kiter | null = null;
     let bestDistance = maxDistance * maxDistance;
     for (const e of this.list) {
-      if (e.dead || exclude?.has(e)) continue;
+      if ((e as Enemy).dead || exclude?.has(e)) continue;
       const d = e.center.distanceToSquared(from);
       if (d < bestDistance) {
         bestDistance = d;
@@ -100,7 +103,7 @@ export class EntityManager implements EnemyWorld {
   alert(position: THREE.Vector3, radius: number): void {
     const r2 = radius * radius;
     for (const e of this.list) {
-      if (!e.dead && EntityManager.isThreat(e) && e.center.distanceToSquared(position) <= r2) e.alert(this.ctx);
+      if (!(e as Enemy).dead && EntityManager.isThreat(e) && e.center.distanceToSquared(position) <= r2) e.alert(this.ctx);
     }
   }
 
@@ -110,16 +113,16 @@ export class EntityManager implements EnemyWorld {
    * Single entry point for hurting an enemy. Resolves the damage formula,
    * shows feedback, and pays out XP and loot on death.
    */
-  damageEnemy(enemy: Enemy, input: DamageInput, from: THREE.Vector3, knockback: number): void {
-    if (enemy.dead) return;
-    const result = computeDamage(input, enemy.defense, this.rng);
-    const direction = enemy.center.clone().sub(from);
+  damageEnemy(enemy: Enemy | Swooper | Kiter, input: DamageInput, from: THREE.Vector3, knockback: number): void {
+    if ((enemy as Enemy).dead) return;
+    const result = computeDamage(input, (enemy as Enemy).defense, this.rng);
+    const direction = (enemy as Enemy).center.clone().sub(from);
     if (direction.lengthSq() < 1e-6) direction.set(0, 0, 1);
 
-    const killed = enemy.applyDamage(result, direction, knockback, this.ctx);
+    const killed = (enemy as Enemy).applyDamage(result, direction, knockback, this.ctx);
 
     this.ctx.floater(
-      enemy.center.clone().add(new THREE.Vector3(0, 0.4, 0)),
+      (enemy as Enemy).center.clone().add(new THREE.Vector3(0, 0.4, 0)),
       result.crit ? `${result.damage} CRIT` : `${result.damage}`,
       result.crit ? 'crit' : 'dmg',
     );
@@ -127,42 +130,42 @@ export class EntityManager implements EnemyWorld {
     // Tell the player when armour is eating most of the hit — that is the cue to
     // switch to a thrust or a blunt weapon.
     if (!killed && result.mitigated > result.damage * 1.2) {
-      this.ctx.log(`${enemy.archetype.name}'s armor turns most of that aside.`, 'info');
+      this.ctx.log(`${(enemy as Enemy).archetype.name}'s armor turns most of that aside.`, 'info');
     }
 
     if (killed) this.onKill(enemy);
   }
 
-  private onKill(enemy: Enemy): void {
-    const xp = xpForKill(enemy.archetype, enemy.level);
-    this.pickups.spawnOrbs(enemy.center, xp);
+  private onKill(enemy: Enemy | Swooper | Kiter): void {
+    const xp = xpForKill((enemy as Enemy).archetype, (enemy as Enemy).level);
+    this.pickups.spawnOrbs((enemy as Enemy).center, xp);
 
     // Mana has no passive regeneration, so kills are the main way casters refuel.
     // Casters carry more of it, which gives a reason to hunt them specifically.
-    const isCaster = enemy.archetype.ranged?.look === 'magic';
-    if (!enemy.archetype.passive && this.rng() < (isCaster ? 0.85 : 0.45)) {
-      const mana = Math.round((isCaster ? 16 : 8) + enemy.level * 1.6);
-      this.pickups.spawnOrbs(enemy.center, mana, 'mana');
+    const isCaster = (enemy as Enemy).archetype.ranged?.look === 'magic';
+    if (! (enemy as Enemy).archetype.passive && this.rng() < (isCaster ? 0.85 : 0.45)) {
+      const mana = Math.round((isCaster ? 16 : 8) + (enemy as Enemy).level * 1.6);
+      this.pickups.spawnOrbs((enemy as Enemy).center, mana, 'mana');
     }
 
     // Coin. Not every kill pays, so finding a purse stays a small event rather
     // than becoming background noise.
-    const gold = rollGold(enemy.archetype, enemy.level, this.rng);
-    if (gold > 0) this.pickups.spawnOrbs(enemy.center, gold, 'gold');
+    const gold = rollGold((enemy as Enemy).archetype, (enemy as Enemy).level, this.rng);
+    if (gold > 0) this.pickups.spawnOrbs((enemy as Enemy).center, gold, 'gold');
 
-    const loot = rollLoot(enemy.archetype, enemy.level, this.rng);
-    if (loot.length > 0) this.pickups.spawnLoot(enemy.center, loot);
+    const loot = rollLoot((enemy as Enemy).archetype, (enemy as Enemy).level, this.rng);
+    if (loot.length > 0) this.pickups.spawnLoot((enemy as Enemy).center, loot);
 
-    this.ctx.log(`${enemy.name} falls.`, 'good');
+    this.ctx.log(`${(enemy as Enemy).name} falls.`, 'good');
 
     // A block-break shatter: the enemy bursts into a shower of square particles
     // coloured from its own materials, which arc under gravity and blink out.
     this.ctx.particles.spawnBreakParticles(
-      enemy.center,
-      enemy.breakPalette(),
+      (enemy as Enemy).center,
+      (enemy as Enemy).breakPalette(),
       24 + Math.floor(this.rng() * 14),
-      Math.max(0.5, enemy.radius * 2.2),
-      4.2 + enemy.radius,
+      Math.max(0.5, (enemy as Enemy).radius * 2.2),
+      4.2 + (enemy as Enemy).radius,
     );
   }
 
@@ -176,7 +179,7 @@ export class EntityManager implements EnemyWorld {
     for (let i = this.list.length - 1; i >= 0; i--) {
       const e = this.list[i];
       e.update(dt, ctx);
-      if (e.removable || e.center.distanceTo(ctx.player.position) > DESPAWN_DISTANCE) {
+      if ((e as Enemy).removable || e.center.distanceTo(ctx.player.position) > DESPAWN_DISTANCE) {
         e.dispose();
         this.group.remove(e.group);
         this.list.splice(i, 1);
@@ -196,14 +199,14 @@ export class EntityManager implements EnemyWorld {
   private separate(): void {
     for (let i = 0; i < this.list.length; i++) {
       const a = this.list[i];
-      if (a.dead) continue;
+      if ((a as Enemy).dead) continue;
       for (let j = i + 1; j < this.list.length; j++) {
         const b = this.list[j];
-        if (b.dead) continue;
+        if ((b as Enemy).dead) continue;
         const dx = b.position.x - a.position.x;
         const dz = b.position.z - a.position.z;
         const d2 = dx * dx + dz * dz;
-        const minDistance = SEPARATION_RADIUS * (a.radius + b.radius) / 0.7;
+        const minDistance = SEPARATION_RADIUS * ((a as Enemy).radius + (b as Enemy).radius) / 0.7;
         if (d2 > minDistance * minDistance || d2 < 1e-6) continue;
         const d = Math.sqrt(d2);
         const push = ((minDistance - d) / minDistance) * 2.4;
@@ -218,13 +221,13 @@ export class EntityManager implements EnemyWorld {
   /** Hostiles only — fish do not count against the combat budget. */
   get hostileCount(): number {
     let n = 0;
-    for (const e of this.list) if (!e.archetype.passive && !e.dead) n++;
+    for (const e of this.list) if (! (e as Enemy).archetype.passive && ! (e as Enemy).dead) n++;
     return n;
   }
 
   get fishCount(): number {
     let n = 0;
-    for (const e of this.list) if (e.archetype.passive && !e.dead) n++;
+    for (const e of this.list) if ((e as Enemy).archetype.passive && ! (e as Enemy).dead) n++;
     return n;
   }
 
@@ -343,7 +346,7 @@ export class EntityManager implements EnemyWorld {
     return null;
   }
 
-  spawnAt(position: THREE.Vector3, playerLevel: number): Enemy | null {
+  spawnAt(position: THREE.Vector3, playerLevel: number): Enemy | Swooper | Kiter | null {
     // Mostly around the player's level, with an occasional dangerous outlier
     // that is worth a lot of XP and carries better loot.
     const roll = this.rng();
@@ -351,11 +354,34 @@ export class EntityManager implements EnemyWorld {
     const level = Math.max(1, playerLevel + delta);
 
     const archetype = pickArchetype(level, this.rng);
-    const enemy = new Enemy(archetype, level, position, this.rng);
-    this.list.push(enemy);
-    this.group.add(enemy.group);
+    let enemy: Enemy | Swooper | Kiter | null = null;
 
-    if (!this.seen.has(archetype.id)) this.seen.add(archetype.id);
+    // Check if this archetype is a flying enemy (has status effect types)
+    if (archetype.statusEffectTypes && archetype.statusEffectTypes.length > 0) {
+      // Pick a random status effect type from the list
+      const statusEffectTypes = archetype.statusEffectTypes;
+      const randomStatusEffect = statusEffectTypes[Math.floor(this.rng() * statusEffectTypes.length)];
+
+      if (archetype.id === 'swooper') {
+        enemy = new Swooper(archetype, level, position, randomStatusEffect, this.rng);
+      } else if (archetype.id === 'kiter') {
+        enemy = new Kiter(archetype, level, position, randomStatusEffect, this.rng);
+      } else {
+        // Fallback to regular Enemy (should not happen with current archetypes)
+        enemy = new Enemy(archetype, level, position, this.rng);
+      }
+    } else {
+      // Regular enemy
+      enemy = new Enemy(archetype, level, position, this.rng);
+    }
+
+    if (enemy) {
+      this.list.push(enemy);
+      this.group.add(enemy.group);
+
+      if (!this.seen.has(archetype.id)) this.seen.add(archetype.id);
+    }
+
     return enemy;
   }
 
@@ -363,13 +389,36 @@ export class EntityManager implements EnemyWorld {
    * Spawns one named archetype. Used by the screenshot scripts, which need to look
    * at a particular creature rather than whatever the spawn roll produced.
    */
-  spawnArchetypeAt(position: THREE.Vector3, archetypeId: string, level: number): Enemy | null {
+  spawnArchetypeAt(position: THREE.Vector3, archetypeId: string, level: number): Enemy | Swooper | Kiter | null {
     const archetype = archetypeById(archetypeId);
     if (!archetype) return null;
-    const enemy = new Enemy(archetype, Math.max(1, level), position, this.rng);
-    this.list.push(enemy);
-    this.group.add(enemy.group);
-    this.seen.add(archetype.id);
+    let enemy: Enemy | Swooper | Kiter | null = null;
+
+    // Check if this archetype is a flying enemy (has status effect types)
+    if (archetype.statusEffectTypes && archetype.statusEffectTypes.length > 0) {
+      // Pick a random status effect type from the list
+      const statusEffectTypes = archetype.statusEffectTypes;
+      const randomStatusEffect = statusEffectTypes[Math.floor(this.rng() * statusEffectTypes.length)];
+
+      if (archetype.id === 'swooper') {
+        enemy = new Swooper(archetype, level, position, randomStatusEffect, this.rng);
+      } else if (archetype.id === 'kiter') {
+        enemy = new Kiter(archetype, level, position, randomStatusEffect, this.rng);
+      } else {
+        // Fallback to regular Enemy (should not happen with current archetypes)
+        enemy = new Enemy(archetype, level, position, this.rng);
+      }
+    } else {
+      // Regular enemy
+      enemy = new Enemy(archetype, level, position, this.rng);
+    }
+
+    if (enemy) {
+      this.list.push(enemy);
+      this.group.add(enemy.group);
+      this.seen.add(archetype.id);
+    }
+
     return enemy;
   }
 
@@ -383,3 +432,5 @@ export class EntityManager implements EnemyWorld {
     this.fishTimer = 3;
   }
 }
+
+export default EntityManager;

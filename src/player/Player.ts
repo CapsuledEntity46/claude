@@ -135,7 +135,10 @@ export class Player {
     // Thick Hide is folded in as its own profile rather than added to the armour
     // def, so a skill cannot be mistaken for the equipment's own rating.
     const skills: DefenseProfile = { armor: this.stats.skillArmor, resist: {} };
-    return combineDefense([armor, ward, skills]);
+    const combined = combineDefense([armor, ward, skills]);
+    // Apply armor multiplier from status effects (e.g., SUNDER)
+    const armorMultiplier = this.stats.getArmorMultiplier();
+    return { ...combined, armor: combined.armor * armorMultiplier };
   }
 
   get canBlock(): boolean {
